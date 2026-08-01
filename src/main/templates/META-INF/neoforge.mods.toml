@@ -1,0 +1,36 @@
+modLoader="javafml"
+loaderVersion="${loader_version_range}"
+license="${mod_license}"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+authors="KlNon"
+# 仅服务端安装,客户端无需存在
+displayTest="IGNORE_ALL_VERSION"
+description='''
+Read-only instrumentation for Sable sub-levels: lifecycle JSONL log, physics tick timing, /sablepanel dump snapshots.
+Sable 物理体只读插桩:生命周期 JSONL 日志 / 物理 tick 计时 / /sablepanel dump 全量快照。仅服务端安装。
+'''
+
+[[dependencies.${mod_id}]]
+modId="neoforge"
+type="required"
+versionRange="${neo_version_range}"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="minecraft"
+type="required"
+versionRange="${minecraft_version_range}"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="sable"
+type="required"
+versionRange="[2.0,)"
+ordering="AFTER"
+side="BOTH"
