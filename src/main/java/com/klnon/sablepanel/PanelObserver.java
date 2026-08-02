@@ -8,14 +8,21 @@ import dev.ryanhcode.sable.sublevel.SubLevel;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
 import org.joml.Vector3dc;
 
+import java.util.ArrayDeque;
 import java.util.UUID;
 
 /**
  * 生命周期观察者:add/remove 各写一行 JSONL。
+ * 附带碎片风暴告警:1 分钟内 split 出的新体超阈值时 WARN(增殖事故现行抓捕)。
  * 回调在容器主循环里,任何异常都必须吞掉,不能影响 sable 本体。
  */
 public final class PanelObserver implements SubLevelObserver {
+    private static final int STORM_WINDOW_MS = 60_000;
+    private static final int STORM_THRESHOLD = 30;
+
     private final String dim;
+    private final ArrayDeque<Long> splitTimes = new ArrayDeque<>();
+    private long lastStormAlert;
 
     public PanelObserver(String dim) {
         this.dim = dim;
@@ -30,11 +37,32 @@ public final class PanelObserver implements SubLevelObserver {
                 UUID splitFrom = ssl.getSplitFromSubLevel();
                 if (splitFrom != null) {
                     o.addProperty("split_from", splitFrom.toString());
+                    checkFragmentStorm(splitFrom);
                 }
             }
             EventLog.write(o);
         } catch (Throwable t) {
             SablePanel.LOGGER.warn("sablepanel: observer add failed", t);
+        }
+    }
+
+    private void checkFragmentStorm(UUID splitFrom) {
+        long now = System.currentTimeMillis();
+        this.splitTimes.addLast(now);
+        while (!this.splitTimes.isEmpty() && now - this.splitTimes.peekFirst() > STORM_WINDOW_MS) {
+            this.splitTimes.pollFirst();
+        }
+        if (this.splitTimes.size() >= STORM_THRESHOLD && now - this.lastStormAlert > STORM_WINDOW_MS) {
+            this.lastStormAlert = now;
+            SablePanel.LOGGER.warn("sablepanel: FRAGMENT STORM in {} - {} split-bodies within 1min (last from {})",
+                    this.dim, this.splitTimes.size(), splitFrom);
+            JsonObject alert = new JsonObject();
+            alert.addProperty("ev", "alert");
+            alert.addProperty("kind", "fragment_storm");
+            alert.addProperty("dim", this.dim);
+            alert.addProperty("splits_1min", this.splitTimes.size());
+            alert.addProperty("last_split_from", splitFrom.toString());
+            EventLog.write(alert);
         }
     }
 
