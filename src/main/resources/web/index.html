@@ -226,6 +226,10 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
 .compRow .cnum{font-family:var(--mono);color:var(--dim);font-size:11.5px}
 .compMore{cursor:pointer;color:var(--acc);font-size:11.5px;padding:5px 0;user-select:none}
 .compMore:hover{text-decoration:underline}
+/* 多选 */
+.gsel,.msel{width:13px;height:13px;flex:none;cursor:pointer;margin:0}
+#selSeg{display:inline-flex;gap:8px;align-items:center;margin-left:auto}
+#selSeg .selInfo{color:var(--acc);font-weight:600;white-space:nowrap}
 .ops{padding:13px 15px;border-top:1px solid var(--line);background:#131824}
 .ops .row{display:flex;gap:8px;align-items:center;margin-bottom:9px;flex-wrap:wrap}
 .ops .row:last-child{margin-bottom:0}
@@ -500,6 +504,14 @@ const I18N = {
     tokenFail:'修改口令失败:',
     scanInfo:'磁盘索引每 120 秒自动刷新;删除/传送后会立即触发',
     physBodies:'物理体逻辑', physEngine:'物理引擎',
+    selInfo:(n,b)=>`已选 ${n} 体 · ${fmt(b)} 块`, selDel:'删除所选', selClear:'清空',
+    selAdopt:(n)=>`收养所选孤儿 (${n})`,
+    selDelT:'删除所选物理体',
+    selDelMsg:(n,b)=>`将删除勾选的 ${n} 个物理体,共 ${fmt(b)} 块。\n每个体都会先备份到回收站,可随时恢复。`,
+    selDelPartial:(n)=>`⚠ 有 ${n} 个依赖组只勾选了部分成员:删除依赖成员后,组内剩余的体可能无法加载。`,
+    selAdoptT:'批量收养孤儿',
+    selAdoptMsg:(n)=>`将逐个收养勾选中的 ${n} 个孤儿体(依赖一并接入,不修改磁盘数据)。`,
+    selAdoptDone:(o,n)=>`收养完成:${o}/${n}`,
   },
   en: {
     navDash:'Overview', navBodies:'Bodies', refresh:'Refresh',
@@ -572,6 +584,14 @@ const I18N = {
     tokenFail:'Changing the token failed: ',
     scanInfo:'Disk index refreshes every 120s; delete/teleport triggers it immediately',
     physBodies:'Body logic', physEngine:'Physics engine',
+    selInfo:(n,b)=>`${n} selected · ${fmt(b)} blocks`, selDel:'Delete selected', selClear:'Clear',
+    selAdopt:(n)=>`Adopt selected orphans (${n})`,
+    selDelT:'Delete selected bodies',
+    selDelMsg:(n,b)=>`Deletes the ${n} checked bodies, ${fmt(b)} blocks total.\nEach is backed up to the recycle bin first — recoverable at any time.`,
+    selDelPartial:(n)=>`⚠ ${n} dependency group(s) are only partially checked: remaining members may fail to load after deletion.`,
+    selAdoptT:'Batch adopt orphans',
+    selAdoptMsg:(n)=>`Adopts the ${n} checked orphan bodies one by one (dependencies included, disk untouched).`,
+    selAdoptDone:(o,n)=>`Adopted ${o}/${n}`,
   }
 };
 let LANG = localStorage.getItem('spLang') || 'zh';
@@ -604,6 +624,9 @@ let refreshTimer = 60;
 
 /* 集群:同机多服共用一个端口,顶栏切换;CURSRV 为空表示"本机 HOST 自己" */
 let SERVERS = [], CURSRV = localStorage.getItem('spServer') || '';
+
+/* 多选:跨页签/筛选保留,切服清空;BODY_BY_UUID 随 DATA 重建 */
+let SELECTED = new Set(), BODY_BY_UUID = new Map();
 
 async function api(path, opts) {
   const sep = path.includes('?') ? '&' : '?';
@@ -714,6 +737,7 @@ async function switchServer(id){
   localStorage.setItem('spServer', CURSRV);
   // 切服等于换了一整套数据,旧的一律作废
   DATA = STATS = RECYCLE = null; SEL = SELG = MESH_DATA = MESH_UUID = null;
+  SELECTED = new Set(); BODY_BY_UUID = new Map();
   document.getElementById('dbody').innerHTML =
     `<div id="detailEmpty"><span class="big">⬢</span><span>${t('pickBody')}</span></div>`;
   document.getElementById('ops').style.display = 'none';
@@ -730,6 +754,9 @@ async function loadBodies() {
   try {
     const keepUuid = SEL && SEL.uuid;
     DATA = await api('/api/bodies');
+    BODY_BY_UUID = new Map();
+    DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));
+    SELECTED = new Set([...SELECTED].filter(u => BODY_BY_UUID.has(u)));
     const dims = new Set();
     DATA.groups.forEach(g => g.bodies.forEach(b => dims.add(b.dim)));
     const prevChecked = new Set([...document.querySelectorAll('.fDim:checked')].map(x=>x.value));
@@ -947,12 +974,14 @@ function render() {
     tags.push(`<span class="tag mono">${fmt(g.blocks)} ${t('blocksUnit')}</span>`);
     tags.push(`<span class="tag">${esc(g.dims.replace(/minecraft:/g,''))}</span>`);
     div.innerHTML = `<div class="ghead">
+        <input type="checkbox" class="gsel">
         <span class="caret">▶</span>
         <span class="gname">${esc(g.name) || '<span class="muted">'+t('unnamed')+'</span>'}</span>
         ${tags.join('')}
       </div><div class="members"></div>`;
     const mem = div.querySelector('.members');
     const caret = div.querySelector('.caret');
+    div.querySelector('.gsel').onclick = e => { e.stopPropagation(); toggleSelGroup(vis); };
     for (const b of vis) {
       const m = document.createElement('div'); m.className = 'member'; m.dataset.uuid = b.uuid;
       if (SEL && SEL.uuid === b.uuid) m.classList.add('sel');
@@ -962,12 +991,14 @@ function render() {
       if (b.deps) extra.push(`<span class="tag">${t('depsX')} ${b.deps}</span>`);
       if (b.runtime && b.runtime.cost_ms !== undefined)
         extra.push(`<span class="tag acc mono">${b.runtime.cost_ms.toFixed(2)} ms/t</span>`);
-      m.innerHTML = `<i class="dot" style="background:${STATE_DOT[b.state]}" title="${stateLabel(b.state)}"></i>
+      m.innerHTML = `<input type="checkbox" class="msel">
+        <i class="dot" style="background:${STATE_DOT[b.state]}" title="${stateLabel(b.state)}"></i>
         <span class="mname">${esc(b.name) || '<span class="muted mono">'+b.uuid.slice(0,8)+'</span>'}</span>
         ${extra.join('')}
         <span class="num">${fmt(b.blocks)} ${t('blocksUnit')}</span>
         <span class="num">${b.pos.map(v=>v|0).join(', ')}</span>`;
       m.onclick = () => select(b, g);
+      m.querySelector('.msel').onclick = e => { e.stopPropagation(); toggleSel(b.uuid); };
       mem.appendChild(m);
     }
     div.querySelector('.ghead').onclick = () => {
@@ -990,6 +1021,7 @@ function render() {
     list.appendChild(btn);
   }
   renderToolbar(matchedGroups, DATA.groups.filter(inTab).length);
+  updateSelUI();
 }
 
 function renderToolbar(matched, tabTotal){
@@ -998,6 +1030,7 @@ function renderToolbar(matched, tabTotal){
     <button class="warnb" onclick="resetFilters()">${t('resetFilters')}</button>`);
   parts.push(`<button onclick="expandAll(true)">${t('expandAll')}</button>`);
   parts.push(`<button onclick="expandAll(false)">${t('collapseAll')}</button>`);
+  parts.push(`<span id="selSeg"></span>`);
   if (TAB === 'rec' && lastVisibleGroups.length) {
     const bodies = lastVisibleGroups.reduce((s,g)=>s+g.members, 0);
     parts.push(`<button class="warnb" style="margin-left:auto" onclick="doDeleteRecommended()">${t('recBatch')(lastVisibleGroups.length, bodies)}</button>`);
@@ -1021,6 +1054,74 @@ function resetFilters(silent){
   renderLimit = 400;
   if (!silent) onBlockFilter();
 }
+/* ===================== 多选 ===================== */
+function toggleSel(u){ SELECTED.has(u) ? SELECTED.delete(u) : SELECTED.add(u); updateSelUI(); }
+function toggleSelGroup(bodies){
+  // 组头复选框 = 全选/取消该组当前可见的成员(被筛选隐藏的不动)
+  const all = bodies.every(b => SELECTED.has(b.uuid));
+  for (const b of bodies) all ? SELECTED.delete(b.uuid) : SELECTED.add(b.uuid);
+  updateSelUI();
+}
+function clearSel(){ SELECTED.clear(); updateSelUI(); }
+function updateSelUI(){
+  document.querySelectorAll('#list .group').forEach(div => {
+    let on = 0, all = 0;
+    div.querySelectorAll('.msel').forEach(cb => {
+      cb.checked = SELECTED.has(cb.closest('.member').dataset.uuid);
+      if (cb.checked) on++;
+      all++;
+    });
+    const g = div.querySelector('.gsel');
+    if (g) { g.checked = on > 0 && on === all; g.indeterminate = on > 0 && on < all; }
+  });
+  const seg = document.getElementById('selSeg');
+  if (!seg) return;
+  if (!SELECTED.size) { seg.innerHTML = ''; return; }
+  let blocks = 0, orphans = 0;
+  for (const u of SELECTED) {
+    const e = BODY_BY_UUID.get(u);
+    if (e) { blocks += e.b.blocks; if (e.b.state === 'orphan') orphans++; }
+  }
+  seg.innerHTML = `<span class="selInfo">${t('selInfo')(SELECTED.size, blocks)}</span>
+    <button class="danger" onclick="doDeleteSelected()">${t('selDel')}</button>
+    ${orphans ? `<button onclick="doAdoptSelected()">${t('selAdopt')(orphans)}</button>` : ''}
+    <button class="ghost" onclick="clearSel()">${t('selClear')}</button>`;
+}
+async function doDeleteSelected(){
+  let uuids = [...SELECTED].filter(u => BODY_BY_UUID.has(u));
+  if (!uuids.length) return;
+  let blocks = 0;
+  const partial = new Set();
+  for (const u of uuids) {
+    const e = BODY_BY_UUID.get(u);
+    blocks += e.b.blocks;
+    // 依赖组只勾了一部分:删掉被依赖的成员,剩下的会加载失败(sable 已知缺陷),提醒一句
+    if (e.g.members > 1 && !e.g.bodies.every(x => SELECTED.has(x.uuid))) partial.add(e.g.gid);
+  }
+  let msg = t('selDelMsg')(uuids.length, blocks);
+  if (partial.size) msg += '\n' + t('selDelPartial')(partial.size);
+  if (!await askModal(t('selDelT'), msg, false)) return;
+  if (uuids.length > 500) { toast(t('recTooMany'), 'bad'); uuids = uuids.slice(0, 500); }
+  await batchDelete(uuids);
+  clearSel();
+}
+async function doAdoptSelected(){
+  const orphans = [...SELECTED].map(u => BODY_BY_UUID.get(u))
+    .filter(e => e && e.b.state === 'orphan').map(e => e.b.uuid);
+  if (!orphans.length) return;
+  if (!await askModal(t('selAdoptT'), t('selAdoptMsg')(orphans.length), false)) return;
+  busy(t('loading'));
+  let ok = 0;
+  for (const u of orphans) {   // 串行:收养走服务端主线程,别并发轰
+    try { const r = await api(`/api/body/${u}/adopt`, {method:'POST'}); if (r.ok) ok++; }
+    catch(e){}
+  }
+  busy(null);
+  toast(t('selAdoptDone')(ok, orphans.length), ok === orphans.length ? 'ok' : 'bad');
+  clearSel();
+  setTimeout(loadBodies, 1200);
+}
+
 function focusBody(uuid){
   setView('bodies', {tab:'all', reset:true});
   const found = DATA.groups.find(g => g.bodies.some(b => b.uuid === uuid));
