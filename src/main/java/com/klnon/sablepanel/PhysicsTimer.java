@@ -30,7 +30,13 @@ public final class PhysicsTimer {
             if (t0 == null) {
                 return;
             }
-            STATS.computeIfAbsent(system, k -> new Stat()).add(System.nanoTime() - t0);
+            long dur = System.nanoTime() - t0;
+            STATS.computeIfAbsent(system, k -> new Stat()).add(dur);
+            try {
+                com.klnon.sablepanel.panel.StatsCollector.INSTANCE.physics(
+                        system.getLevel().dimension().location().toString(), dur);
+            } catch (Throwable ignored) {
+            }
         } catch (Throwable ignored) {
         }
     }
@@ -38,9 +44,12 @@ public final class PhysicsTimer {
     /** 取出并重置所有统计,key = 维度 id */
     public static Map<String, Snapshot> drain() {
         Map<String, Snapshot> result = new HashMap<>();
-        for (Map.Entry<SubLevelPhysicsSystem, Stat> entry : STATS.entrySet()) {
+        for (var it = STATS.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<SubLevelPhysicsSystem, Stat> entry = it.next();
             Snapshot snap = entry.getValue().drain();
             if (snap.count() == 0) {
+                // 整个周期无活动:顺手移除,防止 map 囤积已废弃物理系统的强引用
+                it.remove();
                 continue;
             }
             String dim;
