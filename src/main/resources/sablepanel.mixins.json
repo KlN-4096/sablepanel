@@ -1,0 +1,12 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "com.klnon.sablepanel.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ServerSubLevelMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}
