@@ -1,0 +1,17 @@
+# 构建产物与 IDE
+.gradle/
+.idea/
+build/
+libs/
+
+# 本地测试服务端(runServer / runServer2)与其日志
+run/
+run2/
+run-server*.log
+
+# 本地分析脚本与扫描数据(tools/ 内含服务器凭据,勿入库)
+tools/
+data/
+
+# Claude Code 本地配置
+.claude/
