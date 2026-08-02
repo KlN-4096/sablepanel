@@ -30,6 +30,12 @@ neoForge {
             server()
             programArgument '--nogui'
         }
+        // 同机第二个服务端:用来验证面板集群(抢端口选主 / 挂靠 / 接管)
+        server2 {
+            server()
+            programArgument '--nogui'
+            gameDirectory = file('run2')
+        }
     }
 
     mods {
