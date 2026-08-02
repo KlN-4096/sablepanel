@@ -10,8 +10,8 @@ authors="KlNon"
 # 仅服务端安装,客户端无需存在
 displayTest="IGNORE_ALL_VERSION"
 description='''
-Read-only instrumentation for Sable sub-levels: lifecycle JSONL log, physics tick timing, /sablepanel dump snapshots.
-Sable 物理体只读插桩:生命周期 JSONL 日志 / 物理 tick 计时 / /sablepanel dump 全量快照。仅服务端安装。
+Web admin panel for Sable sub-levels: full-save disk index, cleanup suggestions, teleport/delete/adopt with a recycle bin, 3D voxel preview, per-body cost profiling, multi-server clustering on one port. Server-side only.
+Sable 物理体网页管理面板:全量存档索引 / 清理建议 / 传送・删除・孤儿收养(带回收站)/ 3D 体素预览 / 逐体耗时分析 / 同机多服共用一个端口。另含生命周期 JSONL 日志与 /sablepanel dump 快照。仅服务端安装。
 '''
 
 [[mixins]]
