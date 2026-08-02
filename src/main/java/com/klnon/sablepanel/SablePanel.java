@@ -6,6 +6,7 @@ import com.klnon.sablepanel.panel.DiskScanner;
 import com.klnon.sablepanel.panel.OpsService;
 import com.klnon.sablepanel.panel.PanelConfig;
 import com.klnon.sablepanel.panel.PanelHttpServer;
+import com.klnon.sablepanel.panel.StatsCollector;
 import com.mojang.logging.LogUtils;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
@@ -33,12 +34,16 @@ public class SablePanel {
 
     /** stats 汇总输出周期(tick),1200 = 60s */
     private static final int STATS_INTERVAL_TICKS = 1200;
-    /** 运行时索引刷新周期(tick),100 = 5s */
+    /** 运行时索引刷新周期(tick):面板活跃时 100 = 5s */
     private static final int RUNTIME_REFRESH_TICKS = 100;
+    /** 面板空闲时降到 1200 = 60s,只维持耗时采样 drain 与加载数,别的都不做 */
+    private static final int RUNTIME_REFRESH_IDLE_TICKS = 1200;
     private int tickCounter;
+    private int ticksSinceRefresh;
 
     private final BodyIndex bodyIndex = new BodyIndex();
-    private PanelHttpServer panelServer;
+    private volatile PanelHttpServer panelServer;
+    private volatile boolean scanPauseLogged;
     private ScheduledExecutorService scanExecutor;
 
     private long tickStartNanos;
@@ -56,7 +61,9 @@ public class SablePanel {
     }
 
     private void onServerTickPre(ServerTickEvent.Pre event) {
-        this.tickStartNanos = System.nanoTime();
+        if (this.panelServer != null) {
+            this.tickStartNanos = System.nanoTime();
+        }
     }
 
     private void onServerStarted(ServerStartedEvent event) {
@@ -65,6 +72,7 @@ public class SablePanel {
             if (!config.enabled) {
                 return;
             }
+            BodyCostTracker.ENABLED = true;
             this.bodyIndex.setConfig(config);
             var server = event.getServer();
             // 2 线程:磁盘扫描可能跑几百毫秒,不能把集群心跳挤过 TTL
@@ -75,6 +83,16 @@ public class SablePanel {
             });
             Runnable scanOnce = () -> {
                 try {
+                    // 面板空闲 → 扫描暂停(唤醒时 markActivity 会立即补一轮,数据几秒内追平)
+                    PanelHttpServer p = this.panelServer;
+                    if (p != null && !p.isActive()) {
+                        if (!this.scanPauseLogged) {
+                            this.scanPauseLogged = true;
+                            LOGGER.info("sablepanel: panel idle, disk scans paused");
+                        }
+                        return;
+                    }
+                    this.scanPauseLogged = false;
                     Map<String, java.nio.file.Path> dims = DiskScanner.sublevelDirs(server);
                     this.bodyIndex.updateDisk(DiskScanner.scan(dims));
                 } catch (Throwable t) {
@@ -127,14 +145,21 @@ public class SablePanel {
     }
 
     private void onServerTick(ServerTickEvent.Post event) {
-        if (this.tickStartNanos != 0) {
-            com.klnon.sablepanel.panel.StatsCollector.INSTANCE.tick(System.nanoTime() - this.tickStartNanos);
-        }
         this.tickCounter++;
-        if (this.tickCounter % RUNTIME_REFRESH_TICKS == 0) {
-            try {
-                this.bodyIndex.refreshRuntime(event.getServer(), RUNTIME_REFRESH_TICKS);
-            } catch (Throwable ignored) {
+        // 面板未启用(enabled=false 或启动失败)→ 每 tick 只剩这一个 null 判断
+        if (this.panelServer != null) {
+            if (this.tickStartNanos != 0) {
+                StatsCollector.INSTANCE.tick(System.nanoTime() - this.tickStartNanos);
+            }
+            this.ticksSinceRefresh++;
+            int interval = this.panelServer.isActive() ? RUNTIME_REFRESH_TICKS : RUNTIME_REFRESH_IDLE_TICKS;
+            if (this.ticksSinceRefresh >= interval) {
+                try {
+                    // 传真实 tick 数:空闲降频后 drain 的 ms/tick 折算才是对的
+                    this.bodyIndex.refreshRuntime(event.getServer(), this.ticksSinceRefresh);
+                } catch (Throwable ignored) {
+                }
+                this.ticksSinceRefresh = 0;
             }
         }
         if (this.tickCounter % STATS_INTERVAL_TICKS != 0) {
@@ -184,6 +209,7 @@ public class SablePanel {
 
     // ServerStopped(而非 Stopping):sable 在停服晚期才逐体 UNLOADED,writer 必须活到那之后
     private void onServerStopped(ServerStoppedEvent event) {
+        BodyCostTracker.ENABLED = false;
         if (this.panelServer != null) {
             this.panelServer.stop();
             this.panelServer = null;

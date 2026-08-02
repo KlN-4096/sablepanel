@@ -13,6 +13,13 @@ import java.util.concurrent.atomic.LongAdder;
  * 注意:rapier 物理步进按维度整体执行,不含在单体值内(单体值=该体的 Java 逻辑成本)。
  */
 public final class BodyCostTracker {
+    /**
+     * 面板启用时置位。未启用(enabled=false)就没有人来 drain,
+     * mixin 喂进来的采样必须直接丢弃,否则 ACC 会按出现过的 uuid 无限囤积。
+     * 关闭状态下 mixin 的全部开销 = 两次 nanoTime + 这一个 volatile 读。
+     */
+    public static volatile boolean ENABLED;
+
     private static final ConcurrentHashMap<UUID, LongAdder> ACC = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<UUID, Double> EMA = new ConcurrentHashMap<>();
 
@@ -20,7 +27,7 @@ public final class BodyCostTracker {
     }
 
     public static void add(UUID uuid, long nanos) {
-        if (uuid == null || nanos <= 0) return;
+        if (!ENABLED || uuid == null || nanos <= 0) return;
         ACC.computeIfAbsent(uuid, k -> new LongAdder()).add(nanos);
     }
 

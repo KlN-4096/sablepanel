@@ -54,6 +54,8 @@ public final class PanelHttpServer {
     /** 成员心跳周期;超过 PEER_TTL 没心跳视为掉线 */
     public static final int HEARTBEAT_SECONDS = 15;
     private static final long PEER_TTL_MS = 45_000L;
+    /** 这么久没有任何面板请求 → 空闲态:磁盘扫描暂停、运行时索引降频,常态开销归零 */
+    private static final long IDLE_AFTER_MS = 300_000L;
 
     private final PanelConfig config;
     private final BodyIndex index;
@@ -63,6 +65,8 @@ public final class PanelHttpServer {
     private volatile HttpServer http;
     private volatile boolean isHost;
     private java.util.concurrent.ExecutorService httpPool;
+    /** 最近一次通过鉴权的面板请求时刻;启动时算作活跃,给首轮扫描留窗口 */
+    private volatile long lastActivityMs = System.currentTimeMillis();
 
     /** HOST 视角的成员表:id -> 该 PEER 的回环端口 + 它自己当前的 token(反代鉴权用) */
     private record Peer(int port, long lastSeen, String token) {
@@ -227,6 +231,7 @@ public final class PanelHttpServer {
                 send(ex, 401, "application/json", "{\"error\":\"token 无效\"}".getBytes(StandardCharsets.UTF_8), false);
                 return;
             }
+            markActivity();
             if (path.equals("/") || path.equals("/index.html")) {
                 sendResource(ex, "/web/index.html", "text/html; charset=utf-8", false);
                 return;
@@ -560,6 +565,25 @@ public final class PanelHttpServer {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** 有面板请求视为活跃;空闲期间磁盘扫描是暂停的,唤醒时立刻补一轮,数据几秒内追平 */
+    private void markActivity() {
+        long now = System.currentTimeMillis();
+        boolean wasIdle = now - this.lastActivityMs >= IDLE_AFTER_MS;
+        this.lastActivityMs = now;
+        if (wasIdle) {
+            SablePanel.LOGGER.info("sablepanel: [{}] panel active again, rescanning", this.selfId);
+            try {
+                this.ops.rescanNow();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** 近 {@link #IDLE_AFTER_MS} 内有无面板请求(PEER 收到的反代请求同样算) */
+    public boolean isActive() {
+        return System.currentTimeMillis() - this.lastActivityMs < IDLE_AFTER_MS;
     }
 
     private boolean authed(HttpExchange ex) {

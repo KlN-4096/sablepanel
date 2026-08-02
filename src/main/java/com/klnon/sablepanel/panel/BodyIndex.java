@@ -25,6 +25,9 @@ import java.util.UUID;
  * 状态定义:loaded(运行时)> stored(盘上有指针)> holding(盘上无指针但 sable 内存持有,落盘延迟)> orphan(全都没有)。
  */
 public final class BodyIndex {
+    /** 磁盘快照超过这个年龄就不拿来做孤儿/holding 判定(正常扫描周期 120s) */
+    private static final long STALE_SNAPSHOT_MS = 300_000L;
+
     private volatile List<DiskScanner.DiskEntry> diskSnapshot = List.of();
     private volatile long diskScanTime;
     /** 主线程周期刷新:uuid -> 运行时摘要 */
@@ -104,6 +107,10 @@ public final class BodyIndex {
 
         this.runtime = map;
         StatsCollector.INSTANCE.setLoadedPerDim(loadedPerDim);
+
+        // holding/孤儿判定要求磁盘快照与现实足够接近。快照过旧(面板空闲时扫描暂停,
+        // 或扫描故障)就跳过:拿陈旧条目对比现实会把正常体误报成孤儿
+        if (System.currentTimeMillis() - this.diskScanTime > STALE_SNAPSHOT_MS) return;
 
         // holding 态:只查"盘上无任何可达条目"的候选(小集合),避免主线程开销
         List<DiskScanner.DiskEntry> disk = this.diskSnapshot;

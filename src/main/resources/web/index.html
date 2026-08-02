@@ -1650,14 +1650,18 @@ if (typeof THREE !== 'undefined') initGL();
 else document.getElementById('pvInfo').textContent = 'three.js missing';
 setView(VIEW);
 loadServers().then(loadAll);
-// 成员表会变(有服启动/停服/接管),定期重拉
-setInterval(loadServers, 20000);
-setInterval(loadStats, 15000);
+// 成员表会变(有服启动/停服/接管),定期重拉。
+// 后台标签页一律停止轮询:页面没人看就别打请求,服务端才能进入空闲态(扫描全停)
+setInterval(() => { if (!document.hidden) loadServers(); }, 20000);
+setInterval(() => { if (!document.hidden) loadStats(); }, 15000);
 setInterval(() => {
+  if (document.hidden) return;
   refreshTimer--;
   document.getElementById('countdown').textContent = refreshTimer > 0 ? refreshTimer + 's' : '';
   if (refreshTimer <= 0) { refreshTimer = 60; loadBodies(); }
 }, 1000);
+// 切回前台立刻补一次统计,曲线不留豁口
+document.addEventListener('visibilitychange', () => { if (!document.hidden) loadStats(); });
 </script>
 </body>
 </html>
