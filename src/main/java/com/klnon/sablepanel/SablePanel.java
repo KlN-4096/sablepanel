@@ -101,7 +101,7 @@ public class SablePanel {
             };
             this.scanExecutor.scheduleWithFixedDelay(scanOnce, 5, 120, TimeUnit.SECONDS);
             var scanExec = this.scanExecutor;
-            OpsService ops = new OpsService(server, this.bodyIndex, () -> scanExec.execute(scanOnce));
+            OpsService ops = new OpsService(server, this.bodyIndex, () -> scanExec.execute(scanOnce), config);
             this.panelServer = new PanelHttpServer(config, server, this.bodyIndex, ops);
             this.panelServer.start();
             var panel = this.panelServer;

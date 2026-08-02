@@ -2,7 +2,6 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SablePanel</title>
 <style>
 /* ================= 设计系统:深空控制台 =================
@@ -193,8 +192,8 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
 .member.sel{background:#17293f;border-left-color:var(--acc)}
 .member .mname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:50px}
 .member .num{font-family:var(--mono);color:var(--dim);font-size:11.5px;white-space:nowrap}
-#listEmpty{padding:56px 20px;text-align:center;color:var(--dim);font-size:13px}
-#listEmpty .big{font-size:28px;opacity:.35;display:block;margin-bottom:10px}
+#listEmpty,.listEmpty{padding:56px 20px;text-align:center;color:var(--dim);font-size:13px}
+#listEmpty .big,.listEmpty .big{font-size:28px;opacity:.35;display:block;margin-bottom:10px}
 #moreBtn{width:100%;margin:8px 0 6px}
 
 /* ---------- 详情 ---------- */
@@ -228,14 +227,47 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
 .compMore:hover{text-decoration:underline}
 /* 多选 */
 .gsel,.msel{width:13px;height:13px;flex:none;cursor:pointer;margin:0}
-#selSeg{display:inline-flex;gap:8px;align-items:center;margin-left:auto}
-#selSeg .selInfo{color:var(--acc);font-weight:600;white-space:nowrap}
+#selSeg,#rSelSeg{display:inline-flex;gap:8px;align-items:center;margin-left:auto}
+#selSeg .selInfo,#rSelSeg .selInfo{color:var(--acc);font-weight:600;white-space:nowrap}
 .ops{padding:13px 15px;border-top:1px solid var(--line);background:#131824}
 .ops .row{display:flex;gap:8px;align-items:center;margin-bottom:9px;flex-wrap:wrap}
 .ops .row:last-child{margin-bottom:0}
 .ops input.coord{width:78px;font-family:var(--mono)}
-#detailEmpty{padding:50px 22px;text-align:center;color:var(--dim)}
-#detailEmpty .big{font-size:30px;opacity:.3;display:block;margin-bottom:12px}
+#detailEmpty,#rDetailEmpty{padding:50px 22px;text-align:center;color:var(--dim)}
+#detailEmpty .big,#rDetailEmpty .big{font-size:30px;opacity:.3;display:block;margin-bottom:12px}
+
+/* ---------- 回收站视图 ---------- */
+#rFilters{width:238px;flex:none;overflow-y:auto;background:#10141d;border-right:1px solid var(--line);padding:14px}
+#rFilters h3{font-size:10.5px;color:var(--dim);margin:16px 0 7px;text-transform:uppercase;letter-spacing:1px;
+  line-height:1.2;font-weight:600}
+#rFilters h3:first-child{margin-top:0}
+#rFilters label{display:flex;align-items:center;gap:7px;padding:3px 0;cursor:pointer;font-size:12.5px;color:var(--fg2)}
+#rFilters input[type=text],#rFilters input[type=number],#rFilters>select{width:100%}
+#rListPane{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+#rTabs{display:flex;gap:4px;padding:10px 12px 0;flex:none;overflow-x:auto;background:#0f131b;border-bottom:1px solid var(--line)}
+#rTabs button{border:1px solid transparent;border-bottom:none;border-radius:8px 8px 0 0;color:var(--dim);
+  padding:7px 15px;display:flex;align-items:center;gap:7px;background:transparent;font-size:12.5px}
+#rTabs button:hover{background:#161d29;color:var(--fg)}
+#rTabs button.on{color:var(--fg);background:var(--card);border-color:var(--line);box-shadow:0 2px 0 0 var(--card)}
+#rTabs button.on .cnt{color:var(--acc)}
+#rTabs .cnt{font-family:var(--mono);font-size:11px;padding:0 6px;border-radius:10px;background:#1a2130;color:var(--dim)}
+#rToolbar{display:flex;align-items:center;gap:9px;padding:9px 12px;font-size:12px;color:var(--dim);
+  flex-wrap:wrap;flex:none;border-bottom:1px solid var(--line);background:#0f131b}
+#rToolbar button{padding:4px 11px;font-size:11.5px}
+#rList{flex:1;overflow-y:auto;padding:11px 12px 24px;min-width:0}
+#rDetail{width:470px;flex:none;border-left:1px solid var(--line);background:#10141d;display:flex;flex-direction:column;min-height:0}
+#rBody{padding:13px 15px;overflow-y:auto;flex:1;min-height:0}
+#rBody table{width:100%;border-collapse:collapse;font-size:12.5px}
+#rBody td{padding:4.5px 4px;border-bottom:1px solid var(--line);vertical-align:top;word-break:break-all}
+#rBody td:first-child{color:var(--dim);width:86px;white-space:nowrap;word-break:normal}
+#rBody .val{font-family:var(--mono);font-size:12px}
+#rCompList{margin-top:12px}
+#rCompList h4{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin:14px 0 7px}
+.previewHost{height:304px;flex:none;background:#0b0e14;border-bottom:1px solid var(--line)}
+.previewHost #previewWrap{height:100%;border-bottom:none}
+.rgroup.restored{border-color:#285239}
+.rmeta{font-size:11px;color:var(--dim);font-family:var(--mono);white-space:nowrap}
+.rLimitRow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px}
 
 /* ---------- 全屏预览 ---------- */
 #fsOverlay{position:fixed;inset:0;z-index:50;background:#0a0d12;display:none}
@@ -263,30 +295,42 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
 #modal .msg{font-size:12.5px;color:var(--fg2);margin-bottom:14px;white-space:pre-wrap;line-height:1.6;overflow-y:auto}
 #modal input{width:100%;margin-bottom:14px;font-family:var(--mono)}
 #modal .btns{display:flex;gap:9px;justify-content:flex-end}
+#modalNever{display:none;align-items:center;gap:8px;color:var(--fg2);font-size:12.5px;margin:0 0 14px;cursor:pointer}
+#modalNever input{width:14px;height:14px;margin:0}
+#loginGate{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;padding:20px;
+  background:var(--bg)}
+#loginBox{width:min(390px,100%);background:var(--card2);border:1px solid var(--line2);border-radius:8px;
+  padding:22px;box-shadow:0 18px 50px rgba(0,0,0,.65)}
+#loginBrand{display:flex;align-items:center;gap:10px;font-size:17px;font-weight:650;margin-bottom:18px}
+#loginBox label{display:block;color:var(--fg2);font-size:12px;margin-bottom:6px}
+#loginRow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px}
+#loginToken{width:100%;font-family:var(--mono)}
+#loginError{min-height:20px;margin-top:9px;color:var(--bad);font-size:12px}
+body:not(.locked) #loginGate{display:none}
+body.locked>header,body.locked>#views{visibility:hidden}
 #busy{position:fixed;inset:0;z-index:90;background:rgba(5,7,10,.6);display:none;align-items:center;
   justify-content:center;flex-direction:column;gap:14px}
 .spinner{width:36px;height:36px;border:3px solid var(--line2);border-top-color:var(--acc);border-radius:50%;animation:spin .75s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 #busyText{font-size:13px;color:var(--fg2)}
 
-/* ---------- 窄屏(后置) ---------- */
-@media (max-width:1320px){#detail{width:410px}}
-@media (max-width:1060px){
-  body{overflow:auto}
-  #views{height:auto}
-  .view.on{flex-direction:column;height:auto}
-  #filters{width:100%;border-right:none;border-bottom:1px solid var(--line)}
-  #detail{width:100%;border-left:none;border-top:1px solid var(--line)}
-  #list{overflow:visible}
-  .split{grid-template-columns:1fr}
-  #fsCanvasBox{inset:0 0 42% 0}
-  #fsSide{top:58%;left:0;width:100%;border-left:none;border-top:1px solid var(--line)}
-  #scanMeta,#loadPill .kv:nth-child(3){display:none}
-  #nav button span{display:none}
-}
 </style>
 </head>
-<body>
+<body class="locked">
+<div id="loginGate">
+  <form id="loginBox" onsubmit="loginSubmit(event)">
+    <div id="loginBrand">
+      <svg width="23" height="23" viewBox="0 0 24 24" fill="none"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5z" stroke="#5aa9ff" stroke-width="1.6"/><path d="M12 22V12M3 7l9 5 9-5" stroke="#5aa9ff" stroke-width="1.6" opacity=".5"/></svg>
+      SablePanel
+    </div>
+    <label for="loginToken" data-i18n="loginToken">访问口令</label>
+    <div id="loginRow">
+      <input type="password" id="loginToken" autocomplete="current-password" autofocus>
+      <button class="primary" type="submit" data-i18n="loginEnter">进入</button>
+    </div>
+    <div id="loginError" role="alert"></div>
+  </form>
+</div>
 <header>
   <div class="logo">
     <svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5z" stroke="#5aa9ff" stroke-width="1.6"/><path d="M12 22V12M3 7l9 5 9-5" stroke="#5aa9ff" stroke-width="1.6" opacity=".5"/></svg>
@@ -295,6 +339,7 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
   <div id="nav">
     <button data-view="dash" onclick="setView('dash')">◧ <span data-i18n="navDash">总览</span></button>
     <button data-view="bodies" onclick="setView('bodies')">⬢ <span data-i18n="navBodies">物理体</span></button>
+    <button data-view="recycle" onclick="setView('recycle')">♲ <span data-i18n="navRecycle">回收站</span></button>
   </div>
   <div id="srvWrap" style="position:relative;display:none">
     <button class="hbtn" id="srvBtn" onclick="toggleSrvPop()"></button>
@@ -379,12 +424,14 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
       <div id="list"></div>
     </div>
     <div id="detail">
-      <div id="previewWrap">
-        <span id="pvInfo"></span>
-        <div class="pvCtrl">
-          <button id="rotBtn" onclick="toggleRotate()">⟳</button>
-          <input type="range" id="rotSpeed" min="0" max="100" value="18" oninput="setRotSpeed(this.value)">
-          <button id="fsOpen">⛶</button>
+      <div id="bodyPreviewHost" class="previewHost">
+        <div id="previewWrap">
+          <span id="pvInfo"></span>
+          <div class="pvCtrl">
+            <button id="rotBtn" onclick="toggleRotate()">⟳</button>
+            <input type="range" id="rotSpeed" min="0" max="100" value="18" oninput="setRotSpeed(this.value)">
+            <button id="fsOpen">⛶</button>
+          </div>
         </div>
       </div>
       <div id="dbody"><div id="detailEmpty"><span class="big">⬢</span><span data-i18n="pickBody">选择一个物理体查看详情</span></div></div>
@@ -398,10 +445,51 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
           <span class="muted" style="font-size:11px" data-i18n="adoptHint">重建加载指针,数据不动盘</span>
         </div>
         <div class="row">
-          <button class="danger" onclick="doDelete()" data-i18n="delBody">删除该物理体</button>
-          <button class="danger" id="delGroupBtn" onclick="doDeleteGroup()" style="display:none"></button>
+          <button class="danger" id="delBodyBtn" onclick="doDelete()" data-i18n="delBody">删除该物理体</button>
         </div>
         <div class="row"><span class="muted" style="font-size:11px" data-i18n="delHint">删除前自动备份到回收站</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 回收站 ===================== -->
+  <section class="view" id="viewRecycle">
+    <div id="rFilters">
+      <h3 data-i18n="search">搜索</h3>
+      <input type="text" id="rSearch" data-i18n-ph="searchPh" placeholder="名称 / UUID" oninput="renderRecycle()">
+      <h3 data-i18n="recycleState">恢复状态</h3>
+      <label><input type="checkbox" class="rFState" value="deleted" checked onchange="renderRecycle()"> <span data-i18n="recycleDeleted">待恢复</span></label>
+      <label><input type="checkbox" class="rFState" value="restored" checked onchange="renderRecycle()"> <span data-i18n="recycleRestored">已恢复</span></label>
+      <h3 data-i18n="scale">规模</h3>
+      <label><input type="checkbox" class="rFSize" value="huge" checked onchange="renderRecycle()"> <span data-i18n="szHuge">巨型 ≥10000</span></label>
+      <label><input type="checkbox" class="rFSize" value="large" checked onchange="renderRecycle()"> <span data-i18n="szLarge">大型 ≥1000</span></label>
+      <label><input type="checkbox" class="rFSize" value="mid" checked onchange="renderRecycle()"> <span data-i18n="szMid">中型 ≥100</span></label>
+      <label><input type="checkbox" class="rFSize" value="small" checked onchange="renderRecycle()"> <span data-i18n="szSmall">小型 ≥10</span></label>
+      <label><input type="checkbox" class="rFSize" value="frag" checked onchange="renderRecycle()"> <span data-i18n="szFrag">碎片 &lt;10</span></label>
+      <h3 data-i18n="dims">维度</h3>
+      <div id="rDims"></div>
+      <h3 data-i18n="other">其他</h3>
+      <label><input type="checkbox" id="rNamedOnly" onchange="renderRecycle()"> <span data-i18n="namedOnly">仅命名体</span></label>
+      <h3 data-i18n="recycleStorage">存储上限</h3>
+      <div class="rLimitRow">
+        <input type="number" id="rLimit" min="1" max="1000000" value="500">
+        <button onclick="saveRecycleLimit()" data-i18n="apply">应用</button>
+      </div>
+      <div class="hint" id="rUsage"></div>
+    </div>
+    <div id="rListPane">
+      <div id="rTabs"></div>
+      <div id="rToolbar"></div>
+      <div id="rList"></div>
+    </div>
+    <div id="rDetail">
+      <div id="recyclePreviewHost" class="previewHost"></div>
+      <div id="rBody"><div id="rDetailEmpty"><span class="big">♲</span><span data-i18n="pickRecycle">选择一个备份物理体查看详情</span></div></div>
+      <div class="ops" id="rOps" style="display:none">
+        <div class="row">
+          <button class="primary" onclick="restoreCurrentGroup()" data-i18n="restoreGroup">恢复该依赖组</button>
+          <span class="muted" style="font-size:11px" data-i18n="restoreHint">恢复后会在保存位置重新加载</span>
+        </div>
       </div>
     </div>
   </section>
@@ -424,7 +512,8 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
 <div id="modalBack"><div id="modal">
   <h3 id="modalTitle"></h3><div class="msg" id="modalMsg"></div>
   <input id="modalInput" style="display:none" autocomplete="off">
-  <div class="btns"><button onclick="modalCancel()" data-i18n="cancel">取消</button><button class="primary" onclick="modalConfirm()" data-i18n="confirm">确认</button></div>
+  <label id="modalNever"><input type="checkbox" id="modalNeverInput"><span data-i18n="neverRemind">永不提醒</span></label>
+  <div class="btns"><button id="modalCancelBtn" onclick="modalCancel()" data-i18n="cancel">取消</button><button id="modalConfirmBtn" class="primary" onclick="modalConfirm()" data-i18n="confirm">确认</button></div>
 </div></div>
 <div id="busy"><div class="spinner"></div><div id="busyText"></div></div>
 
@@ -434,7 +523,7 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
 /* ===================== i18n ===================== */
 const I18N = {
   zh: {
-    navDash:'总览', navBodies:'物理体', refresh:'刷新',
+    navDash:'总览', navBodies:'物理体', navRecycle:'回收站', refresh:'刷新',
     pillCost:'物理体开销 ms/t', pillLoaded:'加载中',
     search:'搜索', searchPh:'名称 / UUID', containsBlock:'包含方块', blockPh:'方块名或 id',
     sort:'排序(可多条件)', addSort:'添加条件', state:'状态',
@@ -444,8 +533,11 @@ const I18N = {
     dims:'维度', other:'其他', namedOnly:'仅命名体', groupOnly:'仅组合体',
     pickBody:'选择一个物理体查看详情', teleportTo:'传送到', adopt:'收养找回(含依赖)',
     srvHost:'主', srvSwitched:(n)=>`已切换到 ${n}`,
-    adoptHint:'重建加载指针,数据不动盘', delBody:'删除该物理体', delHint:'删除前自动备份到回收站(sablepanel-recycle/)',
+    adoptHint:'重建加载指针,数据不动盘', delBody:'删除该物理体', delHint:'删除严格验收成功后才会进入回收站',
     close:'关闭', cancel:'取消', confirm:'确认', composition:'方块构成', reload:'重载',
+    loginToken:'访问口令', loginEnter:'进入', loginBad:'访问口令无效', loginChanged:'访问口令已更改,请重新输入',
+    defaultTokenT:'建议修改访问口令', defaultTokenMsg:'当前正在使用默认访问口令,建议在维护卡片中修改。',
+    neverRemind:'永不提醒', later:'暂不修改', changeNow:'立即修改',
     compMore:(n)=>`展开剩余 ${n} 种方块`, compLess:'收起',
     dashServer:'当前服务器', dashServerOnly:'本机唯一面板', dashServerPeer:(n)=>`集群共 ${n} 个服务器`,
     sNamed:'有名称优先', sBlocks:'方块数', sMembers:'成员数', sLoaded:'加载数', sAlpha:'名称字母',
@@ -461,15 +553,28 @@ const I18N = {
     tpConfirmT:'传送物理体', tpConfirm:(n,x,y,z)=>`将「${n}」传送到 ${x}, ${y}, ${z}\n未加载的体会被强制加载(孤儿体自动收养)。`,
     tpOk:'传送完成', tpFail:'传送失败: ',
     delConfirmT:'删除物理体', delConfirm:(n,b)=>`确认删除「${n}」?该体 ${fmt(b)} 块。\n删除前会自动备份到回收站,可随时恢复。`,
-    delOk:'已删除,回收站: ', delFail:'删除失败: ',
+    delOk:'已删除,回收站: ', delFail:'删除失败: ', delUnknownFail:'最终验收未通过',
     delGroup:(n)=>`删除整组(${n} 体)`, delGroupT:'删除整组',
     delGroupMsg:(n,b)=>`将删除该组全部 ${n} 个物理体,共 ${fmt(b)} 块。\n每个体都会先备份到回收站,可随时恢复。`,
     delGroupDone:(o,n)=>`删除完成:成功 ${o}/${n}`,
     adoptT:'收养孤儿物理体', adoptMsg:(n)=>`将把「${n}」重新接入 sable 加载管线(依赖体一并收养)。\n不修改任何磁盘数据,失败也无副作用。`,
     adoptOk:'收养成功,已重新加载', adoptPart:'收养完成(部分成员未能加载)', adoptFail:'收养失败: ',
-    recycleT:'回收站', recycleEmpty:'回收站为空', recycleHint:'删除的物理体原始数据保留在服务器 sablepanel-recycle/,可离线恢复。',
+    adoptTrunc:(n)=>`依赖链超过 ${n} 个成员上限,本次只收养了扫描到的前 ${n} 个`,
+    recycleT:'回收站', recycleEmpty:'回收站为空', recycleHint:'只显示严格验收成功的删除依赖组。',
+    recycleState:'恢复状态', recycleDeleted:'待恢复', recycleRestored:'已恢复', recycleStorage:'存储上限',
+    apply:'应用', recycleUsage:(n,m)=>`${n} / ${m} 个备份文件`, pickRecycle:'选择一个备份物理体查看详情',
+    restoreGroup:'恢复该依赖组', restoreHint:'恢复后会在保存位置重新加载',
+    rTabAll:'全部', rTabNamed:'命名', rTabUnnamed:'未命名', rTabRestored:'已恢复',
+    rShowing:(n,m)=>`显示 ${n} / ${m} 个依赖组`, rSelectInfo:(g,b)=>`已选 ${g} 组 · ${b} 个物理体`,
+    restoreSelected:'恢复所选', restoreSelectedT:'恢复所选物理体',
+    restoreSelectedMsg:(g,b,blk)=>`将恢复勾选的 ${g} 个依赖组,共 ${b} 个物理体、${fmt(blk)} 块。\n恢复后会在原保存位置重新加载。`,
+    restoreDone:(n,m)=>`恢复完成:成功 ${n}/${m} 组`, restoreFail:'恢复失败: ',
+    deletedAt:'删除时间', restoredAt:'恢复时间', backupFiles:'备份文件', backupGroup:'回收组',
+    saveLimitOk:'回收站上限已更新', saveLimitFail:'更新上限失败: ', rEmpty:'没有符合条件的回收组',
+    limitConfirmT:'调整回收站上限',
+    limitConfirmMsg:(n,m)=>`当前有 ${n} 个备份文件。将上限降到 ${m} 后,会立即删除日期最早的完整依赖组。`,
     copied:'已复制', showMore:(n)=>`显示其余 ${n} 组`, noMatch:'没有符合条件的物理体',
-    loadFail:'加载失败: ', tokenBad:'token 无效——请检查地址里的 ?token= 参数',
+    loadFail:'加载失败: ',
     statPhys:'物理引擎', statLoaded:'加载体', statNone:'暂无数据', confirmMismatch:'输入不匹配,已取消',
     costRow:'性能开销', costVal:(ms)=>`${ms} ms/tick`,
     costHint:'该体每 tick 的 Java 逻辑耗时(方块实体、力、同步)',
@@ -488,7 +593,7 @@ const I18N = {
     recSafe:(p)=>`只推荐真正的残渣:同时满足 无名称、总计 <${p.blocks} 块、方块种类 <${p.types}、方块实体 <${p.be}、容器全空、无人乘坐、无第三方数据。按整组判定,组里只要有一个值得留的成员就整组排除(删依赖成员会让同组其他体加载失败)。阈值可在 config/sablepanel-server.json 里调。`,
     recBatch:(g,b)=>`删除全部推荐(${g} 组 / ${b} 体)`,
     recBatchT:'批量删除推荐项', recBatchMsg:(g,b,blk)=>`将删除 ${g} 个推荐组,共 ${b} 个物理体、${fmt(blk)} 块。\n每个体都会先备份到回收站,可随时恢复。`,
-    recNone:'没有需要清理的物理体', recTooMany:'单次最多 500 体,已只处理前 500 个',
+    recNone:'没有需要清理的物理体', recTooMany:'单次最多处理 500 个物理体,未执行删除',
     dashBodies:'物理体总数', dashBlocks:'方块总量', dashLoaded:'加载中', dashClean:'可清理',
     dashState:'状态分布', dashScale:'规模分布', dashDims:'维度分布', dashAnom:'异常',
     physChartT:'物理引擎耗时(近 5 分钟,每秒采样)',
@@ -507,14 +612,13 @@ const I18N = {
     selInfo:(n,b)=>`已选 ${n} 体 · ${fmt(b)} 块`, selDel:'删除所选', selClear:'清空',
     selAdopt:(n)=>`收养所选孤儿 (${n})`,
     selDelT:'删除所选物理体',
-    selDelMsg:(n,b)=>`将删除勾选的 ${n} 个物理体,共 ${fmt(b)} 块。\n每个体都会先备份到回收站,可随时恢复。`,
-    selDelPartial:(n)=>`⚠ 有 ${n} 个依赖组只勾选了部分成员:删除依赖成员后,组内剩余的体可能无法加载。`,
+    selDelMsg:(n,b)=>`将删除勾选依赖组中的 ${n} 个物理体,共 ${fmt(b)} 块。\n验收成功后整组进入回收站,可随时恢复。`,
     selAdoptT:'批量收养孤儿',
     selAdoptMsg:(n)=>`将逐个收养勾选中的 ${n} 个孤儿体(依赖一并接入,不修改磁盘数据)。`,
     selAdoptDone:(o,n)=>`收养完成:${o}/${n}`,
   },
   en: {
-    navDash:'Overview', navBodies:'Bodies', refresh:'Refresh',
+    navDash:'Overview', navBodies:'Bodies', navRecycle:'Recycle bin', refresh:'Refresh',
     pillCost:'body cost ms/t', pillLoaded:'loaded',
     search:'Search', searchPh:'name / UUID', containsBlock:'Contains block', blockPh:'block name or id',
     sort:'Sort (multi-key)', addSort:'Add key', state:'State',
@@ -524,8 +628,11 @@ const I18N = {
     dims:'Dimensions', other:'Other', namedOnly:'Named only', groupOnly:'Groups only',
     pickBody:'Select a body to view details', teleportTo:'Teleport to', adopt:'Adopt & recover (with deps)',
     srvHost:'host', srvSwitched:(n)=>`Switched to ${n}`,
-    adoptHint:'Rebuilds load pointer, disk untouched', delBody:'Delete this body', delHint:'Auto-backup to recycle bin before deletion',
+    adoptHint:'Rebuilds load pointer, disk untouched', delBody:'Delete this body', delHint:'Only strictly verified deletions enter the recycle bin',
     close:'Close', cancel:'Cancel', confirm:'Confirm', composition:'Block composition', reload:'Reload',
+    loginToken:'Access token', loginEnter:'Enter', loginBad:'Invalid access token', loginChanged:'The access token changed. Enter it again.',
+    defaultTokenT:'Change the access token', defaultTokenMsg:'The default access token is still in use. Changing it from the Maintenance card is recommended.',
+    neverRemind:'Never remind me', later:'Not now', changeNow:'Change now',
     compMore:(n)=>`Show ${n} more block types`, compLess:'Collapse',
     dashServer:'Current server', dashServerOnly:'only panel on this machine', dashServerPeer:(n)=>`${n} servers in cluster`,
     sNamed:'Named first', sBlocks:'Block count', sMembers:'Member count', sLoaded:'Loaded count', sAlpha:'Name A-Z',
@@ -541,15 +648,28 @@ const I18N = {
     tpConfirmT:'Teleport body', tpConfirm:(n,x,y,z)=>`Teleport "${n}" to ${x}, ${y}, ${z}\nUnloaded bodies are force-loaded (orphans auto-adopted).`,
     tpOk:'Teleported', tpFail:'Teleport failed: ',
     delConfirmT:'Delete body', delConfirm:(n,b)=>`Delete "${n}"? ${fmt(b)} blocks.\nBacked up to the recycle bin first — recoverable at any time.`,
-    delOk:'Deleted. Recycle: ', delFail:'Delete failed: ',
+    delOk:'Deleted. Recycle: ', delFail:'Delete failed: ', delUnknownFail:'final verification failed',
     delGroup:(n)=>`Delete group (${n})`, delGroupT:'Delete whole group',
     delGroupMsg:(n,b)=>`Deletes all ${n} bodies of this group, ${fmt(b)} blocks.\nEach is backed up first — recoverable at any time.`,
     delGroupDone:(o,n)=>`Done: ${o}/${n} ok`,
     adoptT:'Adopt orphan body', adoptMsg:(n)=>`Re-attach "${n}" into sable's loading pipeline (dependencies included).\nNo disk data is modified.`,
     adoptOk:'Adopted and loaded', adoptPart:'Adopted (some members failed)', adoptFail:'Adoption failed: ',
-    recycleT:'Recycle bin', recycleEmpty:'Recycle bin is empty', recycleHint:'Deleted bodies keep their raw data in sablepanel-recycle/ on the server.',
+    adoptTrunc:(n)=>`Dependency chain exceeds the ${n}-member cap; only the first ${n} scanned members were adopted`,
+    recycleT:'Recycle bin', recycleEmpty:'Recycle bin is empty', recycleHint:'Only dependency groups whose deletion passed strict verification are shown.',
+    recycleState:'Restore state', recycleDeleted:'Ready to restore', recycleRestored:'Restored', recycleStorage:'Storage limit',
+    apply:'Apply', recycleUsage:(n,m)=>`${n} / ${m} backup files`, pickRecycle:'Select a backed-up body to inspect',
+    restoreGroup:'Restore dependency group', restoreHint:'Reloads the group at its saved position',
+    rTabAll:'All', rTabNamed:'Named', rTabUnnamed:'Unnamed', rTabRestored:'Restored',
+    rShowing:(n,m)=>`Showing ${n} / ${m} dependency groups`, rSelectInfo:(g,b)=>`${g} groups selected · ${b} bodies`,
+    restoreSelected:'Restore selected', restoreSelectedT:'Restore selected bodies',
+    restoreSelectedMsg:(g,b,blk)=>`Restores ${g} selected dependency groups: ${b} bodies and ${fmt(blk)} blocks.\nBodies reload at their saved positions.`,
+    restoreDone:(n,m)=>`Restore complete: ${n}/${m} groups`, restoreFail:'Restore failed: ',
+    deletedAt:'Deleted', restoredAt:'Restored', backupFiles:'Backup files', backupGroup:'Recycle group',
+    saveLimitOk:'Recycle limit updated', saveLimitFail:'Failed to update limit: ', rEmpty:'No recycle groups match',
+    limitConfirmT:'Change recycle limit',
+    limitConfirmMsg:(n,m)=>`There are ${n} backup files. Lowering the limit to ${m} immediately removes the oldest complete dependency groups.`,
     copied:'Copied', showMore:(n)=>`Show remaining ${n} groups`, noMatch:'No bodies match',
-    loadFail:'Load failed: ', tokenBad:'Invalid token — check the ?token= parameter',
+    loadFail:'Load failed: ',
     statPhys:'Physics', statLoaded:'Loaded', statNone:'No data yet', confirmMismatch:'Input mismatch, cancelled',
     costRow:'Perf cost', costVal:(ms)=>`${ms} ms/tick`,
     costHint:'Java-side cost per tick for this body (block entities, forces, sync)',
@@ -568,7 +688,7 @@ const I18N = {
     recSafe:(p)=>`Only true leftovers are suggested: unnamed AND under ${p.blocks} blocks AND fewer than ${p.types} block types AND fewer than ${p.be} block entities AND all containers empty AND no rider AND no third-party data. Judged per group — one member worth keeping excludes the whole group (deleting a dependency breaks loading for the rest). Thresholds live in config/sablepanel-server.json.`,
     recBatch:(g,b)=>`Delete all suggested (${g} groups / ${b} bodies)`,
     recBatchT:'Batch delete suggestions', recBatchMsg:(g,b,blk)=>`Deletes ${g} groups: ${b} bodies, ${fmt(blk)} blocks.\nEach is backed up to the recycle bin — recoverable at any time.`,
-    recNone:'Nothing to clean up', recTooMany:'Max 500 bodies per call; only the first 500 processed',
+    recNone:'Nothing to clean up', recTooMany:'Max 500 bodies per call; nothing was deleted',
     dashBodies:'Total bodies', dashBlocks:'Total blocks', dashLoaded:'Loaded', dashClean:'Cleanable',
     dashState:'State breakdown', dashScale:'Size breakdown', dashDims:'Dimensions', dashAnom:'Anomalies',
     physChartT:'Physics engine time (last 5 min, 1s samples)',
@@ -587,8 +707,7 @@ const I18N = {
     selInfo:(n,b)=>`${n} selected · ${fmt(b)} blocks`, selDel:'Delete selected', selClear:'Clear',
     selAdopt:(n)=>`Adopt selected orphans (${n})`,
     selDelT:'Delete selected bodies',
-    selDelMsg:(n,b)=>`Deletes the ${n} checked bodies, ${fmt(b)} blocks total.\nEach is backed up to the recycle bin first — recoverable at any time.`,
-    selDelPartial:(n)=>`⚠ ${n} dependency group(s) are only partially checked: remaining members may fail to load after deletion.`,
+    selDelMsg:(n,b)=>`Deletes ${n} bodies from the selected dependency groups, ${fmt(b)} blocks total.\nVerified groups enter the recycle bin and remain recoverable.`,
     selAdoptT:'Batch adopt orphans',
     selAdoptMsg:(n)=>`Adopts the ${n} checked orphan bodies one by one (dependencies included, disk untouched).`,
     selAdoptDone:(o,n)=>`Adopted ${o}/${n}`,
@@ -610,16 +729,25 @@ function toggleLang(){
   localStorage.setItem('spLang', LANG);
   applyI18n(); renderAll(); refreshBlockList();
   if (SEL) renderDetail();
+  if (RSEL) renderRecycleDetail();
   renderComposition();
 }
 
 /* ===================== 基础设施 ===================== */
-let token = new URLSearchParams(location.search).get('token') || localStorage.getItem('spToken') || '';
-if (token) localStorage.setItem('spToken', token);
+const TOKEN_STORAGE_KEY = 'spToken';
+const DEFAULT_TOKEN_WARNING_KEY = 'spDefaultTokenWarningDisabled';
+let token = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+let authenticated = false, defaultTokenWarningShown = false;
+const initialUrl = new URL(location.href);
+if (initialUrl.searchParams.has('token')) {
+  initialUrl.searchParams.delete('token');
+  history.replaceState(null, '', initialUrl);
+}
 let DATA = null, STATS = null, RECYCLE = null;
-let SEL = null, SELG = null, MESH_DATA = null, MESH_UUID = null;
+let SEL = null, SELG = null, RSEL = null, RSELG = null, MESH_DATA = null, MESH_UUID = null, MESH_SOURCE = null;
 let VIEW = localStorage.getItem('spView') || 'dash';
 let TAB = 'all';
+let R_TAB = 'all';
 let refreshTimer = 60;
 
 /* 集群:同机多服共用一个端口,顶栏切换;CURSRV 为空表示"本机 HOST 自己" */
@@ -627,17 +755,64 @@ let SERVERS = [], CURSRV = localStorage.getItem('spServer') || '';
 
 /* 多选:跨页签/筛选保留,切服清空;BODY_BY_UUID 随 DATA 重建 */
 let SELECTED = new Set(), BODY_BY_UUID = new Map();
+let R_SELECTED = new Set(), RECYCLE_BY_ID = new Map();
 
 async function api(path, opts) {
   const sep = path.includes('?') ? '&' : '?';
-  const srv = CURSRV ? '&server=' + encodeURIComponent(CURSRV) : '';
-  const r = await fetch(path + sep + 'token=' + encodeURIComponent(token) + srv, opts);
+  const srv = CURSRV ? sep + 'server=' + encodeURIComponent(CURSRV) : '';
+  const options = {...(opts || {}), headers:{...((opts && opts.headers) || {}), 'X-Token':token}};
+  const r = await fetch(path + srv, options);
   if (!r.ok) {
     const e = (await r.json().catch(()=>({}))).error || r.status;
-    if (r.status === 401) toast(t('tokenBad'), 'bad');
+    if (r.status === 401) showLogin(t('loginChanged'));
     throw new Error(e);
   }
   return r.json();
+}
+
+function showLogin(message){
+  authenticated = false;
+  token = '';
+  localStorage.removeItem(TOKEN_STORAGE_KEY);
+  document.body.classList.add('locked');
+  const input = document.getElementById('loginToken');
+  input.value = '';
+  document.getElementById('loginError').textContent = message || '';
+  setTimeout(()=>input.focus(), 30);
+}
+
+function applyServersResponse(r){
+  SERVERS = r.servers || [];
+  if (CURSRV && !SERVERS.some(s => s.id === CURSRV)) CURSRV = '';
+  renderServerPicker(r.self);
+  if (VIEW === 'dash') renderDashServer();
+}
+
+async function authenticate(candidate, remembered){
+  const value = String(candidate || '').trim();
+  if (!value) { showLogin(''); return false; }
+  try {
+    const r = await fetch('/api/servers', {headers:{'X-Token':value}});
+    if (!r.ok) throw new Error('unauthorized');
+    const data = await r.json();
+    token = value;
+    authenticated = true;
+    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    document.getElementById('loginError').textContent = '';
+    document.body.classList.remove('locked');
+    applyServersResponse(data);
+    maybeWarnDefaultToken(data);
+    await loadAll(true);
+    return true;
+  } catch (e) {
+    showLogin(remembered ? t('loginChanged') : t('loginBad'));
+    return false;
+  }
+}
+
+function loginSubmit(e){
+  e.preventDefault();
+  authenticate(document.getElementById('loginToken').value, false);
 }
 function toast(msg, cls) {
   const box = document.getElementById('toasts');
@@ -657,6 +832,9 @@ function askModal(title, msg, needInput, expected){
     const inp = document.getElementById('modalInput');
     inp.style.display = needInput ? 'block' : 'none';
     inp.value = '';
+    document.getElementById('modalNever').style.display = 'none';
+    document.getElementById('modalCancelBtn').textContent = t('cancel');
+    document.getElementById('modalConfirmBtn').textContent = t('confirm');
     document.getElementById('modalBack').style.display = 'flex';
     if (needInput) setTimeout(()=>inp.focus(), 50);
     modalCb = (ok) => {
@@ -669,6 +847,31 @@ function askModal(title, msg, needInput, expected){
       res(true);
     };
   });
+}
+function askDefaultTokenWarning(){
+  return new Promise(res => {
+    document.getElementById('modalTitle').textContent = t('defaultTokenT');
+    document.getElementById('modalMsg').textContent = t('defaultTokenMsg');
+    document.getElementById('modalInput').style.display = 'none';
+    const never = document.getElementById('modalNever');
+    const check = document.getElementById('modalNeverInput');
+    check.checked = false;
+    never.style.display = 'flex';
+    document.getElementById('modalCancelBtn').textContent = t('later');
+    document.getElementById('modalConfirmBtn').textContent = t('changeNow');
+    document.getElementById('modalBack').style.display = 'flex';
+    modalCb = (ok) => {
+      document.getElementById('modalBack').style.display = 'none';
+      if (check.checked) localStorage.setItem(DEFAULT_TOKEN_WARNING_KEY, '1');
+      res(ok);
+    };
+  });
+}
+function maybeWarnDefaultToken(serverData){
+  if (!serverData.using_default_token || defaultTokenWarningShown
+      || localStorage.getItem(DEFAULT_TOKEN_WARNING_KEY) === '1') return;
+  defaultTokenWarningShown = true;
+  setTimeout(async()=>{ if (await askDefaultTokenWarning()) doChangeToken(); }, 0);
 }
 function modalConfirm(){ modalCb && modalCb(true); }
 function modalCancel(){ modalCb && modalCb(false); }
@@ -683,19 +886,31 @@ function busy(text){ document.getElementById('busyText').textContent = text || '
 
 /* ===================== 视图 ===================== */
 function setView(v, opts){
+  if (!['dash','bodies','recycle'].includes(v)) v = 'dash';
   VIEW = v;
   localStorage.setItem('spView', v);
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.view === v));
   document.querySelectorAll('.view').forEach(s => s.classList.remove('on'));
-  document.getElementById(v === 'dash' ? 'viewDash' : 'viewBodies').classList.add('on');
+  document.getElementById(v === 'dash' ? 'viewDash' : v === 'bodies' ? 'viewBodies' : 'viewRecycle').classList.add('on');
+  const previewHost = document.getElementById(v === 'recycle' ? 'recyclePreviewHost' : 'bodyPreviewHost');
+  const preview = document.getElementById('previewWrap');
+  if (!fsMode && preview.parentElement !== previewHost) previewHost.appendChild(preview);
+  const selectedPreview = v==='recycle' ? RSEL : v==='bodies' ? SEL : null;
+  const expectedSource = v==='recycle'&&RSELG ? `recycle:${RSELG.id}` : v==='bodies' ? 'body' : null;
+  if ((v==='recycle'||v==='bodies') && (!selectedPreview||MESH_UUID!==selectedPreview.uuid||MESH_SOURCE!==expectedSource)) {
+    disposeMesh(); MESH_DATA=null; MESH_UUID=MESH_SOURCE=null; document.getElementById('pvInfo').textContent='';
+    if (selectedPreview) setTimeout(()=>v==='recycle'
+      ?loadRecycleMesh(RSELG.id,selectedPreview.uuid):loadMesh(selectedPreview.uuid),30);
+  }
   if (opts && opts.tab) { TAB = opts.tab; renderLimit = 400; }
   if (opts && opts.sortCost) { sortCfg = [{k:'cost',d:-1}]; saveSort(); renderSortRows(); }
   if (opts && opts.reset) resetFilters(true);
   renderAll();
-  if (v === 'bodies') setTimeout(resizeGL, 30);
-  if (v === 'dash' && RECYCLE === null) loadRecycle();
+  if (v === 'bodies' || v === 'recycle') setTimeout(resizeGL, 30);
+  if (authenticated && (v === 'dash' || v === 'recycle') && RECYCLE === null) loadRecycle();
 }
 function renderAll(){
+  if (VIEW === 'recycle') { renderRecycle(); return; }
   if (!DATA) return;
   if (VIEW === 'dash') renderDash();
   else { renderTabs(); render(); }
@@ -705,11 +920,8 @@ function renderAll(){
 async function loadServers(){
   try {
     const r = await api('/api/servers');
-    SERVERS = r.servers || [];
-    // 记住的服务器可能已经掉线,退回本节点
-    if (CURSRV && !SERVERS.some(s => s.id === CURSRV)) CURSRV = '';
-    renderServerPicker(r.self);
-    if (VIEW === 'dash') renderDashServer();
+    applyServersResponse(r);
+    maybeWarnDefaultToken(r);
   } catch (e) { SERVERS = []; document.getElementById('srvWrap').style.display = 'none'; }
 }
 function renderServerPicker(selfId){
@@ -736,11 +948,13 @@ async function switchServer(id){
   CURSRV = (self && id === self.id) ? '' : id;
   localStorage.setItem('spServer', CURSRV);
   // 切服等于换了一整套数据,旧的一律作废
-  DATA = STATS = RECYCLE = null; SEL = SELG = MESH_DATA = MESH_UUID = null;
+  DATA = STATS = RECYCLE = null; SEL = SELG = RSEL = RSELG = MESH_DATA = MESH_UUID = MESH_SOURCE = null;
   SELECTED = new Set(); BODY_BY_UUID = new Map();
+  R_SELECTED = new Set(); RECYCLE_BY_ID = new Map();
   document.getElementById('dbody').innerHTML =
     `<div id="detailEmpty"><span class="big">⬢</span><span>${t('pickBody')}</span></div>`;
   document.getElementById('ops').style.display = 'none';
+  clearRecycleDetail();
   // 顶栏和总览横幅立刻切过去 —— 数据还在路上时也别显示旧服务器名
   renderServerPicker(self ? self.id : id);
   renderDashServer();
@@ -791,8 +1005,30 @@ async function loadStats(){
   } catch(e){ /* 静默 */ }
 }
 async function loadRecycle(){
-  try { RECYCLE = (await api('/api/recycle')).files || []; if (VIEW==='dash') renderDash(); }
-  catch(e){ RECYCLE = []; }
+  try {
+    RECYCLE = await api('/api/recycle');
+    RECYCLE.groups = RECYCLE.groups || [];
+    RECYCLE.block_palette = RECYCLE.block_palette || [];
+    RECYCLE_BY_ID = new Map(RECYCLE.groups.map(g=>[g.id,g]));
+    R_SELECTED = new Set([...R_SELECTED].filter(id=>RECYCLE_BY_ID.has(id)));
+    document.getElementById('rLimit').value = RECYCLE.limit || 500;
+    document.getElementById('rUsage').textContent = t('recycleUsage')(RECYCLE.file_count || 0, RECYCLE.limit || 500);
+    const dims = new Set();
+    RECYCLE.groups.forEach(g=>g.bodies.forEach(b=>dims.add(b.dim || 'minecraft:overworld')));
+    document.getElementById('rDims').innerHTML = [...dims].map(d=>
+      `<label><input type="checkbox" class="rFDim" value="${esc(d)}" checked onchange="renderRecycle()"> ${esc(d.replace('minecraft:',''))}</label>`).join('');
+    if (RSEL) {
+      const group = RECYCLE_BY_ID.get(RSELG && RSELG.id);
+      const body = group && group.bodies.find(b=>b.uuid===RSEL.uuid);
+      if (body) { RSEL=body; RSELG=group; if (VIEW==='recycle') renderRecycleDetail(); }
+      else clearRecycleDetail();
+    }
+    if (VIEW==='dash') renderDash();
+    if (VIEW==='recycle') renderRecycle();
+  } catch(e){
+    RECYCLE = {groups:[],block_palette:[],file_count:0,limit:500};
+    if (VIEW==='recycle') renderRecycle();
+  }
 }
 /* 改访问口令:后端会同步给集群所有成员,改完本地也要跟着换,否则下一个请求就 401 */
 async function doChangeToken(){
@@ -804,11 +1040,7 @@ async function doChangeToken(){
   try {
     const r = await api('/api/cluster/token', {method:'POST', body: JSON.stringify({token: next})});
     token = r.token;
-    localStorage.setItem('spToken', token);
-    // 地址栏里的 token 也换掉,不然一刷新就用回旧的
-    const u = new URL(location.href);
-    u.searchParams.set('token', token);
-    history.replaceState(null, '', u);
+    localStorage.setItem(TOKEN_STORAGE_KEY, token);
     if (r.failed && r.failed.length) toast(t('tokenPartial')(r.failed.join('、')), 'bad');
     else toast(t('tokenOk'), 'ok');
     if (r.warn) toast(r.warn, 'bad');
@@ -981,7 +1213,7 @@ function render() {
       </div><div class="members"></div>`;
     const mem = div.querySelector('.members');
     const caret = div.querySelector('.caret');
-    div.querySelector('.gsel').onclick = e => { e.stopPropagation(); toggleSelGroup(vis); };
+    div.querySelector('.gsel').onclick = e => { e.stopPropagation(); toggleSelGroup(g.bodies); };
     for (const b of vis) {
       const m = document.createElement('div'); m.className = 'member'; m.dataset.uuid = b.uuid;
       if (SEL && SEL.uuid === b.uuid) m.classList.add('sel');
@@ -1055,9 +1287,14 @@ function resetFilters(silent){
   if (!silent) onBlockFilter();
 }
 /* ===================== 多选 ===================== */
-function toggleSel(u){ SELECTED.has(u) ? SELECTED.delete(u) : SELECTED.add(u); updateSelUI(); }
+function toggleSel(u){
+  const entry=BODY_BY_UUID.get(u), bodies=entry?entry.g.bodies:[{uuid:u}];
+  const all=bodies.every(body=>SELECTED.has(body.uuid));
+  for (const body of bodies) all?SELECTED.delete(body.uuid):SELECTED.add(body.uuid);
+  updateSelUI();
+}
 function toggleSelGroup(bodies){
-  // 组头复选框 = 全选/取消该组当前可见的成员(被筛选隐藏的不动)
+  // 依赖组是删除原子单位，组头和成员复选框都整组切换。
   const all = bodies.every(b => SELECTED.has(b.uuid));
   for (const b of bodies) all ? SELECTED.delete(b.uuid) : SELECTED.add(b.uuid);
   updateSelUI();
@@ -1088,20 +1325,17 @@ function updateSelUI(){
     <button class="ghost" onclick="clearSel()">${t('selClear')}</button>`;
 }
 async function doDeleteSelected(){
-  let uuids = [...SELECTED].filter(u => BODY_BY_UUID.has(u));
-  if (!uuids.length) return;
-  let blocks = 0;
-  const partial = new Set();
-  for (const u of uuids) {
-    const e = BODY_BY_UUID.get(u);
-    blocks += e.b.blocks;
-    // 依赖组只勾了一部分:删掉被依赖的成员,剩下的会加载失败(sable 已知缺陷),提醒一句
-    if (e.g.members > 1 && !e.g.bodies.every(x => SELECTED.has(x.uuid))) partial.add(e.g.gid);
+  const groups=[];
+  const seen=new Set();
+  for (const uuid of SELECTED) {
+    const entry=BODY_BY_UUID.get(uuid);
+    if (entry&&!seen.has(entry.g.gid)) { seen.add(entry.g.gid); groups.push(entry.g); }
   }
-  let msg = t('selDelMsg')(uuids.length, blocks);
-  if (partial.size) msg += '\n' + t('selDelPartial')(partial.size);
-  if (!await askModal(t('selDelT'), msg, false)) return;
-  if (uuids.length > 500) { toast(t('recTooMany'), 'bad'); uuids = uuids.slice(0, 500); }
+  let uuids=groups.flatMap(group=>group.bodies.map(body=>body.uuid));
+  if (!uuids.length) return;
+  const blocks=groups.reduce((sum,group)=>sum+group.blocks,0);
+  if (!await askModal(t('selDelT'), t('selDelMsg')(uuids.length, blocks), false)) return;
+  if (uuids.length > 500) { toast(t('recTooMany'), 'bad'); return; }
   await batchDelete(uuids);
   clearSel();
 }
@@ -1130,10 +1364,169 @@ function focusBody(uuid){
   setTimeout(()=>document.querySelector(`.member[data-uuid="${uuid}"]`)?.scrollIntoView({block:'center'}), 60);
 }
 
+/* ===================== 回收站 ===================== */
+const R_TABS = [
+  {k:'all', label:'rTabAll', test:()=>true},
+  {k:'named', label:'rTabNamed', test:g=>!!g.name},
+  {k:'unnamed', label:'rTabUnnamed', test:g=>!g.name},
+  {k:'restored', label:'rTabRestored', test:g=>g.state==='restored'},
+];
+function recycleTabTest(group){ return (R_TABS.find(x=>x.k===R_TAB)||R_TABS[0]).test(group); }
+function setRecycleTab(tab){ R_TAB=tab; renderRecycle(); }
+function recycleSize(blocks){
+  return blocks>=10000?'huge':blocks>=1000?'large':blocks>=100?'mid':blocks>=10?'small':'frag';
+}
+function renderRecycleTabs(){
+  if (!RECYCLE) return;
+  document.getElementById('rTabs').innerHTML = R_TABS.map(tab=>
+    `<button class="${R_TAB===tab.k?'on':''}" onclick="setRecycleTab('${tab.k}')">${t(tab.label)}
+      <span class="cnt">${RECYCLE.groups.filter(tab.test).length}</span></button>`).join('');
+}
+function renderRecycle(){
+  renderRecycleTabs();
+  const list = document.getElementById('rList');
+  if (!RECYCLE) { list.innerHTML=`<div class="listEmpty">${t('loading')}</div>`; return; }
+  const needle = document.getElementById('rSearch').value.trim().toLowerCase();
+  const states = new Set([...document.querySelectorAll('.rFState:checked')].map(x=>x.value));
+  const sizes = new Set([...document.querySelectorAll('.rFSize:checked')].map(x=>x.value));
+  const dimInputs = [...document.querySelectorAll('.rFDim')];
+  const dims = new Set(dimInputs.filter(x=>x.checked).map(x=>x.value));
+  const namedOnly = document.getElementById('rNamedOnly').checked;
+  const tabGroups = RECYCLE.groups.filter(recycleTabTest);
+  const visible = tabGroups.filter(group => {
+    if (!states.has(group.state || 'deleted') || !sizes.has(recycleSize(group.blocks || 0))) return false;
+    if (namedOnly && !group.name) return false;
+    if (dimInputs.length && !group.bodies.some(body=>dims.has(body.dim || 'minecraft:overworld'))) return false;
+    if (!needle) return true;
+    return String(group.name||'').toLowerCase().includes(needle)
+      || group.bodies.some(body=>String(body.name||'').toLowerCase().includes(needle)
+        || body.uuid.toLowerCase().includes(needle));
+  }).sort((a,b)=>(b.deleted_at||0)-(a.deleted_at||0));
+  if (!visible.length) {
+    list.innerHTML=`<div class="listEmpty"><span class="big">♲</span>${RECYCLE.groups.length?t('rEmpty'):t('recycleEmpty')}</div>`;
+  } else {
+    list.innerHTML = visible.map(group => {
+      const title = esc(group.name) || `${group.bodies[0].uuid.slice(0,8)}…`;
+      const state = group.state==='restored'
+        ? `<span class="tag ok">${t('recycleRestored')}</span>` : `<span class="tag acc">${t('recycleDeleted')}</span>`;
+      const members = group.bodies.map(body=>
+        `<div class="member ${RSEL&&RSELG&&RSELG.id===group.id&&RSEL.uuid===body.uuid?'sel':''}"
+          data-rkey="${group.id}/${body.uuid}" onclick="selectRecycleBody('${group.id}','${body.uuid}')">
+          <span class="mname">${esc(body.name)||`<span class="muted">${body.uuid.slice(0,8)}</span>`}</span>
+          <span class="num">${fmt(body.blocks||0)} ${t('blocksUnit')}</span>
+          <span class="tag">${esc((body.dim||'minecraft:overworld').replace('minecraft:',''))}</span>
+        </div>`).join('');
+      const opened=RSELG&&RSELG.id===group.id;
+      return `<div class="group rgroup ${group.state==='restored'?'restored':''}" data-rid="${group.id}">
+        <div class="ghead" onclick="toggleGroupEl(this)">
+          <input type="checkbox" class="gsel" ${R_SELECTED.has(group.id)?'checked':''}
+            onclick="event.stopPropagation();toggleRecycleGroup('${group.id}')">
+          <span class="caret">${opened?'▼':'▶'}</span><span class="gname">${title}</span>${state}
+          <span class="rmeta">${group.members} ${t('bodies')} · ${fmt(group.blocks||0)} · ${new Date(group.deleted_at).toLocaleString()}</span>
+        </div><div class="members" style="${opened?'display:block':''}">${members}</div></div>`;
+    }).join('');
+  }
+  renderRecycleToolbar(visible.length, tabGroups.length);
+}
+function toggleGroupEl(head){
+  const members=head.nextElementSibling, open=members.style.display==='block';
+  members.style.display=open?'none':'block'; head.querySelector('.caret').textContent=open?'▶':'▼';
+}
+function expandRecycle(open){
+  document.querySelectorAll('#rList .group').forEach(group=>{
+    group.querySelector('.members').style.display=open?'block':'none';
+    group.querySelector('.caret').textContent=open?'▼':'▶';
+  });
+}
+function renderRecycleToolbar(visible, total){
+  const selectedGroups=[...R_SELECTED].map(id=>RECYCLE_BY_ID.get(id)).filter(Boolean);
+  const selectedBodies=selectedGroups.reduce((sum,group)=>sum+group.members,0);
+  document.getElementById('rToolbar').innerHTML =
+    `<span>${t('rShowing')(visible,total)}</span>
+     <button onclick="expandRecycle(true)">${t('expandAll')}</button>
+     <button onclick="expandRecycle(false)">${t('collapseAll')}</button>
+     ${selectedGroups.length?`<span id="rSelSeg"><span class="selInfo">${t('rSelectInfo')(selectedGroups.length,selectedBodies)}</span>
+       <button class="primary" onclick="restoreSelectedGroups()">${t('restoreSelected')}</button>
+       <button class="ghost" onclick="clearRecycleSelection()">${t('selClear')}</button></span>`:''}`;
+}
+function toggleRecycleGroup(id){
+  R_SELECTED.has(id)?R_SELECTED.delete(id):R_SELECTED.add(id);
+  renderRecycle();
+}
+function clearRecycleSelection(){ R_SELECTED.clear(); renderRecycle(); }
+function selectRecycleBody(groupId, uuid){
+  const group=RECYCLE_BY_ID.get(groupId), body=group&&group.bodies.find(item=>item.uuid===uuid);
+  if (!body) return;
+  if (!RSEL || RSEL.uuid!==uuid) compExpanded={compList:false,rCompList:false,fsComp:false};
+  RSELG=group; RSEL=body; renderRecycleDetail(); renderRecycle();
+  loadRecycleMesh(groupId,uuid);
+}
+function renderRecycleDetail(){
+  if (!RSEL || !RSELG) return;
+  const body=RSEL, group=RSELG;
+  const rows=[];
+  rows.push([t('name'),esc(body.name)||`<span class="muted">${t('unnamed')}</span>`]);
+  rows.push(['UUID',`<span class="val" style="font-size:10.5px">${body.uuid}</span><button class="copyBtn" onclick="copyText('${body.uuid}')">⧉</button>`]);
+  rows.push([t('state'),group.state==='restored'?`<span class="tag ok">${t('recycleRestored')}</span>`:`<span class="tag acc">${t('recycleDeleted')}</span>`]);
+  rows.push([t('dim'),esc(body.dim||'minecraft:overworld')]);
+  rows.push([t('coord'),`<span class="val">${(body.pos||[0,0,0]).map(v=>Number(v).toFixed(1)).join(', ')}</span>`]);
+  rows.push([t('bbox'),`<span class="val">${(body.size||[0,0,0]).map(v=>Number(v).toFixed(1)).join(' × ')}</span>`]);
+  rows.push([t('blockCount'),`<span class="val">${fmt(body.blocks||0)}</span>`]);
+  if (body.be) rows.push([t('beRow'),`<span class="val">${fmt(body.be)}</span>`]);
+  if (body.contents) rows.push([t('contentsRow'),`<span class="val">${fmt(body.contents)}</span>`]);
+  if (body.dependencies&&body.dependencies.length) rows.push([t('deps'),fmt(body.dependencies.length)]);
+  rows.push([t('group'),t('groupVal')(group.members,group.blocks)]);
+  rows.push([t('deletedAt'),new Date(group.deleted_at).toLocaleString()]);
+  if (group.restored_at) rows.push([t('restoredAt'),new Date(group.restored_at).toLocaleString()]);
+  rows.push([t('backupFiles'),`<span class="val">${body.backup_count||1}</span>`]);
+  rows.push([t('backupGroup'),`<span class="val" style="font-size:10.5px">${group.id}</span>`]);
+  document.getElementById('rBody').innerHTML=
+    `<table>${rows.map(row=>`<tr><td>${row[0]}</td><td>${row[1]}</td></tr>`).join('')}</table><div id="rCompList"></div>`;
+  document.getElementById('rOps').style.display='block';
+  renderComposition();
+}
+async function saveRecycleLimit(){
+  const limit=Number(document.getElementById('rLimit').value);
+  if (!Number.isInteger(limit)||limit<1) return;
+  if (RECYCLE&&limit<(RECYCLE.file_count||0)) {
+    const confirmed=await askModal(t('limitConfirmT'),t('limitConfirmMsg')(RECYCLE.file_count,limit),false);
+    if (!confirmed) { document.getElementById('rLimit').value=RECYCLE.limit||500; return; }
+  }
+  busy(t('loading'));
+  try {
+    await api('/api/recycle/config',{method:'POST',body:JSON.stringify({max_files:limit})});
+    toast(t('saveLimitOk'),'ok'); await loadRecycle();
+  } catch(e){ toast(t('saveLimitFail')+e.message,'bad'); }
+  busy(null);
+}
+async function restoreCurrentGroup(){
+  if (!RSELG) return;
+  await confirmRestore([RSELG]);
+}
+async function restoreSelectedGroups(){
+  const groups=[...R_SELECTED].map(id=>RECYCLE_BY_ID.get(id)).filter(Boolean);
+  if (groups.length) await confirmRestore(groups);
+}
+async function confirmRestore(groups){
+  const bodies=groups.reduce((sum,group)=>sum+group.members,0);
+  const blocks=groups.reduce((sum,group)=>sum+(group.blocks||0),0);
+  if (!await askModal(t('restoreSelectedT'),t('restoreSelectedMsg')(groups.length,bodies,blocks),false)) return;
+  busy(t('loading'));
+  try {
+    const result=await api('/api/recycle/restore',{method:'POST',body:JSON.stringify({ids:groups.map(g=>g.id)})});
+    const failures=(result.results||[]).filter(item=>!item.ok);
+    const detail=failures.slice(0,3).map(item=>`${item.id}: ${item.error}`).join('; ');
+    toast(t('restoreDone')(result.ok,result.total)+(detail?` · ${detail}`:''),result.ok===result.total?'ok':'bad');
+    R_SELECTED.clear();
+    setTimeout(()=>{loadBodies();loadRecycle();},1200);
+  } catch(e){ toast(t('restoreFail')+e.message,'bad'); }
+  busy(null);
+}
+
 /* ===================== 详情 ===================== */
 function select(b, g) {
   const sameMesh = SEL && SEL.uuid === b.uuid;
-  if (!sameMesh) compExpanded = {compList:false, fsComp:false};
+  if (!sameMesh) compExpanded = {compList:false, rCompList:false, fsComp:false};
   SEL = b; SELG = g;
   document.querySelectorAll('.member.sel').forEach(x=>x.classList.remove('sel'));
   document.querySelector(`.member[data-uuid="${b.uuid}"]`)?.classList.add('sel');
@@ -1187,9 +1580,7 @@ function renderDetail(){
   document.getElementById('ty').value = (pos[1]|0)+30;
   document.getElementById('tz').value = pos[2]|0;
   document.getElementById('adoptRow').style.display = b.state === 'orphan' ? 'flex' : 'none';
-  const dgb = document.getElementById('delGroupBtn');
-  if (g.members > 1) { dgb.style.display = 'inline-block'; dgb.textContent = t('delGroup')(g.members); }
-  else dgb.style.display = 'none';
+  document.getElementById('delBodyBtn').textContent = g.members > 1 ? t('delGroup')(g.members) : t('delBody');
 }
 function copyText(s){
   (navigator.clipboard ? navigator.clipboard.writeText(s) : Promise.reject()).then(
@@ -1198,18 +1589,19 @@ function copyText(s){
 }
 /* 成分表默认只列前 30 种,点"展开"看全部;切体时复位 */
 const COMP_PAGE = 30;
-let compExpanded = {compList:false, fsComp:false};
+let compExpanded = {compList:false, rCompList:false, fsComp:false};
 function toggleComp(id){ compExpanded[id] = !compExpanded[id]; renderComposition(); }
 function renderComposition(){
-  for (const box of [document.getElementById('compList'), document.getElementById('fsComp')]) {
+  const selected = VIEW==='recycle' ? RSEL : SEL;
+  for (const box of [document.getElementById('compList'), document.getElementById('rCompList'), document.getElementById('fsComp')]) {
     if (!box) continue;
-    if (!MESH_DATA || !SEL || MESH_UUID !== SEL.uuid) { box.innerHTML = ''; continue; }
+    if (!MESH_DATA || !selected || MESH_UUID !== selected.uuid) { box.innerHTML = ''; continue; }
     const pal = [...MESH_DATA.palette].sort((a,b)=>b.count-a.count);
     const total = pal.reduce((s,p)=>s+p.count,0) || 1;
     const open = compExpanded[box.id];
     const shown = open ? pal : pal.slice(0, COMP_PAGE);
     const rest = pal.length - shown.length;
-    box.innerHTML = (box.id==='compList' ? `<h4>${t('composition')}${MESH_DATA.truncated?t('pvTrunc'):''}</h4>` : '') +
+    box.innerHTML = (box.id==='compList'||box.id==='rCompList' ? `<h4>${t('composition')}${MESH_DATA.truncated?t('pvTrunc'):''}</h4>` : '') +
       shown.map(p => `<div class="compRow">
         <span class="chip" style="background:#${(p.color>>>0).toString(16).padStart(6,'0')}"></span>
         <span class="cname" title="${esc(p.id)}">${esc(LANG==='zh'?p.zh:p.en)}</span>
@@ -1233,21 +1625,13 @@ async function doTeleport() {
   busy(null);
 }
 async function doDelete() {
-  if (!SEL) return;
-  const nm = SEL.name || SEL.uuid.slice(0,8);
-  if (!await askModal(t('delConfirmT'), t('delConfirm')(nm, SEL.blocks), false)) return;
-  busy(t('loading'));
-  try { const r = await api(`/api/body/${SEL.uuid}/delete`, {method:'POST'});
-    toast(t('delOk') + (r.recycle||'-'), 'ok'); SEL = null;
-    setTimeout(()=>{loadBodies();loadRecycle();}, 1200);
-  } catch(e){ toast(t('delFail') + e.message, 'bad'); }
-  busy(null);
-}
-async function doDeleteGroup() {
-  if (!SELG) return;
-  const g = SELG;
-  if (!await askModal(t('delGroupT'), t('delGroupMsg')(g.members, g.blocks), false)) return;
-  await batchDelete(g.bodies.map(b=>b.uuid));
+  if (!SEL || !SELG) return;
+  const group=SELG;
+  const title=group.members>1?t('delGroupT'):t('delConfirmT');
+  const message=group.members>1?t('delGroupMsg')(group.members,group.blocks)
+    :t('delConfirm')(SEL.name||SEL.uuid.slice(0,8),SEL.blocks);
+  if (!await askModal(title,message,false)) return;
+  await batchDelete(group.bodies.map(body=>body.uuid));
 }
 async function doDeleteRecommended(){
   const groups = lastVisibleGroups.filter(g => g.rec);
@@ -1255,14 +1639,18 @@ async function doDeleteRecommended(){
   let uuids = groups.flatMap(g => g.bodies.map(b=>b.uuid));
   const blocks = groups.reduce((s,g)=>s+g.blocks,0);
   if (!await askModal(t('recBatchT'), t('recBatchMsg')(groups.length, uuids.length, blocks), false)) return;
-  if (uuids.length > 500) { toast(t('recTooMany'), 'bad'); uuids = uuids.slice(0,500); }
+  if (uuids.length > 500) { toast(t('recTooMany'), 'bad'); return; }
   await batchDelete(uuids);
 }
 async function batchDelete(uuids){
   busy(t('loading'));
   try {
     const r = await api('/api/ops/batch_delete', {method:'POST', body: JSON.stringify({uuids})});
-    toast(t('delGroupDone')(r.ok, r.total), r.ok === r.total ? 'ok' : 'bad');
+    const failed = (r.results || []).filter(x => !x.ok);
+    const detail = failed.slice(0, 3)
+      .map(x => `${x.uuid.slice(0,8)}: ${x.error || t('delUnknownFail')}`).join('; ');
+    toast(t('delGroupDone')(r.ok, r.total) + (detail ? ` · ${detail}` : ''),
+      r.ok === r.total ? 'ok' : 'bad');
     SEL = null; SELG = null;
     setTimeout(()=>{loadBodies();loadRecycle();}, 1500);
   } catch(e){ toast(t('delFail') + e.message, 'bad'); }
@@ -1277,6 +1665,7 @@ async function doAdopt() {
     const r = await api(`/api/body/${SEL.uuid}/adopt`, {method:'POST'});
     const bad = Object.values(r.chain||{}).filter(v => v!=='adopted' && v!=='already_loaded').length;
     toast(r.ok ? (bad ? t('adoptPart') : t('adoptOk')) : t('adoptFail'), r.ok ? 'ok' : 'bad');
+    if (r.truncated) toast(t('adoptTrunc')(r.truncated), 'bad');
     setTimeout(loadBodies, 1200);
   } catch(e){ toast(t('adoptFail') + e.message, 'bad'); }
   busy(null);
@@ -1370,12 +1759,13 @@ function renderDash(){
       </div></div>`;
 
   document.getElementById('cleanCard').innerHTML = `
-    <h4><span>${t('recycleT')}</span><span class="more" onclick="loadRecycle()">${t('reload')}</span></h4>
+    <h4><span>${t('recycleT')}</span><span class="more" onclick="setView('recycle')">${t('dashGo')}</span></h4>
     ${RECYCLE === null ? `<div class="empty">${t('loading')}</div>`
-      : !RECYCLE.length ? `<div class="empty">${t('recycleEmpty')}</div>`
-      : `<div class="mini"><table>${RECYCLE.slice(0,7).map(f=>`<tr><td class="mono" style="font-size:11px">${esc(f.file)}</td>
-          <td>${(f.size/1024).toFixed(1)} KB</td></tr>`).join('')}</table></div>
-         ${RECYCLE.length>7?`<div class="hint">… +${RECYCLE.length-7}</div>`:''}`}
+      : !RECYCLE.groups.length ? `<div class="empty">${t('recycleEmpty')}</div>`
+      : `<div class="mini"><table>${RECYCLE.groups.slice(0,7).map(g=>`<tr class="clickable" onclick="setView('recycle')">
+          <td>${esc(g.name)||g.bodies[0].uuid.slice(0,8)}</td><td>${g.members} · ${new Date(g.deleted_at).toLocaleDateString()}</td></tr>`).join('')}</table></div>
+         ${RECYCLE.groups.length>7?`<div class="hint">… +${RECYCLE.groups.length-7}</div>`:''}`}
+    ${RECYCLE?`<div class="hint">${t('recycleUsage')(RECYCLE.file_count||0,RECYCLE.limit||500)}</div>`:''}
     <div class="hint">${t('recycleHint')}</div>`;
   document.getElementById('toolCard').innerHTML = `
     <h4>${t('tools')}</h4>
@@ -1517,7 +1907,7 @@ function loop() {
   requestAnimationFrame(loop);
   if (!renderer) return;
   const dt = clock.getDelta();
-  if (VIEW !== 'bodies' && !fsMode) return;
+  if (VIEW !== 'bodies' && VIEW !== 'recycle' && !fsMode) return;
   if (!dragging && autoRotate) rotY += rotSpeed * dt;
   camera.position.set(
     center[0]+dist*Math.cos(rotX)*Math.sin(rotY),
@@ -1562,15 +1952,28 @@ function disposeMesh(){
   if (gridHelper) { scene.remove(gridHelper); gridHelper.geometry.dispose(); gridHelper.material.dispose(); gridHelper = null; }
 }
 async function loadMesh(uuid) {
+  return loadMeshAt(`/api/body/${uuid}/mesh`,uuid,'body',()=>SEL&&SEL.uuid===uuid);
+}
+function clearRecycleDetail(){
+  RSEL=RSELG=null;
+  document.getElementById('rBody').innerHTML=`<div id="rDetailEmpty"><span class="big">♲</span><span>${t('pickRecycle')}</span></div>`;
+  document.getElementById('rOps').style.display='none';
+  if (VIEW==='recycle') { disposeMesh(); MESH_DATA=MESH_UUID=MESH_SOURCE=null; document.getElementById('pvInfo').textContent=''; }
+}
+async function loadRecycleMesh(groupId,uuid) {
+  return loadMeshAt(`/api/recycle/${groupId}/body/${uuid}/mesh`,uuid,`recycle:${groupId}`,
+    ()=>RSEL&&RSELG&&RSEL.uuid===uuid&&RSELG.id===groupId);
+}
+async function loadMeshAt(endpoint, uuid, source, isCurrent) {
   const info = document.getElementById('pvInfo');
   info.textContent = t('pvLoad');
   disposeMesh();
-  MESH_DATA = null; MESH_UUID = null;
+  MESH_DATA = null; MESH_UUID = MESH_SOURCE = null;
   renderComposition();
   try {
-    const d = await api(`/api/body/${uuid}/mesh`);
-    if (SEL && SEL.uuid !== uuid) return;
-    MESH_DATA = d; MESH_UUID = uuid;
+    const d = await api(endpoint);
+    if (!isCurrent()) return;
+    MESH_DATA = d; MESH_UUID = uuid; MESH_SOURCE = source;
     const n = d.shell;
     if (!n) { info.textContent = t('pvNone'); return; }
     mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshLambertMaterial(), n);
@@ -1621,12 +2024,13 @@ async function loadMesh(uuid) {
    元素 → document → window,document.exitFullscreen 是原生 API,会把调用吃掉。
    这里统一改名 + 用 JS 绑定事件,双保险。 */
 function openPreviewFs(){
-  if (!renderer || !SEL) return;
+  const selected = VIEW==='recycle' ? RSEL : SEL;
+  if (!renderer || !selected) return;
   fsMode = true;
   document.getElementById('fsOverlay').style.display = 'block';
   document.getElementById('fsCanvasBox').appendChild(renderer.domElement);
-  document.getElementById('fsName').textContent = SEL.name || SEL.uuid.slice(0,8);
-  document.getElementById('fsMeta').textContent = `${SEL.uuid} · ${fmt(SEL.blocks)} ${t('blocksUnit')} · ${SEL.dim}`;
+  document.getElementById('fsName').textContent = selected.name || selected.uuid.slice(0,8);
+  document.getElementById('fsMeta').textContent = `${selected.uuid} · ${fmt(selected.blocks)} ${t('blocksUnit')} · ${selected.dim}`;
   document.getElementById('fsHover').textContent = '';
   renderComposition();
   resizeGL();
@@ -1634,7 +2038,9 @@ function openPreviewFs(){
 function closePreviewFs(){
   fsMode = false;
   document.getElementById('fsOverlay').style.display = 'none';
+  const host = document.getElementById(VIEW==='recycle'?'recyclePreviewHost':'bodyPreviewHost');
   const box = document.getElementById('previewWrap');
+  if (box.parentElement!==host) host.appendChild(box);
   box.insertBefore(renderer.domElement, box.firstChild);
   hideTip();
   resizeGL();
@@ -1649,19 +2055,20 @@ renderSortRows();
 if (typeof THREE !== 'undefined') initGL();
 else document.getElementById('pvInfo').textContent = 'three.js missing';
 setView(VIEW);
-loadServers().then(loadAll);
+if (token) authenticate(token, true);
+else showLogin('');
 // 成员表会变(有服启动/停服/接管),定期重拉。
 // 后台标签页一律停止轮询:页面没人看就别打请求,服务端才能进入空闲态(扫描全停)
-setInterval(() => { if (!document.hidden) loadServers(); }, 20000);
-setInterval(() => { if (!document.hidden) loadStats(); }, 15000);
+setInterval(() => { if (authenticated && !document.hidden) loadServers(); }, 20000);
+setInterval(() => { if (authenticated && !document.hidden) loadStats(); }, 15000);
 setInterval(() => {
-  if (document.hidden) return;
+  if (!authenticated || document.hidden) return;
   refreshTimer--;
   document.getElementById('countdown').textContent = refreshTimer > 0 ? refreshTimer + 's' : '';
   if (refreshTimer <= 0) { refreshTimer = 60; loadBodies(); }
 }, 1000);
 // 切回前台立刻补一次统计,曲线不留豁口
-document.addEventListener('visibilitychange', () => { if (!document.hidden) loadStats(); });
+document.addEventListener('visibilitychange', () => { if (authenticated && !document.hidden) loadStats(); });
 </script>
 </body>
 </html>

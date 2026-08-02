@@ -14,11 +14,14 @@ import net.minecraft.world.level.storage.LevelResource;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -67,6 +70,11 @@ public final class DiskScanner {
     /** .slvls 解析缓存,key = 文件绝对路径 */
     private static final ConcurrentHashMap<String, FileCache> SLVLS_CACHE = new ConcurrentHashMap<>();
 
+    /** 写操作后的验收必须绕过 mtime+size 缓存,避免同毫秒内原位更新被误判为未变化。 */
+    public static void invalidateCache() {
+        SLVLS_CACHE.clear();
+    }
+
     /** dim -> sublevels 目录 */
     public static Map<String, Path> sublevelDirs(MinecraftServer server) {
         Map<String, Path> dirs = new ConcurrentHashMap<>();
@@ -76,6 +84,24 @@ public final class DiskScanner {
             Path sub = dimRoot.resolve("sublevels");
             if (Files.isDirectory(sub)) {
                 dirs.put(level.dimension().location().toString(), sub);
+            }
+        }
+        return dirs;
+    }
+
+    /** 删除验收使用:只有目录确实不存在时才省略,访问失败或路径类型异常必须上抛。 */
+    public static Map<String, Path> sublevelDirsStrict(MinecraftServer server) throws IOException {
+        Map<String, Path> dirs = new HashMap<>();
+        Path root = server.getWorldPath(LevelResource.ROOT);
+        for (ServerLevel level : server.getAllLevels()) {
+            Path dimRoot = DimensionType.getStorageFolder(level.dimension(), root);
+            Path sub = dimRoot.resolve("sublevels");
+            try {
+                BasicFileAttributes attributes = Files.readAttributes(sub, BasicFileAttributes.class);
+                if (!attributes.isDirectory()) throw new IOException("sublevels 路径不是目录: " + sub);
+                dirs.put(level.dimension().location().toString(), sub);
+            } catch (NoSuchFileException ignored) {
+                // 该维度从未产生过 Sable 存档,不存在待验收条目。
             }
         }
         return dirs;
@@ -142,6 +168,238 @@ public final class DiskScanner {
         }
         SLVLS_CACHE.keySet().retainAll(seenFiles);
         return out;
+    }
+
+    /**
+     * 删除/恢复流程的严格全量元数据扫描:完整读取每个 .slvls 非空槽位,但只保留
+     * uuid/槽位/依赖/plot 坐标,不持有完整 NBT —— 堆峰值与条目体量无关。
+     * 与后台容错扫描不同,任一目录、文件或 NBT 条目无法确认都会抛错,禁止据此误报操作成功。
+     */
+    public record EntryMeta(EntryKey key, List<UUID> deps, int plotX, int plotZ) {
+    }
+
+    public static Map<UUID, List<EntryMeta>> scanEntryMetaStrict(Map<String, Path> dims) throws IOException {
+        Map<UUID, List<EntryMeta>> meta = new HashMap<>();
+        for (Map.Entry<String, Path> dimension : dims.entrySet()) {
+            String dim = dimension.getKey();
+            Path dir = dimension.getValue();
+            if (!Files.isDirectory(dir)) throw new IOException("sublevels 目录不存在: " + dir);
+            List<Path> files;
+            try (var stream = Files.list(dir)) {
+                files = stream.filter(path -> SLVLS.matcher(path.getFileName().toString()).matches()).toList();
+            }
+            for (Path file : files) collectFileMetaStrict(dim, file, dir, meta);
+        }
+        return meta;
+    }
+
+    private static void collectFileMetaStrict(String dim, Path file, Path dir,
+                                              Map<UUID, List<EntryMeta>> meta) throws IOException {
+        Matcher matcher = SLVLS.matcher(file.getFileName().toString());
+        if (!matcher.matches()) return;
+        int rx = Integer.parseInt(matcher.group(1));
+        int rz = Integer.parseInt(matcher.group(2));
+        int storage = Integer.parseInt(matcher.group(3));
+        forEachEntryStrict(file, dir, rx, rz, 4096, (index, tag) -> {
+            UUID uuid;
+            try {
+                uuid = tag.getUUID("uuid");
+            } catch (Exception error) {
+                throw new IOException("NBT 条目缺少有效 UUID: " + file + "#" + index, error);
+            }
+            CompoundTag plot = tag.getCompound("plot");
+            meta.computeIfAbsent(uuid, ignored -> new ArrayList<>())
+                    .add(new EntryMeta(new EntryKey(dim, rx, rz, storage, index),
+                            dependencies(tag), plot.getInt("plot_x"), plot.getInt("plot_z")));
+        });
+    }
+
+    /** plot 槽位 → 声明它的 uuid 集(盘上条目视角;恢复前的同槽冲突守卫用) */
+    public record PlotKey(String dim, int x, int z) {
+    }
+
+    public static Map<PlotKey, Set<UUID>> plotOwners(Map<UUID, List<EntryMeta>> meta) {
+        Map<PlotKey, Set<UUID>> owners = new HashMap<>();
+        for (Map.Entry<UUID, List<EntryMeta>> entry : meta.entrySet()) {
+            for (EntryMeta copy : entry.getValue()) {
+                owners.computeIfAbsent(new PlotKey(copy.key().dim(), copy.plotX(), copy.plotZ()),
+                        ignored -> new HashSet<>()).add(entry.getKey());
+            }
+        }
+        return owners;
+    }
+
+    /** 将任意选中成员扩展为完整的、无重复的依赖连通组；已丢失的依赖 UUID 不会凭空加入。 */
+    public static List<Set<UUID>> selectedDependencyComponents(
+            Map<UUID, List<EntryMeta>> entries, List<UUID> requested) {
+        Map<UUID, UUID> parent = new HashMap<>();
+        for (UUID uuid : entries.keySet()) parent.put(uuid, uuid);
+        for (Map.Entry<UUID, List<EntryMeta>> entry : entries.entrySet()) {
+            for (EntryMeta copy : entry.getValue()) {
+                for (UUID dependency : copy.deps()) {
+                    if (parent.containsKey(dependency)) union(parent, entry.getKey(), dependency);
+                }
+            }
+        }
+        Map<UUID, List<UUID>> members = new HashMap<>();
+        for (UUID uuid : parent.keySet()) members.computeIfAbsent(find(parent, uuid), ignored -> new ArrayList<>()).add(uuid);
+        for (List<UUID> group : members.values()) group.sort(UUID::compareTo);
+
+        List<Set<UUID>> result = new ArrayList<>();
+        Set<UUID> emittedRoots = new HashSet<>();
+        Set<UUID> emittedMissing = new HashSet<>();
+        for (UUID selected : requested) {
+            if (!parent.containsKey(selected)) {
+                if (emittedMissing.add(selected)) result.add(new LinkedHashSet<>(List.of(selected)));
+                continue;
+            }
+            UUID root = find(parent, selected);
+            if (!emittedRoots.add(root)) continue;
+            LinkedHashSet<UUID> group = new LinkedHashSet<>();
+            group.add(selected);
+            group.addAll(members.get(root));
+            result.add(group);
+        }
+        return result;
+    }
+
+    private static List<UUID> dependencies(CompoundTag tag) {
+        List<UUID> dependencies = new ArrayList<>();
+        if (!tag.contains("loading_dependencies")) return dependencies;
+        ListTag list = tag.getList("loading_dependencies", Tag.TAG_INT_ARRAY);
+        for (Tag dependency : list) dependencies.add(NbtUtils.loadUUID(dependency));
+        return dependencies;
+    }
+
+    private static UUID find(Map<UUID, UUID> parent, UUID uuid) {
+        UUID root = uuid;
+        while (!parent.get(root).equals(root)) root = parent.get(root);
+        while (!parent.get(uuid).equals(root)) {
+            UUID next = parent.get(uuid);
+            parent.put(uuid, root);
+            uuid = next;
+        }
+        return root;
+    }
+
+    private static void union(Map<UUID, UUID> parent, UUID first, UUID second) {
+        UUID firstRoot = find(parent, first);
+        UUID secondRoot = find(parent, second);
+        if (!firstRoot.equals(secondRoot)) parent.put(firstRoot, secondRoot);
+    }
+
+    /** 严格统计仍引用目标存储槽的 .slvlr holding 指针。 */
+    public static Map<EntryKey, Integer> countPointersStrict(Map<String, Path> dims, Set<EntryKey> targets)
+            throws IOException {
+        Map<EntryKey, Integer> counts = new HashMap<>();
+        for (Map.Entry<EntryKey, List<LiveLocation>> entry : locatePointersStrict(dims, targets).entrySet()) {
+            counts.put(entry.getKey(), entry.getValue().size());
+        }
+        return counts;
+    }
+
+    /** 删除准备使用:严格收集每个存储槽的全部 holding 指针,保留重复引用。 */
+    public static Map<EntryKey, List<LiveLocation>> locatePointersStrict(Map<String, Path> dims,
+                                                                          Set<EntryKey> targets)
+            throws IOException {
+        Map<EntryKey, List<LiveLocation>> located = new HashMap<>();
+        for (Map.Entry<String, Path> dimension : dims.entrySet()) {
+            String dim = dimension.getKey();
+            Path dir = dimension.getValue();
+            if (!Files.isDirectory(dir)) throw new IOException("sublevels 目录不存在: " + dir);
+            List<Path> files;
+            try (var stream = Files.list(dir)) {
+                files = stream.filter(path -> SLVLR.matcher(path.getFileName().toString()).matches()).toList();
+            }
+            for (Path file : files) {
+                Matcher matcher = SLVLR.matcher(file.getFileName().toString());
+                if (!matcher.matches()) continue;
+                int rx = Integer.parseInt(matcher.group(1));
+                int rz = Integer.parseInt(matcher.group(2));
+                forEachEntryStrict(file, dir, rx, rz, 128, (index, tag) -> {
+                    int chunkX = rx * 32 + (index & 31);
+                    int chunkZ = rz * 32 + (index >> 5);
+                    for (int packed : tag.getIntArray("pointers")) {
+                        EntryKey key = new EntryKey(dim, rx, rz,
+                                (packed >> 16) & 0xFFFF, packed & 0xFFFF);
+                        if (targets.contains(key)) {
+                            located.computeIfAbsent(key, ignored -> new ArrayList<>())
+                                    .add(new LiveLocation(key, chunkX, chunkZ));
+                        }
+                    }
+                });
+            }
+        }
+        return located;
+    }
+
+    private interface StrictEntryConsumer {
+        void accept(int index, CompoundTag tag) throws IOException;
+    }
+
+    private static void forEachEntryStrict(Path file, Path dir, int rx, int rz, int sectorSize,
+                                           StrictEntryConsumer consumer) throws IOException {
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+            long fileSize = channel.size();
+            if (fileSize < 4096) throw new IOException("存储头不完整: " + file);
+            ByteBuffer header = ByteBuffer.allocate(4096);
+            readFully(channel, header, 0, file);
+            header.flip();
+            for (int index = 0; index < 1024; index++) {
+                int span = header.getInt(index * 4);
+                if (span == 0) continue;
+                CompoundTag tag = readEntryTagStrict(
+                        channel, fileSize, file, dir, rx, rz, index, span, sectorSize);
+                consumer.accept(index, tag);
+            }
+        }
+    }
+
+    private static CompoundTag readEntryTagStrict(FileChannel channel, long fileSize, Path file, Path dir,
+                                                  int rx, int rz, int index, int span, int sectorSize)
+            throws IOException {
+        int start = (span >> 8) & 0xFFFFFF;
+        int sectors = span & 0xFF;
+        if (start <= 0 || sectors <= 0) throw new IOException("存储槽位范围无效: " + file + "#" + index);
+        long offset = (long) start * sectorSize;
+        long capacity = (long) sectors * sectorSize;
+        if (offset + 5 > fileSize) throw new IOException("存储槽位超出文件: " + file + "#" + index);
+
+        ByteBuffer metadata = ByteBuffer.allocate(5);
+        readFully(channel, metadata, offset, file);
+        metadata.flip();
+        int size = metadata.getInt();
+        byte type = metadata.get();
+        if (size <= 0) throw new IOException("存储槽位长度无效: " + file + "#" + index);
+
+        byte[] payload;
+        if ((type & 0x10) != 0) {
+            Path external = dir.resolve("r." + rx + "." + rz + ".r").resolve(index + ".slvl");
+            if (!Files.isRegularFile(external)) throw new IOException("外部条目缺失: " + external);
+            payload = Files.readAllBytes(external);
+        } else {
+            long recordSize = 4L + size;
+            if (recordSize > capacity || offset + recordSize > fileSize) {
+                throw new IOException("存储槽位内容不完整: " + file + "#" + index);
+            }
+            payload = new byte[size - 1];
+            readFully(channel, ByteBuffer.wrap(payload), offset + 5, file);
+        }
+
+        try {
+            return NbtIo.readCompressed(
+                    new DataInputStream(new ByteArrayInputStream(payload)), NbtAccounter.unlimitedHeap());
+        } catch (Exception error) {
+            throw new IOException("NBT 条目无法解析: " + file + "#" + index, error);
+        }
+    }
+
+    private static void readFully(FileChannel channel, ByteBuffer buffer, long position, Path file)
+            throws IOException {
+        while (buffer.hasRemaining()) {
+            int read = channel.read(buffer, position + buffer.position());
+            if (read <= 0) throw new IOException("文件读取不完整: " + file);
+        }
     }
 
     private static void collectPointers(Path file, Path dir, int rx, int rz, Set<String> pointerIds) {
@@ -327,6 +585,11 @@ public final class DiskScanner {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** 从回收站 NBT 生成与在线索引一致的静态摘要。 */
+    public static DiskEntry summarize(EntryKey key, CompoundTag tag) {
+        return toEntry(key, tag, false);
     }
 
     /** @return [方块实体数, 其中有内容(物品/告示牌文字)的个数] */

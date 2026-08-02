@@ -33,7 +33,10 @@ import java.util.zip.GZIPOutputStream;
  *   GET  /api/servers             集群成员列表
  *   GET  /api/bodies              全量索引(组聚合,纯内存缓存)
  *   GET  /api/stats               TPS/MSPT/物理耗时序列
- *   GET  /api/recycle             回收站列表
+ *   GET  /api/recycle             回收站依赖组、属性与上限
+ *   GET  /api/recycle/{id}/body/{uuid}/mesh 回收站体素预览
+ *   POST /api/recycle/restore     {"ids":[...]}
+ *   POST /api/recycle/config      {"max_files":500}
  *   GET  /api/body/{uuid}/mesh    体素预览(带 LRU 缓存)
  *   POST /api/rescan              立即触发磁盘重扫
  *   POST /api/body/{uuid}/teleport?x=&y=&z=
@@ -95,8 +98,8 @@ public final class PanelHttpServer {
         try {
             this.http = listen(this.config.bind, this.config.port);
             this.isHost = true;
-            SablePanel.LOGGER.info("sablepanel: [{}] panel HOST at http://{}:{}/?token={}",
-                    this.selfId, this.config.bind, this.config.port, this.config.token);
+            SablePanel.LOGGER.info("sablepanel: [{}] panel HOST at http://{}:{}/",
+                    this.selfId, this.config.bind, this.config.port);
         } catch (IOException bindFailed) {
             // 端口被同机另一个服务端占着 —— 退为 PEER,挂到那个面板里
             this.http = listen("127.0.0.1", 0);
@@ -220,6 +223,11 @@ public final class PanelHttpServer {
                 sendResource(ex, "/web/vendor/three.min.js", "text/javascript; charset=utf-8", true);
                 return;
             }
+            // 登录外壳不含面板数据,必须先加载它才能让用户输入访问口令。
+            if (path.equals("/") || path.equals("/index.html")) {
+                sendResource(ex, "/web/index.html", "text/html; charset=utf-8", false);
+                return;
+            }
             // 集群注册不看 token:同机只该有一个面板,回环来源即可信,
             // 后启动的服务端无论 token 一不一样都要能挂上来(口令由 HOST 统一下发)
             if (path.equals("/api/cluster/register")) {
@@ -232,10 +240,6 @@ public final class PanelHttpServer {
                 return;
             }
             markActivity();
-            if (path.equals("/") || path.equals("/index.html")) {
-                sendResource(ex, "/web/index.html", "text/html; charset=utf-8", false);
-                return;
-            }
             if (path.equals("/api/cluster/token")) {
                 requirePost(ex);
                 handleSetToken(ex);
@@ -262,9 +266,27 @@ public final class PanelHttpServer {
                     return;
                 }
                 case "/api/recycle" -> {
-                    JsonObject o = new JsonObject();
-                    o.add("files", this.ops.recycleList());
-                    send(ex, 200, "application/json", o.toString().getBytes(StandardCharsets.UTF_8), true);
+                    JsonObject view = this.ops.recycleView();
+                    send(ex, 200, "application/json", view.toString().getBytes(StandardCharsets.UTF_8), true);
+                    return;
+                }
+                case "/api/recycle/config" -> {
+                    requirePost(ex);
+                    JsonObject body = readJsonBody(ex);
+                    if (!body.has("max_files")) throw new IllegalArgumentException("max_files 缺失");
+                    JsonObject result = this.ops.setRecycleLimit(body.get("max_files").getAsInt());
+                    send(ex, 200, "application/json", result.toString().getBytes(StandardCharsets.UTF_8), false);
+                    return;
+                }
+                case "/api/recycle/restore" -> {
+                    requirePost(ex);
+                    JsonArray ids = readJsonBody(ex).getAsJsonArray("ids");
+                    if (ids == null || ids.isEmpty()) throw new IllegalArgumentException("ids 为空");
+                    if (ids.size() > 500) throw new IllegalArgumentException("单次最多恢复 500 个依赖组");
+                    List<String> groupIds = new ArrayList<>();
+                    for (var id : ids) groupIds.add(id.getAsString());
+                    JsonObject result = this.ops.restoreRecycleGroups(groupIds);
+                    send(ex, 200, "application/json", result.toString().getBytes(StandardCharsets.UTF_8), true);
                     return;
                 }
                 case "/api/rescan" -> {
@@ -275,9 +297,7 @@ public final class PanelHttpServer {
                 }
                 case "/api/ops/batch_delete" -> {
                     requirePost(ex);
-                    JsonObject body = JsonParser.parseString(
-                            new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)).getAsJsonObject();
-                    JsonArray arr = body.getAsJsonArray("uuids");
+                    JsonArray arr = readJsonBody(ex).getAsJsonArray("uuids");
                     if (arr == null || arr.isEmpty()) throw new IllegalArgumentException("uuids 为空");
                     if (arr.size() > 500) throw new IllegalArgumentException("单次最多 500 个");
                     List<UUID> uuids = new ArrayList<>();
@@ -286,6 +306,13 @@ public final class PanelHttpServer {
                     send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), true);
                     return;
                 }
+            }
+            var recycleMesh = java.util.regex.Pattern.compile(
+                    "/api/recycle/([0-9A-Za-z_-]{8,96})/body/([0-9a-fA-F-]{36})/mesh").matcher(path);
+            if (recycleMesh.matches()) {
+                JsonObject mesh = this.ops.recycleMesh(recycleMesh.group(1), UUID.fromString(recycleMesh.group(2)));
+                send(ex, 200, "application/json", mesh.toString().getBytes(StandardCharsets.UTF_8), true);
+                return;
             }
             var m = java.util.regex.Pattern.compile("/api/body/([0-9a-fA-F-]{36})/(mesh|teleport|delete|adopt)").matcher(path);
             if (m.matches()) {
@@ -346,8 +373,7 @@ public final class PanelHttpServer {
                     "{\"error\":\"本节点不是 HOST\"}".getBytes(StandardCharsets.UTF_8), false);
             return;
         }
-        JsonObject body = JsonParser.parseString(
-                new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)).getAsJsonObject();
+        JsonObject body = readJsonBody(ex);
         String id = body.get("id").getAsString();
         int port = body.get("port").getAsInt();
         String peerToken = body.has("token") ? body.get("token").getAsString() : this.config.token;
@@ -372,8 +398,7 @@ public final class PanelHttpServer {
      * PEER 收到(来自 HOST 的转发)只改自己。各自立即回写自己的 config 文件。
      */
     private void handleSetToken(HttpExchange ex) throws IOException {
-        JsonObject body = JsonParser.parseString(
-                new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)).getAsJsonObject();
+        JsonObject body = readJsonBody(ex);
         String next = body.has("token") ? body.get("token").getAsString().trim() : "";
         if (next.isEmpty() || next.length() > 64 || !next.matches("[A-Za-z0-9._~-]+")) {
             send(ex, 400, "application/json",
@@ -463,6 +488,7 @@ public final class PanelHttpServer {
         }
         JsonObject out = new JsonObject();
         out.addProperty("self", this.selfId);
+        out.addProperty("using_default_token", PanelConfig.DEFAULT_TOKEN.equals(this.config.token));
         out.add("servers", arr);
         return out;
     }
@@ -596,6 +622,11 @@ public final class PanelHttpServer {
         if (!ex.getRequestMethod().equalsIgnoreCase("POST")) {
             throw new IllegalArgumentException("需要 POST");
         }
+    }
+
+    private static JsonObject readJsonBody(HttpExchange ex) throws IOException {
+        return JsonParser.parseString(
+                new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)).getAsJsonObject();
     }
 
     private static Map<String, String> query(URI uri) {
