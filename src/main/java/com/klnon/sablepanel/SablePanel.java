@@ -102,6 +102,7 @@ public class SablePanel {
             this.scanExecutor.scheduleWithFixedDelay(scanOnce, 5, 120, TimeUnit.SECONDS);
             var scanExec = this.scanExecutor;
             OpsService ops = new OpsService(server, this.bodyIndex, () -> scanExec.execute(scanOnce), config);
+            StatsCollector.INSTANCE.start(config);
             this.panelServer = new PanelHttpServer(config, server, this.bodyIndex, ops);
             this.panelServer.start();
             var panel = this.panelServer;
@@ -113,6 +114,7 @@ public class SablePanel {
                 }
             }, PanelHttpServer.HEARTBEAT_SECONDS, PanelHttpServer.HEARTBEAT_SECONDS, TimeUnit.SECONDS);
         } catch (Throwable t) {
+            StatsCollector.INSTANCE.stop();
             LOGGER.error("sablepanel: panel startup failed", t);
         }
     }
@@ -218,6 +220,7 @@ public class SablePanel {
             this.scanExecutor.shutdownNow();
             this.scanExecutor = null;
         }
+        StatsCollector.INSTANCE.stop();
         EventLog.close();
     }
 }

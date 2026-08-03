@@ -23,6 +23,8 @@ public final class PanelConfig {
     public String token = DEFAULT_TOKEN;
     /** 回收站中实际 NBT 备份文件的硬上限；超出时按删除日期清理最早的完整依赖组。 */
     public int recycleMaxFiles = 500;
+    /** 每秒性能历史保留天数；历史文件位于 config/sablepanel/stats。 */
+    public int statsRetentionDays = 30;
 
     /**
      * 本服在面板里的显示名,留空则取服务端目录名。
@@ -77,6 +79,7 @@ public final class PanelConfig {
                 if (cfg != null) {
                     if (cfg.token == null || cfg.token.isBlank()) cfg.token = DEFAULT_TOKEN;
                     if (cfg.recycleMaxFiles < 1) cfg.recycleMaxFiles = 500;
+                    if (cfg.statsRetentionDays < 1) cfg.statsRetentionDays = 30;
                     // 旧版本的配置文件缺新字段(会取默认值),补写回去,服主才看得见能调什么
                     String full = gson.toJson(cfg);
                     if (!full.equals(raw)) Files.writeString(file, full);
