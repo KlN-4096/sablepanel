@@ -32,7 +32,7 @@ import java.util.zip.GZIPOutputStream;
  *   GET  /vendor/three.min.js     内置 three.js(无需外网)
  *   GET  /api/servers             集群成员列表
  *   GET  /api/bodies              全量索引(组聚合,纯内存缓存)
- *   GET  /api/stats               TPS/MSPT/物理耗时序列
+ *   GET  /api/stats?from=&to=&max_points= TPS/MSPT/物理耗时与持久化历史
  *   GET  /api/recycle             回收站依赖组、属性与上限
  *   GET  /api/recycle/{id}/body/{uuid}/mesh 回收站体素预览
  *   POST /api/recycle/restore     {"ids":[...]}
@@ -263,8 +263,22 @@ public final class PanelHttpServer {
                     return;
                 }
                 case "/api/stats" -> {
+                    Map<String, String> values = query(ex.getRequestURI());
+                    JsonObject stats;
+                    if (values.containsKey("from") || values.containsKey("to")) {
+                        if (!values.containsKey("from") || !values.containsKey("to")) {
+                            throw new IllegalArgumentException("from 和 to 必须同时提供");
+                        }
+                        long from = Long.parseLong(values.get("from"));
+                        long to = Long.parseLong(values.get("to"));
+                        int maxPoints = values.containsKey("max_points")
+                                ? Integer.parseInt(values.get("max_points")) : 2000;
+                        stats = StatsCollector.INSTANCE.toJson(from, to, maxPoints);
+                    } else {
+                        stats = StatsCollector.INSTANCE.toJson(300);
+                    }
                     send(ex, 200, "application/json",
-                            StatsCollector.INSTANCE.toJson(300).toString().getBytes(StandardCharsets.UTF_8), true);
+                            stats.toString().getBytes(StandardCharsets.UTF_8), true);
                     return;
                 }
                 case "/api/recycle" -> {
