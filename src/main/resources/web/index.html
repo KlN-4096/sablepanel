@@ -285,7 +285,7 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
 .toast.bad{border-color:var(--bad)}
 .toast.ok{border-color:var(--ok)}
 @keyframes tIn{from{transform:translateX(24px);opacity:0}to{transform:none;opacity:1}}
-#modalBack{position:fixed;inset:0;z-index:80;background:rgba(5,7,10,.7);display:none;align-items:center;
+#modalBack{position:fixed;inset:0;z-index:85;background:rgba(5,7,10,.7);display:none;align-items:center;
   justify-content:center;backdrop-filter:blur(2px)}
 #modal{background:var(--card2);border:1px solid var(--line2);border-radius:13px;padding:20px 22px;width:min(470px,92vw);
   box-shadow:0 18px 50px rgba(0,0,0,.65);max-height:86vh;display:flex;flex-direction:column;
@@ -297,6 +297,36 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
 #modal .btns{display:flex;gap:9px;justify-content:flex-end}
 #modalNever{display:none;align-items:center;gap:8px;color:var(--fg2);font-size:12.5px;margin:0 0 14px;cursor:pointer}
 #modalNever input{width:14px;height:14px;margin:0}
+.panelBack{position:fixed;inset:0;z-index:82;background:rgba(5,7,10,.76);display:none;align-items:center;
+  justify-content:center;backdrop-filter:blur(2px)}
+.widePanel{width:920px;height:min(720px,88vh);background:var(--card2);border:1px solid var(--line2);
+  box-shadow:0 18px 50px rgba(0,0,0,.65);display:flex;flex-direction:column;overflow:hidden}
+.wideHead{height:52px;display:flex;align-items:center;padding:0 17px;border-bottom:1px solid var(--line);flex:none}
+.wideHead h3{font-size:15px;flex:1}.wideHead button{padding:5px 9px}
+.manualLayout{display:grid;grid-template-columns:190px minmax(0,1fr);min-height:0;flex:1}
+#manualTabs{padding:12px;border-right:1px solid var(--line);background:#0f131b;overflow-y:auto}
+#manualTabs button{display:block;width:100%;text-align:left;border:none;background:transparent;margin-bottom:3px}
+#manualTabs button.on{background:#1d2a3e;color:var(--acc)}
+#manualContent{padding:20px 24px 28px;overflow-y:auto}
+#manualContent h3{font-size:15px;margin:0 0 13px}
+#manualContent h4{font-size:12px;color:var(--acc);margin:18px 0 6px}
+#manualContent p,#manualContent li{font-size:12.5px;color:var(--fg2);line-height:1.7}
+#manualContent ul{padding-left:19px}
+#manualContent code{font-family:var(--mono);color:#cfe4ff;background:#0d1118;padding:1px 4px}
+.copyPanelBody{padding:16px 18px;overflow-y:auto;flex:1}
+.copySummary{font-size:12.5px;color:var(--fg2);margin-bottom:12px}
+.copyTable{width:100%;border-collapse:collapse;font-size:12px}
+.copyTable th{text-align:left;color:var(--dim);font-weight:500;border-bottom:1px solid var(--line2);padding:6px}
+.copyTable td{border-bottom:1px solid var(--line);padding:7px 6px;vertical-align:top}
+.copyTable .entry{font-family:var(--mono);font-size:10.5px;word-break:break-all}
+.copyPanelFoot{display:flex;align-items:center;gap:9px;padding:12px 18px;border-top:1px solid var(--line);flex:none}
+.copyPanelFoot .status{flex:1;color:var(--dim);font-size:12px}
+.cloneReason{color:var(--dim);font-size:11px;line-height:1.5;margin-bottom:5px}
+.clonePeer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;width:100%;padding:6px 7px;
+  border:0;border-bottom:1px solid var(--line);background:transparent;text-align:left;font-size:11px}
+.clonePeer:hover{background:#171e2b}.clonePeer:last-child{border-bottom:0}
+.clonePeer b,.clonePeer small{display:block}.clonePeer small{font-size:9.5px;color:var(--dim);word-break:break-all;margin-top:2px}
+.clonePeer span:last-child{text-align:right;color:var(--dim);white-space:nowrap;line-height:1.55}
 #loginGate{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;padding:20px;
   background:var(--bg)}
 #loginBox{width:min(390px,100%);background:var(--card2);border:1px solid var(--line2);border-radius:8px;
@@ -446,6 +476,7 @@ body.locked>header,body.locked>#views{visibility:hidden}
         </div>
         <div class="row">
           <button class="danger" id="delBodyBtn" onclick="doDelete()" data-i18n="delBody">删除该物理体</button>
+          <button id="dedupeBtn" onclick="openDedupe()" style="display:none" data-i18n="dedupe">去重副本</button>
         </div>
         <div class="row"><span class="muted" style="font-size:11px" data-i18n="delHint">删除前自动备份到回收站</span></div>
       </div>
@@ -515,6 +546,15 @@ body.locked>header,body.locked>#views{visibility:hidden}
   <input id="modalInput" style="display:none" autocomplete="off">
   <label id="modalNever"><input type="checkbox" id="modalNeverInput"><span data-i18n="neverRemind">永不提醒</span></label>
   <div class="btns"><button id="modalCancelBtn" onclick="modalCancel()" data-i18n="cancel">取消</button><button id="modalConfirmBtn" class="primary" onclick="modalConfirm()" data-i18n="confirm">确认</button></div>
+</div></div>
+<div id="manualBack" class="panelBack"><div class="widePanel">
+  <div class="wideHead"><h3 data-i18n="manualTitle">SablePanel 使用说明</h3><button onclick="closeManual()">✕</button></div>
+  <div class="manualLayout"><div id="manualTabs"></div><div id="manualContent"></div></div>
+</div></div>
+<div id="copyBack" class="panelBack"><div class="widePanel" style="width:820px;height:min(610px,84vh)">
+  <div class="wideHead"><h3 data-i18n="dedupeTitle">整理重复存档副本</h3><button onclick="closeDedupe()">✕</button></div>
+  <div class="copyPanelBody" id="copyPanelBody"></div>
+  <div class="copyPanelFoot"><span class="status" id="copyPanelStatus"></span><button onclick="closeDedupe()" data-i18n="cancel">取消</button><button class="primary" id="dedupeConfirm" onclick="confirmDedupe()" data-i18n="dedupeConfirm">确认去重</button></div>
 </div></div>
 <div id="busy"><div class="spinner"></div><div id="busyText"></div></div>
 
@@ -598,11 +638,28 @@ const I18N = {
     recNone:'没有需要清理的物理体', recTooMany:'单次最多处理 500 个物理体,未执行删除',
     dashBodies:'物理体总数', dashBlocks:'方块总量', dashLoaded:'加载中', dashClean:'可清理',
     dashState:'状态分布', dashScale:'规模分布', dashDims:'维度分布', dashAnom:'异常',
-    physChartT:'物理引擎耗时(近 5 分钟,每秒采样)',
-    physHint:'物理引擎按维度整体步进,单体开销见右侧;两者都不含服务器其它 mod 的耗时。',
+    physChartT:'物理性能历史',
+    physHint:'维度曲线是物理引擎整体步进耗时,粉色曲线是全部加载体的 Java 逻辑耗时;均不含其它 mod。',
     dashGo:'查看 →', dashHealthy:'存档干净', dashRecBlocks:'可回收方块', dashRecGroups:'推荐组',
     dashOrphans:'孤儿体', dashDup:'多副本体', dashClone:'疑似克隆体', dashHolding:'暂存中',
     tools:'维护', rescan:'立即重扫磁盘', rescanOk:'已触发重扫,数秒后刷新',
+    manualOpen:'使用说明', manualTitle:'SablePanel 使用说明',
+    manualStates:'状态与判断', manualCleanup:'清理判断', manualOps:'操作', manualRecycle:'回收站',
+    manualPerformance:'性能数据', manualMaintenance:'面板维护',
+    dedupe:'去重副本', dedupeTitle:'整理重复存档副本', dedupeConfirm:'确认去重',
+    dedupeScanning:'正在实时扫描所有副本和 holding 指针…',
+    dedupeSafe:(n)=>`共 ${n} 个副本,完整 NBT 全部一致。将保留标记为“主副本”的条目。`,
+    dedupeUnsafe:'副本完整 NBT 不一致,只能查看差异,禁止自动删除。',
+    dedupeSingle:'实时扫描只找到一个条目,无需去重。',
+    dedupeAsk:(n)=>`确认通过 Sable 保存流程清理 ${n} 个完全相同的多余条目?\n主副本会保留,本操作不生成回收站记录。`,
+    dedupeDone:(n)=>`副本去重完成,已清理 ${n} 个条目`, dedupeFail:'副本去重失败: ',
+    copyEntry:'条目 ID', copyPointer:'指针', copyBlocks:'方块', copyPlace:'位置 / 尺寸', copyCompare:'与主副本',
+    copyKeep:'主副本', copySame:'完全一致', copyDifferent:'内容不同', copyReachable:(n)=>`有效 ×${n}`, copyUnreachable:'无有效指针',
+    cloneWith:(n)=>`与 ${n} 个物理体疑似克隆`, cloneRelation:'疑似克隆关联', clonePeers:'关联物理结构',
+    cloneNamedReason:'名称、方块数和取整包围盒相同',
+    cloneUnnamedReason:'均未命名且不少于 50 块,方块数和取整包围盒相同',
+    chartLive:'回到实时', chartInvalid:'起止时间无效', chartRaw:'原始采样', chartPeak:'区间峰值',
+    chartMeta:(n,s,a)=>`${n} 点 · ${s} · ${a}`, chartInterval:(s)=>`代表 ${s}`,
     tokenChange:'修改访问口令', tokenChangeT:'修改访问口令',
     tokenChangeMsg:'新口令(字母、数字和 . - _ ~,1~64 位)。\n集群内所有服务器会一起改,改完本页会自动换用新口令。',
     tokenHint:'访问口令即本面板的密码,集群内共用一个;改动会同步到所有成员并写入各自的配置文件。',
@@ -694,11 +751,28 @@ const I18N = {
     recNone:'Nothing to clean up', recTooMany:'Max 500 bodies per call; nothing was deleted',
     dashBodies:'Total bodies', dashBlocks:'Total blocks', dashLoaded:'Loaded', dashClean:'Cleanable',
     dashState:'State breakdown', dashScale:'Size breakdown', dashDims:'Dimensions', dashAnom:'Anomalies',
-    physChartT:'Physics engine time (last 5 min, 1s samples)',
-    physHint:'The physics engine steps per dimension as a whole; per-body cost is on the right. Neither includes other mods.',
+    physChartT:'Physics performance history',
+    physHint:'Dimension lines show whole physics-step time; the pink line is Java logic across loaded bodies. Other mods are excluded.',
     dashGo:'View →', dashHealthy:'Save is clean', dashRecBlocks:'Reclaimable blocks', dashRecGroups:'Groups',
     dashOrphans:'Orphans', dashDup:'Multi-copy', dashClone:'Clone suspects', dashHolding:'Holding',
     tools:'Maintenance', rescan:'Rescan disk now', rescanOk:'Rescan triggered',
+    manualOpen:'User guide', manualTitle:'SablePanel user guide',
+    manualStates:'States & detection', manualCleanup:'Cleanup rules', manualOps:'Operations', manualRecycle:'Recycle bin',
+    manualPerformance:'Performance data', manualMaintenance:'Panel maintenance',
+    dedupe:'Deduplicate copies', dedupeTitle:'Inspect duplicate save entries', dedupeConfirm:'Deduplicate',
+    dedupeScanning:'Scanning every copy and holding pointer now…',
+    dedupeSafe:(n)=>`${n} copies have identical complete NBT. The marked primary entry will be kept.`,
+    dedupeUnsafe:'Complete NBT differs. Differences are shown, but automatic deletion is disabled.',
+    dedupeSingle:'The live scan found only one entry; no deduplication is needed.',
+    dedupeAsk:(n)=>`Remove ${n} identical extra entries through Sable's save path?\nThe primary copy remains and no recycle record is created.`,
+    dedupeDone:(n)=>`Deduplication complete: ${n} entries removed`, dedupeFail:'Deduplication failed: ',
+    copyEntry:'Entry ID', copyPointer:'Pointer', copyBlocks:'Blocks', copyPlace:'Position / size', copyCompare:'Compared with primary',
+    copyKeep:'Primary', copySame:'Identical', copyDifferent:'Different', copyReachable:(n)=>`valid ×${n}`, copyUnreachable:'no valid pointer',
+    cloneWith:(n)=>`Clone suspect with ${n} bodies`, cloneRelation:'Clone-suspect links', clonePeers:'Related bodies',
+    cloneNamedReason:'Same name, block count, and rounded bounds',
+    cloneUnnamedReason:'All unnamed with at least 50 blocks, same block count and rounded bounds',
+    chartLive:'Back to live', chartInvalid:'Invalid date range', chartRaw:'raw samples', chartPeak:'interval peaks',
+    chartMeta:(n,s,a)=>`${n} points · ${s} · ${a}`, chartInterval:(s)=>`represents ${s}`,
     tokenChange:'Change access token', tokenChangeT:'Change access token',
     tokenChangeMsg:'New token (letters, digits and . - _ ~, 1-64 chars).\nEvery server in the cluster is updated together; this page switches over automatically.',
     tokenHint:'The access token is this panel\u2019s password, shared across the cluster; changes propagate to every member and are written to their config files.',
@@ -747,11 +821,15 @@ if (initialUrl.searchParams.has('token')) {
   history.replaceState(null, '', initialUrl);
 }
 let DATA = null, STATS = null, RECYCLE = null;
+let CLONE_SETS = new Map();
 let SEL = null, SELG = null, RSEL = null, RSELG = null, MESH_DATA = null, MESH_UUID = null, MESH_SOURCE = null;
 let VIEW = localStorage.getItem('spView') || 'dash';
 let TAB = 'all';
 let R_TAB = 'all';
 let refreshTimer = 60;
+const CHART_PRESETS = [300,900,3600,21600,86400,604800,2592000];
+let CHART = {from:0,to:0,span:300,live:true,preset:300,hoverIndex:-1,fetchTimer:null};
+let COPY_SCAN = null, COPY_UUID = null, MANUAL_TAB = 'states';
 
 /* 集群:同机多服共用一个端口,顶栏切换;CURSRV 为空表示"本机 HOST 自己" */
 let SERVERS = [], CURSRV = localStorage.getItem('spServer') || '';
@@ -882,6 +960,8 @@ document.getElementById('modalInput').addEventListener('keydown', e => { if (e.k
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('modalBack').style.display === 'flex') modalCancel();
+    else if (document.getElementById('copyBack').style.display === 'flex') closeDedupe();
+    else if (document.getElementById('manualBack').style.display === 'flex') closeManual();
     else if (document.getElementById('fsOverlay').style.display === 'block') closePreviewFs();
   }
 });
@@ -947,11 +1027,14 @@ function toggleSrvPop(){
 }
 async function switchServer(id){
   document.getElementById('srvPop').style.display = 'none';
+  closeDedupe();
   const self = SERVERS.find(s => s.self);
   CURSRV = (self && id === self.id) ? '' : id;
   localStorage.setItem('spServer', CURSRV);
   // 切服等于换了一整套数据,旧的一律作废
   DATA = STATS = RECYCLE = null; SEL = SELG = RSEL = RSELG = MESH_DATA = MESH_UUID = MESH_SOURCE = null;
+  CLONE_SETS = new Map();
+  CHART.live = true; CHART.span = 300; CHART.preset = 300; CHART.hoverIndex = -1;
   SELECTED = new Set(); BODY_BY_UUID = new Map();
   R_SELECTED = new Set(); RECYCLE_BY_ID = new Map();
   document.getElementById('dbody').innerHTML =
@@ -972,6 +1055,7 @@ async function loadBodies() {
     const keepUuid = SEL && SEL.uuid;
     DATA = await api('/api/bodies');
     BODY_BY_UUID = new Map();
+    CLONE_SETS = new Map((DATA.clone_sets || []).map(set=>[Number(set.id), set]));
     DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));
     SELECTED = new Set([...SELECTED].filter(u => BODY_BY_UUID.has(u)));
     const dims = new Set();
@@ -1162,6 +1246,9 @@ const STATE_DOT = {loaded:'var(--ok)', stored:'#495468', holding:'var(--warn)', 
 let renderLimit = 400;
 let lastVisibleGroups = [];
 
+function cloneSetOf(body){ return body && body.clone_set !== undefined ? CLONE_SETS.get(Number(body.clone_set)) : null; }
+function clonePeerCount(body){ const set=cloneSetOf(body); return set ? Math.max(0,(set.members||[]).length-1) : 0; }
+
 function render() {
   if (!DATA || VIEW !== 'bodies') return;
   const states = checked('fState'), sizes = checked('fSize'), dims = checked('fDim');
@@ -1222,7 +1309,7 @@ function render() {
       if (SEL && SEL.uuid === b.uuid) m.classList.add('sel');
       const extra = [];
       if (b.copies) extra.push(`<span class="tag warn">${b.copies} ${t('copiesX')}</span>`);
-      if (b.clone) extra.push(`<span class="tag clone">${t('cloneTag')}</span>`);
+      if (b.clone) extra.push(`<span class="tag clone">${t('cloneWith')(clonePeerCount(b))}</span>`);
       if (b.deps) extra.push(`<span class="tag">${t('depsX')} ${b.deps}</span>`);
       if (b.runtime && b.runtime.cost_ms !== undefined)
         extra.push(`<span class="tag acc mono">${b.runtime.cost_ms.toFixed(2)} ms/t</span>`);
@@ -1546,6 +1633,18 @@ function stateLabel(s){ return s==='loaded'?t('stateLoaded'):s==='orphan'?t('sta
 function reasonLabel(r){ return t('r' + r[0].toUpperCase() + r.slice(1)); }
 function protLabel(p){ return t('p' + p[0].toUpperCase() + p.slice(1)); }
 function recPolicy(){ return (DATA && DATA.rec_policy) || {blocks:20, types:4, be:3}; }
+function cloneDetail(body){
+  const set = cloneSetOf(body);
+  if (!set) return '';
+  const reason = set.mode === 'named' ? t('cloneNamedReason') : t('cloneUnnamedReason');
+  const size = (set.rounded_size || []).join(' × ');
+  const peers = (set.members || []).filter(uuid=>uuid!==body.uuid).map(uuid=>BODY_BY_UUID.get(uuid)).filter(Boolean);
+  return `<div class="cloneReason">${reason}<br>${fmt(set.blocks||0)} ${t('blocksUnit')} · ${esc(size)}</div>` +
+    peers.map(({b})=>`<button class="clonePeer" onclick="focusBody('${b.uuid}')">
+      <span><b>${esc(b.name)||t('unnamed')}</b><small class="mono">${b.uuid}</small></span>
+      <span>${esc((b.dim||'').replace('minecraft:',''))}<br>${(b.pos||[0,0,0]).map(v=>Number(v).toFixed(0)).join(', ')}</span>
+    </button>`).join('');
+}
 function renderDetail(){
   const b = SEL, g = SELG;
   if (!b) return;
@@ -1574,6 +1673,7 @@ function renderDetail(){
     const entries = (b.entries||[]).map(e=>`<div class="val" style="font-size:10.5px">${esc(e)}</div>`).join('');
     rows.push([t('copiesRow'), `${b.copies} ${t('copiesShow')}${entries}`]);
   }
+  if (b.clone) rows.push([t('cloneRelation'), cloneDetail(b)]);
   if (b.deps) rows.push([t('deps'), b.deps]);
   rows.push([t('group'), t('groupVal')(g.members, g.blocks)]);
   if (g.rec) rows.push([t('recWhy'),
@@ -1589,6 +1689,7 @@ function renderDetail(){
   document.getElementById('ty').value = (pos[1]|0)+30;
   document.getElementById('tz').value = pos[2]|0;
   document.getElementById('adoptRow').style.display = b.state === 'orphan' ? 'flex' : 'none';
+  document.getElementById('dedupeBtn').style.display = b.copies > 1 ? '' : 'none';
   document.getElementById('delBodyBtn').textContent = g.members > 1 ? t('delGroup')(g.members) : t('delBody');
 }
 function copyText(s){
@@ -1622,6 +1723,59 @@ function renderComposition(){
 }
 
 /* ===================== 操作 ===================== */
+async function openDedupe(){
+  if (!SEL) return;
+  const uuid = SEL.uuid;
+  COPY_UUID = uuid; COPY_SCAN = null;
+  document.getElementById('copyBack').style.display = 'flex';
+  document.getElementById('copyPanelBody').innerHTML = `<div class="empty">${t('dedupeScanning')}</div>`;
+  document.getElementById('copyPanelStatus').textContent = '';
+  document.getElementById('dedupeConfirm').disabled = true;
+  try {
+    const result = await api(`/api/body/${uuid}/copies`);
+    if (COPY_UUID !== uuid || result.uuid !== uuid) return;
+    COPY_SCAN = result; renderDedupe(result);
+  } catch(e) {
+    if (COPY_UUID !== uuid) return;
+    document.getElementById('copyPanelBody').innerHTML = `<div class="empty" style="color:var(--bad)">${esc(e.message)}</div>`;
+    document.getElementById('copyPanelStatus').textContent = t('dedupeFail') + e.message;
+  }
+}
+function renderDedupe(scan){
+  const copies = scan.copies || [];
+  const safe = scan.identical && copies.length > 1;
+  const summary = copies.length < 2 ? t('dedupeSingle') : scan.identical ? t('dedupeSafe')(copies.length) : t('dedupeUnsafe');
+  document.getElementById('copyPanelBody').innerHTML = `<div class="copySummary">${summary}</div>
+    <table class="copyTable"><thead><tr><th>${t('copyEntry')}</th><th>${t('copyPointer')}</th><th>${t('copyBlocks')}</th><th>${t('copyPlace')}</th><th>${t('copyCompare')}</th></tr></thead>
+    <tbody>${copies.map(copy=>`<tr>
+      <td class="entry">${copy.keep?`<span class="tag acc">${t('copyKeep')}</span><br>`:''}${esc(copy.entry)}</td>
+      <td>${copy.reachable?`<span class="tag ok">${t('copyReachable')(copy.pointer_count||0)}</span>`:`<span class="tag bad">${t('copyUnreachable')}</span>`}</td>
+      <td class="mono">${fmt(copy.blocks||0)}</td>
+      <td class="mono">${esc(copy.dim)}<br>${(copy.pos||[]).map(v=>Number(v).toFixed(1)).join(', ')}<br>${(copy.size||[]).map(v=>Number(v).toFixed(1)).join(' × ')}</td>
+      <td><span class="tag ${copy.identical?'ok':'bad'}">${copy.identical?t('copySame'):t('copyDifferent')}</span></td>
+    </tr>`).join('')}</tbody></table>`;
+  document.getElementById('copyPanelStatus').textContent = summary;
+  document.getElementById('dedupeConfirm').disabled = !safe;
+}
+function closeDedupe(){
+  document.getElementById('copyBack').style.display = 'none';
+  COPY_SCAN = null; COPY_UUID = null;
+}
+async function confirmDedupe(){
+  if (!COPY_SCAN || !COPY_SCAN.identical || (COPY_SCAN.copies||[]).length < 2 || !COPY_UUID) return;
+  const uuid = COPY_UUID;
+  const removeCount = COPY_SCAN.copies.length - 1;
+  if (!await askModal(t('dedupeTitle'),t('dedupeAsk')(removeCount),false)) return;
+  if (COPY_UUID !== uuid) return;
+  busy(t('loading'));
+  try {
+    const result = await api(`/api/body/${uuid}/deduplicate`,{method:'POST'});
+    closeDedupe();
+    toast(t('dedupeDone')(result.removed||0),'ok');
+    await loadBodies();
+  } catch(e) { toast(t('dedupeFail')+e.message,'bad'); }
+  busy(null);
+}
 async function doTeleport() {
   if (!SEL) return;
   const x = document.getElementById('tx').value, y = document.getElementById('ty').value, z = document.getElementById('tz').value;
@@ -2056,6 +2210,8 @@ function closePreviewFs(){
 }
 document.getElementById('fsOpen').addEventListener('click', openPreviewFs);
 document.getElementById('fsClose').addEventListener('click', closePreviewFs);
+document.getElementById('manualBack').addEventListener('mousedown',event=>{ if(event.target.id==='manualBack') closeManual(); });
+document.getElementById('copyBack').addEventListener('mousedown',event=>{ if(event.target.id==='copyBack') closeDedupe(); });
 window.addEventListener('resize', () => { resizeGL(); if (VIEW==='dash') renderDash(); });
 
 /* ===================== 启动 ===================== */
