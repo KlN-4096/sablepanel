@@ -10,7 +10,6 @@ import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.storage.HoldingSubLevel;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
 import dev.ryanhcode.sable.sublevel.storage.holding.GlobalSavedSubLevelPointer;
-import dev.ryanhcode.sable.sublevel.storage.holding.SubLevelHoldingChunkMap;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelData;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelSerializer;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
@@ -224,35 +223,47 @@ public final class OpsService {
             meta = DiskScanner.scanEntryMetaStrict(dimensions);
         }
         List<Set<UUID>> selectedGroups = DiskScanner.selectedDependencyComponents(meta, targets);
-        // 只为选中组的成员重读完整 NBT(全量扫描只留元数据,堆峰值不随全服条目数走);
-        // 重读时验 uuid,准备期被 sable 搬迁则整批在任何破坏性动作前干净失败
-        Map<DiskScanner.EntryKey, CompoundTag> tags = new LinkedHashMap<>();
+        Set<UUID> selected = new LinkedHashSet<>();
         for (Set<UUID> group : selectedGroups) {
-            for (UUID target : group) {
-                for (DiskScanner.EntryMeta copy : meta.getOrDefault(target, List.of())) {
-                    tags.put(copy.key(), readVerifiedTag(dimensions, target, copy.key()));
-                }
-            }
+            selected.addAll(group);
         }
-        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
-                DiskScanner.locatePointersStrict(dimensions, tags.keySet());
+        Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(dimensions, meta, selected);
 
         List<DeleteComponent> components = new ArrayList<>();
         for (Set<UUID> group : selectedGroups) {
             DeleteComponent component = new DeleteComponent();
             for (UUID target : group) {
-                List<DeleteCopy> copies = new ArrayList<>();
-                for (DiskScanner.EntryMeta copy : meta.getOrDefault(target, List.of())) {
-                    CompoundTag tag = tags.get(copy.key());
-                    copies.add(new DeleteCopy(copy.key(), tag,
-                            DiskScanner.countBlocks(tag.getCompound("plot"), null),
-                            List.copyOf(pointers.getOrDefault(copy.key(), List.of()))));
-                }
-                component.addTarget(target, copies);
+                component.addTarget(target, prepared.getOrDefault(target, List.of()));
             }
             components.add(component);
         }
         return components;
+    }
+
+    /** 只为指定成员重读完整 NBT；重读时验 UUID，避免准备期间槽位被 Sable 复用。 */
+    private Map<UUID, List<DeleteCopy>> readDeleteCopies(
+            Map<String, Path> dimensions, Map<UUID, List<DiskScanner.EntryMeta>> meta,
+            Set<UUID> targets) throws Exception {
+        Map<DiskScanner.EntryKey, CompoundTag> tags = new LinkedHashMap<>();
+        for (UUID target : targets) {
+            for (DiskScanner.EntryMeta copy : meta.getOrDefault(target, List.of())) {
+                tags.put(copy.key(), readVerifiedTag(dimensions, target, copy.key()));
+            }
+        }
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
+                DiskScanner.locatePointersStrict(dimensions, tags.keySet());
+        Map<UUID, List<DeleteCopy>> result = new LinkedHashMap<>();
+        for (UUID target : targets) {
+            List<DeleteCopy> copies = new ArrayList<>();
+            for (DiskScanner.EntryMeta copy : meta.getOrDefault(target, List.of())) {
+                CompoundTag tag = tags.get(copy.key());
+                copies.add(new DeleteCopy(copy.key(), tag,
+                        DiskScanner.countBlocks(tag.getCompound("plot"), null),
+                        List.copyOf(pointers.getOrDefault(copy.key(), List.of()))));
+            }
+            result.put(target, List.copyOf(copies));
+        }
+        return result;
     }
 
     private static CompoundTag readVerifiedTag(Map<String, Path> dims, UUID uuid, DiskScanner.EntryKey key)
@@ -311,7 +322,6 @@ public final class OpsService {
                     return Integer.compare(second.blocks(), first.blocks());
                 });
                 for (DeleteCopy copy : ordered) {
-                    status.entryKeys.add(copy.key());
                     sources.add(new RecycleStore.Source(uuid, copy.key().dim(), copy.key(), copy.tag()));
                 }
             }
@@ -341,6 +351,11 @@ public final class OpsService {
 
     private void processDeleteComponent(DeleteComponent component, Map<UUID, DeleteStatus> statuses,
                                         DeleteFlush flush) {
+        for (UUID uuid : component.targets) {
+            for (DeleteCopy copy : component.copies.getOrDefault(uuid, List.of())) {
+                statuses.get(uuid).entryKeys.add(copy.key());
+            }
+        }
         if (componentHasErrors(component, statuses)) return;
         boolean hasCopies = component.copies.values().stream().anyMatch(copies -> !copies.isEmpty());
         if (!hasCopies && componentIsAbsent(component)) {
@@ -436,8 +451,6 @@ public final class OpsService {
     private void prepareAndSnatchDeleteChunk(DeleteExecution execution, List<SnatchRequest> requests) {
         Map<UUID, SnatchRequest> targets = new LinkedHashMap<>();
         for (SnatchRequest request : requests) {
-            // 已经删掉的目标不再 snatch:体不在 holding 里,sable 只会白报一条 ERROR
-            if (execution.removedBodies.containsKey(request.uuid())) continue;
             targets.putIfAbsent(request.uuid(), request);
         }
         if (targets.isEmpty()) return;
@@ -446,33 +459,15 @@ public final class OpsService {
         ServerSubLevelContainer container = level == null ? null : SubLevelContainer.getContainer(level);
         if (container == null) throw new IllegalStateException("holding 指针所在维度不可用");
         var holdingMap = container.getHoldingChunkMap();
-        ChunkPos chunk = new ChunkPos(first.location().chunkX(), first.location().chunkZ());
-
-        Map<UUID, HoldingSubLevel> roots = new LinkedHashMap<>();
-        captureChunkRoots(holdingMap, chunk, targets.keySet(), roots);
         loadPreparedMember(first.uuid(),
                 new MemberPlan(first.copy().key(), first.copy().tag(), first.location()));
         removeLoadedTargets(execution);
-        captureChunkRoots(holdingMap, chunk, targets.keySet(), roots);
 
-        for (HoldingSubLevel root : roots.values()) {
-            if (!root.data().dependencies().isEmpty()) root.data().dependencies().clear();
-        }
         for (SnatchRequest request : targets.values()) {
             // 根体 snatch 会连带拖入同 chunk 的依赖目标(SubLevelHoldingChunk.snatch 遍历一层依赖),
-            // 已经加载的不再 snatch,否则 sable 对着空 holding 表白报 ERROR
+            // 已经加载的不再 snatch。这里不能清空实时 dependencies；失败保存会把破坏持久化。
             if (resolveLoaded(request.uuid()) != null) continue;
             holdingMap.snatchAndLoad(toPointer(request.location()), request.uuid());
-        }
-    }
-
-    private static void captureChunkRoots(
-            SubLevelHoldingChunkMap holdingMap,
-            ChunkPos chunk, Set<UUID> targets, Map<UUID, HoldingSubLevel> roots) {
-        for (UUID uuid : targets) {
-            HoldingSubLevel holding = holdingMap.getHoldingSubLevel(uuid);
-            if (holding == null || holding.pointer() == null) continue;
-            if (holding.pointer().chunkPos().equals(chunk)) roots.put(uuid, holding);
         }
     }
 
@@ -648,6 +643,55 @@ public final class OpsService {
         });
     }
 
+    /** 删除失败回滚前先清掉所有残留，随后才能从快照完整重建同 UUID 依赖组。 */
+    private void purgeRestoreTargets(Set<UUID> targets) throws Exception {
+        DeleteComponent component = prepareExactDeleteComponent(targets);
+        if (!component.targets.isEmpty()) {
+            Map<UUID, DeleteStatus> statuses = new LinkedHashMap<>();
+            for (UUID uuid : component.targets) statuses.put(uuid, new DeleteStatus(uuid));
+            executeDeleteComponents(List.of(component), statuses);
+            verifyDeletedTargets(statuses);
+            List<String> errors = new ArrayList<>();
+            for (DeleteStatus status : statuses.values()) {
+                if (!status.ok) errors.add(status.uuid + ": " + String.join("; ", status.errors));
+            }
+            if (!errors.isEmpty()) throw new IllegalStateException("回滚前残留清理失败: " + String.join(" | ", errors));
+        }
+        requireTargetsAbsent(targets);
+    }
+
+    private DeleteComponent prepareExactDeleteComponent(Set<UUID> targets) throws Exception {
+        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
+        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        if (flushUnsavedTargets(new ArrayList<>(targets), meta)) {
+            dimensions = DiskScanner.sublevelDirsStrict(this.server);
+            meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        }
+        Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(dimensions, meta, targets);
+        DeleteComponent component = new DeleteComponent();
+        for (UUID target : targets) {
+            List<DeleteCopy> copies = prepared.getOrDefault(target, List.of());
+            if (!copies.isEmpty()) component.addTarget(target, copies);
+        }
+        return component;
+    }
+
+    private void requireTargetsAbsent(Set<UUID> targets) throws Exception {
+        DiskScanner.invalidateCache();
+        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
+        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        JsonObject runtime = readRuntimeStates(targets);
+        for (UUID uuid : targets) {
+            if (!meta.getOrDefault(uuid, List.of()).isEmpty()) {
+                throw new IllegalStateException("回滚前仍有磁盘条目: " + uuid);
+            }
+            JsonObject state = runtime.getAsJsonObject(uuid.toString());
+            if (state != null && (state.get("loaded").getAsBoolean() || state.get("holding").getAsBoolean())) {
+                throw new IllegalStateException("回滚前运行时仍有物理体: " + uuid);
+            }
+        }
+    }
+
     private void finalizeDeleteBackups(List<DeleteComponent> components, Map<UUID, DeleteStatus> statuses) {
         boolean restoredAny = false;
         for (DeleteComponent component : components) {
@@ -681,15 +725,27 @@ public final class OpsService {
                 // 失败时不会清空,盘上"看似还在"的条目仍可能被下一次自动保存清掉。
                 // 备份转正进回收站并标记已恢复;转正失败就留在 .pending,数据不丢。
                 try {
-                    this.recycle.markRestored(this.recycle.commit(component.stage));
+                    String groupId = this.recycle.commit(component.stage);
+                    this.recycle.markRestored(groupId);
+                    for (UUID uuid : component.targets) statuses.get(uuid).recycleGroup = groupId;
                 } catch (Exception keepError) {
                     SablePanel.LOGGER.warn("sablepanel: keeping rollback backup {} in the pending area",
                             component.stage.id(), keepError);
                 }
             } catch (Exception error) {
-                failComponent(component, statuses,
-                        "删除失败且自动恢复失败，内部事务已保留: " + component.stage.id());
                 SablePanel.LOGGER.error("sablepanel: failed delete rollback {}", component.stage.id(), error);
+                try {
+                    String groupId = this.recycle.commitRecoveryRequired(component.stage);
+                    for (UUID uuid : component.targets) statuses.get(uuid).recycleGroup = groupId;
+                    failComponent(component, statuses,
+                            "删除失败且自动恢复失败，完整备份已进入回收站: " + groupId);
+                } catch (Exception keepError) {
+                    failComponent(component, statuses,
+                            "删除失败且自动恢复失败，内部事务已保留: " + component.stage.id());
+                    error.addSuppressed(keepError);
+                    SablePanel.LOGGER.error("sablepanel: failed to expose recovery transaction {}",
+                            component.stage.id(), keepError);
+                }
             }
         }
         if (restoredAny) this.rescan.run();
@@ -718,7 +774,7 @@ public final class OpsService {
             result.addProperty("id", groupId);
             try {
                 RecycleStore.RestoreGroup group = this.recycle.loadGroup(groupId);
-                restoreGroupData(group, false);
+                restoreGroupData(group, "recovery_required".equals(group.state()));
                 try {
                     this.recycle.markRestored(groupId);
                 } catch (Exception metadataError) {
@@ -745,9 +801,10 @@ public final class OpsService {
         return out;
     }
 
-    private void restoreGroupData(RecycleStore.RestoreGroup group, boolean allowExisting) throws Exception {
+    private void restoreGroupData(RecycleStore.RestoreGroup group, boolean replaceExisting) throws Exception {
         Set<UUID> targets = new LinkedHashSet<>();
         for (RecycleStore.RestoreBody body : group.bodies()) targets.add(body.uuid());
+        if (replaceExisting) purgeRestoreTargets(targets);
         Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
         Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
         Map<UUID, Integer> existingEntries = new HashMap<>();
@@ -755,13 +812,13 @@ public final class OpsService {
         // 同一趟扫描顺路建 plot 槽位占用表:删除释放的槽位会被 sable 按首位适配复用给新体,
         // 而恢复用的 allocateSubLevel 只查加载态 —— 不拦下来就会造出"同槽双体"(加载互斥)
         Map<DiskScanner.PlotKey, Set<UUID>> plotOwners = DiskScanner.plotOwners(meta);
-        onMainUntilComplete(() -> restoreGroupOnMain(group, allowExisting, existingEntries, plotOwners));
+        onMainUntilComplete(() -> restoreGroupOnMain(group, existingEntries, plotOwners));
         try {
-            verifyRestoredGroup(targets, allowExisting);
+            verifyRestoredGroup(group);
         } catch (Exception verificationError) {
-            if (!allowExisting) {
+            if (!replaceExisting) {
                 try {
-                    onMainUntilComplete(() -> removeRestoredTargets(targets));
+                    purgeRestoreTargets(targets);
                 } catch (Exception cleanupError) {
                     verificationError.addSuppressed(cleanupError);
                 }
@@ -770,7 +827,7 @@ public final class OpsService {
         }
     }
 
-    private JsonObject restoreGroupOnMain(RecycleStore.RestoreGroup group, boolean allowExisting,
+    private JsonObject restoreGroupOnMain(RecycleStore.RestoreGroup group,
                                           Map<UUID, Integer> existingEntries,
                                           Map<DiskScanner.PlotKey, Set<UUID>> plotOwners) throws Exception {
         List<ServerSubLevel> created = new ArrayList<>();
@@ -779,7 +836,6 @@ public final class OpsService {
             for (RecycleStore.RestoreBody body : group.bodies()) {
                 boolean exists = existingEntries.getOrDefault(body.uuid(), 0) > 0
                         || resolveLoaded(body.uuid()) != null || isHolding(body.uuid());
-                if (exists && allowExisting) continue;
                 if (exists) throw new IllegalStateException("UUID 已存在，未恢复该依赖组: " + body.uuid());
                 ServerLevel level = restoreLevel(body.dimension());
                 ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
@@ -830,26 +886,13 @@ public final class OpsService {
         }
     }
 
-    private JsonObject removeRestoredTargets(Set<UUID> targets) {
-        Set<ServerLevel> touched = new LinkedHashSet<>();
-        for (UUID uuid : targets) {
-            ServerSubLevel body = resolveLoaded(uuid);
-            if (body == null) continue;
-            ServerSubLevelContainer container = SubLevelContainer.getContainer(body.getLevel());
-            if (container == null) continue;
-            container.removeSubLevel(body, SubLevelRemovalReason.REMOVED);
-            touched.add(body.getLevel());
+    private void verifyRestoredGroup(RecycleStore.RestoreGroup group) throws Exception {
+        Set<UUID> targets = new LinkedHashSet<>();
+        Map<UUID, RecycleStore.RestoreBody> expected = new LinkedHashMap<>();
+        for (RecycleStore.RestoreBody body : group.bodies()) {
+            targets.add(body.uuid());
+            expected.put(body.uuid(), body);
         }
-        for (ServerLevel level : touched) {
-            ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
-            if (container != null) container.getHoldingChunkMap().saveAll();
-        }
-        JsonObject out = new JsonObject();
-        out.addProperty("removed", touched.size());
-        return out;
-    }
-
-    private void verifyRestoredGroup(Set<UUID> targets, boolean allowExisting) throws Exception {
         DiskScanner.invalidateCache();
         Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
         Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
@@ -863,21 +906,37 @@ public final class OpsService {
         for (UUID uuid : targets) {
             List<DiskScanner.EntryMeta> copies = meta.getOrDefault(uuid, List.of());
             if (copies.isEmpty()) throw new IllegalStateException("恢复后磁盘条目缺失: " + uuid);
+            if (copies.size() != 1) throw new IllegalStateException("恢复后存在 " + copies.size() + " 个磁盘条目: " + uuid);
+            RecycleStore.RestoreBody body = expected.get(uuid);
+            DiskScanner.EntryMeta restored = copies.get(0);
+            if (!restored.key().dim().equals(body.dimension())) {
+                throw new IllegalStateException("恢复后维度不一致: " + uuid);
+            }
+            Set<UUID> expectedDependencies = tagDependencies(body.tag());
+            if (!new LinkedHashSet<>(restored.deps()).equals(expectedDependencies)) {
+                throw new IllegalStateException("恢复后依赖关系不一致: " + uuid);
+            }
             int pointerCount = 0;
             for (DiskScanner.EntryMeta copy : copies) {
                 pointerCount += pointers.getOrDefault(copy.key(), List.of()).size();
             }
             if (pointerCount < 1) throw new IllegalStateException("恢复后 holding 指针缺失: " + uuid);
-            if (!allowExisting) {
-                JsonObject state = runtime.getAsJsonObject(uuid.toString());
-                boolean loaded = state != null && state.get("loaded").getAsBoolean();
-                boolean holding = state != null && state.get("holding").getAsBoolean();
-                // 刚恢复的体落在无人区可能几秒内就转入 holding —— 那是正常归宿,不算失败
-                if (!loaded && !holding) {
-                    throw new IllegalStateException("恢复后物理体未加载: " + uuid);
-                }
+            JsonObject state = runtime.getAsJsonObject(uuid.toString());
+            boolean loaded = state != null && state.get("loaded").getAsBoolean();
+            boolean holding = state != null && state.get("holding").getAsBoolean();
+            // 刚恢复的体落在无人区可能几秒内就转入 holding —— 那是正常归宿,不算失败
+            if (!loaded && !holding) {
+                throw new IllegalStateException("恢复后物理体未加载: " + uuid);
             }
         }
+    }
+
+    private static Set<UUID> tagDependencies(CompoundTag tag) {
+        Set<UUID> dependencies = new LinkedHashSet<>();
+        if (!tag.contains("loading_dependencies")) return dependencies;
+        var values = tag.getList("loading_dependencies", net.minecraft.nbt.Tag.TAG_INT_ARRAY);
+        for (net.minecraft.nbt.Tag value : values) dependencies.add(net.minecraft.nbt.NbtUtils.loadUUID(value));
+        return dependencies;
     }
 
     private ServerLevel restoreLevel(String dimension) {

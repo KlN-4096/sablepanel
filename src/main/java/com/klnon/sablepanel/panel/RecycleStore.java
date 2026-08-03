@@ -33,7 +33,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
-/** 成功删除批次的持久化回收站；未验收的备份只存在于隐藏事务目录。 */
+/** 删除备份的持久化回收站；中断事务会转成可见的 recovery_required 记录。 */
 public final class RecycleStore {
     public static final String DEFAULT_DIMENSION = "minecraft:overworld";
     private static final int FORMAT_VERSION = 1;
@@ -48,7 +48,7 @@ public final class RecycleStore {
     public record RestoreBody(UUID uuid, String dimension, CompoundTag tag) {
     }
 
-    public record RestoreGroup(String id, List<RestoreBody> bodies) {
+    public record RestoreGroup(String id, String state, List<RestoreBody> bodies) {
     }
 
     public static final class Stage {
@@ -83,6 +83,7 @@ public final class RecycleStore {
         this.config = config;
         this.root = root.toAbsolutePath().normalize();
         this.pendingRoot = this.root.resolve(".pending");
+        recoverInterruptedStages();
     }
 
     public synchronized Stage stage(List<Source> sources) throws IOException {
@@ -90,6 +91,11 @@ public final class RecycleStore {
         if (sources.size() > this.config.recycleMaxFiles) {
             throw new IllegalStateException("该依赖组需要 " + sources.size()
                     + " 个备份文件，超过当前回收站上限 " + this.config.recycleMaxFiles);
+        }
+        int protectedFiles = protectedFileCount();
+        if (sources.size() > this.config.recycleMaxFiles - protectedFiles) {
+            throw new IllegalStateException("需恢复备份已占用 " + protectedFiles
+                    + " 个文件，剩余容量不足以安全删除该依赖组");
         }
         Files.createDirectories(this.pendingRoot);
         String id = ID_TIME.format(LocalDateTime.now()) + "-" + UUID.randomUUID().toString().substring(0, 8);
@@ -108,13 +114,23 @@ public final class RecycleStore {
     }
 
     public synchronized String commit(Stage stage) throws IOException {
+        return commit(stage, "deleted");
+    }
+
+    public synchronized String commitRecoveryRequired(Stage stage) throws IOException {
+        return commit(stage, "recovery_required");
+    }
+
+    private String commit(Stage stage, String state) throws IOException {
         requirePending(stage);
         long now = System.currentTimeMillis();
-        stage.manifest.addProperty("state", "deleted");
+        stage.manifest.addProperty("state", state);
         stage.manifest.addProperty("deleted_at", now);
+        if ("recovery_required".equals(state)) stage.manifest.addProperty("recovery_required_at", now);
         writeJsonAtomic(stage.directory.resolve(MANIFEST), stage.manifest);
         Files.createDirectories(this.root);
         Path destination = this.root.resolve(stage.id);
+        if (Files.exists(destination)) throw new IOException("回收组 ID 已存在: " + stage.id);
         moveAtomic(stage.directory, destination);
         stage.committed = true;
         try {
@@ -123,6 +139,46 @@ public final class RecycleStore {
             SablePanel.LOGGER.warn("sablepanel: recycle retention cleanup failed", error);
         }
         return stage.id;
+    }
+
+    /** 上次进程在事务完成前退出时，把完整 pending 备份转成可见的人工恢复记录。 */
+    private void recoverInterruptedStages() {
+        if (!Files.isDirectory(this.pendingRoot)) return;
+        int recovered = 0;
+        try (var stream = Files.list(this.pendingRoot)) {
+            for (Path directory : stream.filter(Files::isDirectory).toList()) {
+                String id = directory.getFileName().toString();
+                if (!SAFE_ID.matcher(id).matches()) continue;
+                try {
+                    JsonObject manifest = readManifest(directory);
+                    if (!id.equals(manifest.has("id") ? manifest.get("id").getAsString() : "")) {
+                        throw new IOException("事务目录与清单 ID 不一致");
+                    }
+                    String state = manifest.has("state") ? manifest.get("state").getAsString() : "pending";
+                    if (!"pending".equals(state) && !"recovery_required".equals(state)) continue;
+                    long now = System.currentTimeMillis();
+                    long stagedAt = Files.getLastModifiedTime(directory).toMillis();
+                    manifest.addProperty("state", "recovery_required");
+                    manifest.addProperty("deleted_at", stagedAt);
+                    manifest.addProperty("recovery_required_at", now);
+                    writeJsonAtomic(directory.resolve(MANIFEST), manifest);
+                    Path destination = this.root.resolve(id);
+                    if (Files.exists(destination)) throw new IOException("同名回收组已存在");
+                    moveAtomic(directory, destination);
+                    recovered++;
+                } catch (Exception error) {
+                    SablePanel.LOGGER.error("sablepanel: pending recycle transaction {} needs manual inspection",
+                            id, error);
+                }
+            }
+            if (recovered > 0) {
+                SablePanel.LOGGER.warn("sablepanel: exposed {} interrupted recycle transaction(s) for recovery",
+                        recovered);
+                prune();
+            }
+        } catch (Exception error) {
+            SablePanel.LOGGER.error("sablepanel: failed to recover interrupted recycle transactions", error);
+        }
     }
 
     public synchronized void discard(Stage stage) {
@@ -303,13 +359,14 @@ public final class RecycleStore {
             bodies.add(new RestoreBody(uuid, dimension, tag));
         }
         if (bodies.isEmpty()) throw new IOException("回收组为空");
-        return new RestoreGroup(id, List.copyOf(bodies));
+        String state = manifest.has("state") ? manifest.get("state").getAsString() : "deleted";
+        return new RestoreGroup(id, state, List.copyOf(bodies));
     }
 
     private void prune() throws IOException {
         if (!Files.isDirectory(this.root)) return;
         List<RetentionEntry> entries = retentionEntries();
-        int total = entries.stream().mapToInt(RetentionEntry::files).sum();
+        int total = countBackupFiles(this.root, true);
         entries.sort(Comparator.comparingLong(RetentionEntry::createdAt));
         for (RetentionEntry entry : entries) {
             if (total <= this.config.recycleMaxFiles) break;
@@ -329,9 +386,13 @@ public final class RecycleStore {
                     if (files == 0) continue;
                     long createdAt;
                     try {
-                        createdAt = deletedAt(readManifest(path));
+                        JsonObject manifest = readManifest(path);
+                        if ("recovery_required".equals(manifest.has("state")
+                                ? manifest.get("state").getAsString() : "")) continue;
+                        createdAt = deletedAt(manifest);
                     } catch (Exception error) {
-                        createdAt = Files.getLastModifiedTime(path).toMillis();
+                        // 无法确认状态的备份不能自动淘汰；它仍计入总量并压缩后续删除容量。
+                        continue;
                     }
                     entries.add(new RetentionEntry(path, createdAt, files, true));
                 } else if (Files.isRegularFile(path) && path.getFileName().toString().endsWith(".nbt.gz")) {
@@ -340,6 +401,26 @@ public final class RecycleStore {
             }
         }
         return entries;
+    }
+
+    private int protectedFileCount() throws IOException {
+        if (!Files.isDirectory(this.root)) return 0;
+        int total = 0;
+        try (var stream = Files.list(this.root)) {
+            for (Path path : stream.filter(Files::isDirectory).toList()) {
+                if (path.equals(this.pendingRoot)) continue;
+                int files = countBackupFiles(path, false);
+                if (files == 0) continue;
+                try {
+                    JsonObject manifest = readManifest(path);
+                    String state = manifest.has("state") ? manifest.get("state").getAsString() : "";
+                    if ("recovery_required".equals(state)) total += files;
+                } catch (Exception error) {
+                    total += files;
+                }
+            }
+        }
+        return total;
     }
 
     private List<Path> committedDirectories() throws IOException {
