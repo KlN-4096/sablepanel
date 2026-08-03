@@ -620,7 +620,7 @@ const I18N = {
     delOk:'已删除,回收站: ', delFail:'删除失败: ', delUnknownFail:'最终验收未通过',
     delGroup:(n)=>`删除整组(${n} 体)`, delGroupT:'删除整组',
     delGroupMsg:(n,b)=>`将删除该组全部 ${n} 个物理体,共 ${fmt(b)} 块。\n每个体都会先备份到回收站,可随时恢复。`,
-    delGroupDone:(o,n)=>`删除完成:成功 ${o}/${n}`,
+    delGroupDone:(o,n)=>`删除完成:成功 ${o}/${n}`, opWarnMore:(n)=>`等 ${n} 条警告`,
     adoptT:'收养孤儿物理体', adoptMsg:(n)=>`将把「${n}」重新接入 sable 加载管线(依赖体一并收养)。\n不修改任何磁盘数据,失败也无副作用。`,
     adoptOk:'收养成功,已重新加载', adoptPart:'收养完成(部分成员未能加载)', adoptFail:'收养失败: ',
     adoptTrunc:(n)=>`依赖链超过 ${n} 个成员上限,本次只收养了扫描到的前 ${n} 个`,
@@ -733,7 +733,7 @@ const I18N = {
     delOk:'Deleted. Recycle: ', delFail:'Delete failed: ', delUnknownFail:'final verification failed',
     delGroup:(n)=>`Delete group (${n})`, delGroupT:'Delete whole group',
     delGroupMsg:(n,b)=>`Deletes all ${n} bodies of this group, ${fmt(b)} blocks.\nEach is backed up first — recoverable at any time.`,
-    delGroupDone:(o,n)=>`Done: ${o}/${n} ok`,
+    delGroupDone:(o,n)=>`Done: ${o}/${n} ok`, opWarnMore:(n)=>`and ${n} warning(s)`,
     adoptT:'Adopt orphan body', adoptMsg:(n)=>`Re-attach "${n}" into sable's loading pipeline (dependencies included).\nNo disk data is modified.`,
     adoptOk:'Adopted and loaded', adoptPart:'Adopted (some members failed)', adoptFail:'Adoption failed: ',
     adoptTrunc:(n)=>`Dependency chain exceeds the ${n}-member cap; only the first ${n} scanned members were adopted`,
@@ -979,6 +979,13 @@ async function authenticate(candidate, remembered){
 function loginSubmit(e){
   e.preventDefault();
   authenticate(document.getElementById('loginToken').value, false);
+}
+/** 磁盘损坏跳过等后端非致命警告 → toast 尾注(最多展示 2 条) */
+function warnText(result){
+  const w=result&&result.warnings;
+  if(!w||!w.length) return '';
+  const shown=w.slice(0,2).join('; ');
+  return ` · ⚠ ${shown}${w.length>2?` ${t('opWarnMore')(w.length-2)}`:''}`;
 }
 function toast(msg, cls) {
   const box = document.getElementById('toasts');
@@ -1782,7 +1789,7 @@ async function confirmRestore(groups){
     const result=await api('/api/recycle/restore',{method:'POST',body:JSON.stringify({ids:groups.map(g=>g.id)})});
     const failures=(result.results||[]).filter(item=>!item.ok);
     const detail=failures.slice(0,3).map(item=>`${item.id}: ${item.error}`).join('; ');
-    toast(t('restoreDone')(result.ok,result.total)+(detail?` · ${detail}`:''),result.ok===result.total?'ok':'bad');
+    toast(t('restoreDone')(result.ok,result.total)+(detail?` · ${detail}`:'')+warnText(result),result.ok===result.total?'ok':'bad');
     R_SELECTED.clear();
     setTimeout(()=>{loadBodies();loadRecycle();},1200);
   } catch(e){ toast(t('restoreFail')+e.message,'bad'); }
@@ -1982,7 +1989,7 @@ async function batchDelete(uuids){
     const failed = (r.results || []).filter(x => !x.ok);
     const detail = failed.slice(0, 3)
       .map(x => `${x.uuid.slice(0,8)}: ${x.error || t('delUnknownFail')}`).join('; ');
-    toast(t('delGroupDone')(r.ok, r.total) + (detail ? ` · ${detail}` : ''),
+    toast(t('delGroupDone')(r.ok, r.total) + (detail ? ` · ${detail}` : '') + warnText(r),
       r.ok === r.total ? 'ok' : 'bad');
     SEL = null; SELG = null;
     setTimeout(()=>{loadBodies();loadRecycle();}, 1500);

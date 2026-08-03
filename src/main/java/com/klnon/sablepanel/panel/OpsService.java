@@ -178,6 +178,7 @@ public final class OpsService {
         out.addProperty("deleted", deleted);
         out.addProperty("total", total);
         out.add("results", batch.getAsJsonArray("results"));
+        if (batch.has("warnings")) out.add("warnings", batch.get("warnings"));
         List<String> errors = new ArrayList<>();
         for (var element : batch.getAsJsonArray("results")) {
             JsonObject result = element.getAsJsonObject();
@@ -199,9 +200,10 @@ public final class OpsService {
         Map<UUID, DeleteStatus> statuses = new LinkedHashMap<>();
         for (UUID uuid : requested) statuses.put(uuid, new DeleteStatus(uuid));
         List<DeleteComponent> components = List.of();
+        List<String> warnings = new ArrayList<>();
 
         try {
-            components = prepareDeleteComponents(requested);
+            components = prepareDeleteComponents(requested, warnings);
             for (DeleteComponent component : components) {
                 for (UUID target : component.targets) statuses.computeIfAbsent(target, DeleteStatus::new);
             }
@@ -213,30 +215,32 @@ public final class OpsService {
             for (DeleteStatus status : statuses.values()) status.fail(message);
             SablePanel.LOGGER.warn("sablepanel: batch delete transaction failed", e);
         }
-        verifyDeletedTargets(statuses);
-        finalizeDeleteBackups(components, statuses);
+        verifyDeletedTargets(statuses, warnings);
+        finalizeDeleteBackups(components, statuses, warnings);
         for (DeleteStatus status : statuses.values()) {
             if (!status.ok) audit("delete_failed", status.uuid, null, String.join("; ", status.errors));
         }
         JsonObject response = deleteResponse(new ArrayList<>(statuses.keySet()), statuses);
         response.addProperty("requested", requested.size());
+        attachWarnings(response, warnings);
         return response;
     }
 
-    private List<DeleteComponent> prepareDeleteComponents(List<UUID> targets) throws Exception {
+    private List<DeleteComponent> prepareDeleteComponents(List<UUID> targets, List<String> warnings)
+            throws Exception {
         Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
         // 纯运行时新体(刚生成、盘上还没有条目)先落一次盘再删:内存里的方块不落盘就无从备份
         if (flushUnsavedTargets(targets, meta)) {
             dimensions = DiskScanner.sublevelDirsStrict(this.server);
-            meta = DiskScanner.scanEntryMetaStrict(dimensions);
+            meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
         }
         List<Set<UUID>> selectedGroups = DiskScanner.selectedDependencyComponents(meta, targets);
         Set<UUID> selected = new LinkedHashSet<>();
         for (Set<UUID> group : selectedGroups) {
             selected.addAll(group);
         }
-        Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(dimensions, meta, selected);
+        Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(dimensions, meta, selected, warnings);
 
         List<DeleteComponent> components = new ArrayList<>();
         for (Set<UUID> group : selectedGroups) {
@@ -252,7 +256,7 @@ public final class OpsService {
     /** 只为指定成员重读完整 NBT；重读时验 UUID，避免准备期间槽位被 Sable 复用。 */
     private Map<UUID, List<DeleteCopy>> readDeleteCopies(
             Map<String, Path> dimensions, Map<UUID, List<DiskScanner.EntryMeta>> meta,
-            Set<UUID> targets) throws Exception {
+            Set<UUID> targets, List<String> warnings) throws Exception {
         Map<DiskScanner.EntryKey, CompoundTag> tags = new LinkedHashMap<>();
         for (UUID target : targets) {
             for (DiskScanner.EntryMeta copy : meta.getOrDefault(target, List.of())) {
@@ -260,7 +264,7 @@ public final class OpsService {
             }
         }
         Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
-                DiskScanner.locatePointersStrict(dimensions, tags.keySet());
+                DiskScanner.locatePointersStrict(dimensions, tags.keySet(), warnings);
         Map<UUID, List<DeleteCopy>> result = new LinkedHashMap<>();
         for (UUID target : targets) {
             List<DeleteCopy> copies = new ArrayList<>();
@@ -598,11 +602,11 @@ public final class OpsService {
         }
     }
 
-    private void verifyDeletedTargets(Map<UUID, DeleteStatus> statuses) {
+    private void verifyDeletedTargets(Map<UUID, DeleteStatus> statuses, List<String> warnings) {
         DiskVerification disk;
         JsonObject runtime;
         try {
-            disk = scanRemainingEntries(statuses);
+            disk = scanRemainingEntries(statuses, warnings);
             runtime = readRuntimeStates(statuses.keySet());
         } catch (Exception error) {
             String message = "删除后验收失败: " + messageOf(error);
@@ -630,17 +634,18 @@ public final class OpsService {
         this.rescan.run();
     }
 
-    private DiskVerification scanRemainingEntries(Map<UUID, DeleteStatus> statuses) throws Exception {
+    private DiskVerification scanRemainingEntries(Map<UUID, DeleteStatus> statuses, List<String> warnings)
+            throws Exception {
         DiskScanner.invalidateCache();
         Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         Map<UUID, Integer> entries = new HashMap<>();
         for (DeleteStatus status : statuses.values()) {
             keys.addAll(status.entryKeys);
             entries.put(status.uuid, meta.getOrDefault(status.uuid, List.of()).size());
         }
-        return new DiskVerification(entries, DiskScanner.countPointersStrict(dimensions, keys));
+        return new DiskVerification(entries, DiskScanner.countPointersStrict(dimensions, keys, warnings));
     }
 
     private JsonObject readRuntimeStates(Set<UUID> targets) throws Exception {
@@ -657,30 +662,31 @@ public final class OpsService {
     }
 
     /** 删除失败回滚前先清掉所有残留，随后才能从快照完整重建同 UUID 依赖组。 */
-    private void purgeRestoreTargets(Set<UUID> targets) throws Exception {
-        DeleteComponent component = prepareExactDeleteComponent(targets);
+    private void purgeRestoreTargets(Set<UUID> targets, List<String> warnings) throws Exception {
+        DeleteComponent component = prepareExactDeleteComponent(targets, warnings);
         if (!component.targets.isEmpty()) {
             Map<UUID, DeleteStatus> statuses = new LinkedHashMap<>();
             for (UUID uuid : component.targets) statuses.put(uuid, new DeleteStatus(uuid));
             executeDeleteComponents(List.of(component), statuses);
-            verifyDeletedTargets(statuses);
+            verifyDeletedTargets(statuses, warnings);
             List<String> errors = new ArrayList<>();
             for (DeleteStatus status : statuses.values()) {
                 if (!status.ok) errors.add(status.uuid + ": " + String.join("; ", status.errors));
             }
             if (!errors.isEmpty()) throw new IllegalStateException("回滚前残留清理失败: " + String.join(" | ", errors));
         }
-        requireTargetsAbsent(targets);
+        requireTargetsAbsent(targets, warnings);
     }
 
-    private DeleteComponent prepareExactDeleteComponent(Set<UUID> targets) throws Exception {
+    private DeleteComponent prepareExactDeleteComponent(Set<UUID> targets, List<String> warnings)
+            throws Exception {
         Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
         if (flushUnsavedTargets(new ArrayList<>(targets), meta)) {
             dimensions = DiskScanner.sublevelDirsStrict(this.server);
-            meta = DiskScanner.scanEntryMetaStrict(dimensions);
+            meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
         }
-        Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(dimensions, meta, targets);
+        Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(dimensions, meta, targets, warnings);
         DeleteComponent component = new DeleteComponent();
         for (UUID target : targets) {
             List<DeleteCopy> copies = prepared.getOrDefault(target, List.of());
@@ -689,10 +695,10 @@ public final class OpsService {
         return component;
     }
 
-    private void requireTargetsAbsent(Set<UUID> targets) throws Exception {
+    private void requireTargetsAbsent(Set<UUID> targets, List<String> warnings) throws Exception {
         DiskScanner.invalidateCache();
         Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
         JsonObject runtime = readRuntimeStates(targets);
         for (UUID uuid : targets) {
             if (!meta.getOrDefault(uuid, List.of()).isEmpty()) {
@@ -705,7 +711,8 @@ public final class OpsService {
         }
     }
 
-    private void finalizeDeleteBackups(List<DeleteComponent> components, Map<UUID, DeleteStatus> statuses) {
+    private void finalizeDeleteBackups(List<DeleteComponent> components, Map<UUID, DeleteStatus> statuses,
+                                       List<String> warnings) {
         boolean restoredAny = false;
         for (DeleteComponent component : components) {
             if (component.stage == null) continue;
@@ -731,7 +738,7 @@ public final class OpsService {
             }
             try {
                 RecycleStore.RestoreGroup rollback = this.recycle.loadStage(component.stage);
-                restoreGroupData(rollback, true);
+                restoreGroupData(rollback, true, warnings);
                 failComponent(component, statuses, "删除失败，已从临时事务自动恢复原依赖组");
                 restoredAny = true;
                 // 发生过 removeSubLevel 的组必须留下备份:sable 的 queuedDeletion 在 saveAll
@@ -781,13 +788,14 @@ public final class OpsService {
 
     public synchronized JsonObject restoreRecycleGroups(List<String> groupIds) {
         JsonArray results = new JsonArray();
+        List<String> warnings = new ArrayList<>();
         int restored = 0;
         for (String groupId : new LinkedHashSet<>(groupIds)) {
             JsonObject result = new JsonObject();
             result.addProperty("id", groupId);
             try {
                 RecycleStore.RestoreGroup group = this.recycle.loadGroup(groupId);
-                restoreGroupData(group, "recovery_required".equals(group.state()));
+                restoreGroupData(group, "recovery_required".equals(group.state()), warnings);
                 try {
                     this.recycle.markRestored(groupId);
                 } catch (Exception metadataError) {
@@ -811,15 +819,25 @@ public final class OpsService {
         out.addProperty("ok", restored);
         out.addProperty("total", results.size());
         out.add("results", results);
+        attachWarnings(out, warnings);
         return out;
     }
 
-    private void restoreGroupData(RecycleStore.RestoreGroup group, boolean replaceExisting) throws Exception {
+    /** 磁盘损坏跳过等非致命告警,随操作结果一并交给前端展示。 */
+    private static void attachWarnings(JsonObject response, List<String> warnings) {
+        if (warnings.isEmpty()) return;
+        JsonArray array = new JsonArray();
+        for (String warning : new LinkedHashSet<>(warnings)) array.add(warning);
+        response.add("warnings", array);
+    }
+
+    private void restoreGroupData(RecycleStore.RestoreGroup group, boolean replaceExisting,
+                                  List<String> warnings) throws Exception {
         Set<UUID> targets = new LinkedHashSet<>();
         for (RecycleStore.RestoreBody body : group.bodies()) targets.add(body.uuid());
-        if (replaceExisting) purgeRestoreTargets(targets);
+        if (replaceExisting) purgeRestoreTargets(targets, warnings);
         Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
         Map<UUID, Integer> existingEntries = new HashMap<>();
         for (UUID uuid : targets) existingEntries.put(uuid, meta.getOrDefault(uuid, List.of()).size());
         // 同一趟扫描顺路建 plot 槽位占用表:删除释放的槽位会被 sable 按首位适配复用给新体,
@@ -827,11 +845,11 @@ public final class OpsService {
         Map<DiskScanner.PlotKey, Set<UUID>> plotOwners = DiskScanner.plotOwners(meta);
         onMainUntilComplete(() -> restoreGroupOnMain(group, existingEntries, plotOwners));
         try {
-            verifyRestoredGroup(group);
+            verifyRestoredGroup(group, warnings);
         } catch (Exception verificationError) {
             if (!replaceExisting) {
                 try {
-                    purgeRestoreTargets(targets);
+                    purgeRestoreTargets(targets, warnings);
                 } catch (Exception cleanupError) {
                     verificationError.addSuppressed(cleanupError);
                 }
@@ -899,7 +917,7 @@ public final class OpsService {
         }
     }
 
-    private void verifyRestoredGroup(RecycleStore.RestoreGroup group) throws Exception {
+    private void verifyRestoredGroup(RecycleStore.RestoreGroup group, List<String> warnings) throws Exception {
         Set<UUID> targets = new LinkedHashSet<>();
         Map<UUID, RecycleStore.RestoreBody> expected = new LinkedHashMap<>();
         for (RecycleStore.RestoreBody body : group.bodies()) {
@@ -908,13 +926,13 @@ public final class OpsService {
         }
         DiskScanner.invalidateCache();
         Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         for (UUID uuid : targets) {
             for (DiskScanner.EntryMeta copy : meta.getOrDefault(uuid, List.of())) keys.add(copy.key());
         }
         Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
-                DiskScanner.locatePointersStrict(dimensions, keys);
+                DiskScanner.locatePointersStrict(dimensions, keys, warnings);
         JsonObject runtime = readRuntimeStates(targets);
         for (UUID uuid : targets) {
             List<DiskScanner.EntryMeta> copies = meta.getOrDefault(uuid, List.of());
@@ -1061,7 +1079,10 @@ public final class OpsService {
 
     /** 实时副本审查:列表快照只负责提示,真正操作前始终严格重扫并深比较完整 NBT。 */
     public JsonObject inspectCopies(UUID uuid) throws Exception {
-        return copiesJson(inspectCopyState(uuid));
+        List<String> warnings = new ArrayList<>();
+        JsonObject out = copiesJson(inspectCopyState(uuid, warnings));
+        attachWarnings(out, warnings);
+        return out;
     }
 
     /**
@@ -1069,12 +1090,14 @@ public final class OpsService {
      * queueDeletion + saveAll 清理；内容不同的一律拒绝,不猜哪份才是玩家资产。
      */
     public synchronized JsonObject deduplicate(UUID uuid) throws Exception {
-        CopyInspection inspection = inspectCopyState(uuid);
+        List<String> warnings = new ArrayList<>();
+        CopyInspection inspection = inspectCopyState(uuid, warnings);
         if (inspection.copies().size() < 2) {
             JsonObject out = new JsonObject();
             out.addProperty("ok", true);
             out.addProperty("removed", 0);
             out.addProperty("kept_entry", inspection.keep().key().id());
+            attachWarnings(out, warnings);
             return out;
         }
         if (!inspection.identical()) {
@@ -1083,11 +1106,12 @@ public final class OpsService {
 
         // 执行端再做一轮完整扫描；GET 结果和本方法首轮都只用于展示/早拒绝。
         // 文件读取留在 HTTP 线程，主线程只碰 Sable 运行时。
-        CopyInspection prepared = inspectCopyState(uuid);
+        CopyInspection prepared = inspectCopyState(uuid, warnings);
         if (prepared.copies().size() < 2) {
             JsonObject out = copiesJson(prepared);
             out.addProperty("ok", true);
             out.addProperty("removed", 0);
+            attachWarnings(out, warnings);
             return out;
         }
         if (!prepared.identical()) {
@@ -1139,7 +1163,7 @@ public final class OpsService {
             return out;
         });
 
-        CopyInspection verified = inspectCopyState(uuid);
+        CopyInspection verified = inspectCopyState(uuid, warnings);
         if (verified.copies().size() != 1) {
             throw new IllegalStateException("去重后仍有 " + verified.copies().size() + " 个磁盘条目");
         }
@@ -1150,7 +1174,8 @@ public final class OpsService {
         for (CopyCandidate copy : prepared.copies()) {
             if (!copy.key().equals(keep.key())) removedKeys.add(copy.key());
         }
-        int stalePointers = DiskScanner.locatePointersStrict(verified.dimensions(), removedKeys).values().stream()
+        int stalePointers = DiskScanner.locatePointersStrict(verified.dimensions(), removedKeys, warnings)
+                .values().stream()
                 .mapToInt(List::size).sum();
         if (stalePointers > 0) {
             throw new IllegalStateException("去重后仍有 " + stalePointers + " 个多余 holding 指针");
@@ -1164,18 +1189,19 @@ public final class OpsService {
         out.addProperty("ok", true);
         out.addProperty("removed", removed);
         out.addProperty("kept_entry", verified.keep().key().id());
+        attachWarnings(out, warnings);
         return out;
     }
 
-    private CopyInspection inspectCopyState(UUID uuid) throws Exception {
+    private CopyInspection inspectCopyState(UUID uuid, List<String> warnings) throws Exception {
         Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
         List<DiskScanner.EntryMeta> entries = meta.getOrDefault(uuid, List.of());
         if (entries.isEmpty()) throw new IllegalStateException("找不到该体的磁盘条目");
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         for (DiskScanner.EntryMeta entry : entries) keys.add(entry.key());
         Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
-                DiskScanner.locatePointersStrict(dimensions, keys);
+                DiskScanner.locatePointersStrict(dimensions, keys, warnings);
         JsonObject activeState = onMain(() -> {
             JsonObject out = new JsonObject();
             String id = activePointerEntryId(uuid);

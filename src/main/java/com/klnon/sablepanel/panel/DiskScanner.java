@@ -173,12 +173,16 @@ public final class DiskScanner {
     /**
      * 删除/恢复流程的严格全量元数据扫描:完整读取每个 .slvls 非空槽位,但只保留
      * uuid/槽位/依赖/plot 坐标,不持有完整 NBT —— 堆峰值与条目体量无关。
-     * 与后台容错扫描不同,任一目录、文件或 NBT 条目无法确认都会抛错,禁止据此误报操作成功。
+     * 唯一容忍的损坏形态是"头部截断"(<4096 字节,建文件后写头前崩溃的残留):按 sable
+     * 同款可读前缀语义解析并记入 warnings。其余情况 —— 文件打不开、已声明 span 但条目
+     * 读不出 —— 一律上抛:那些可能只是权限/瞬态 IO 问题,sable 自己握着句柄照样可见,
+     * 跳过会让删除误判"已不存在"、让验收失去证明力。
      */
     public record EntryMeta(EntryKey key, List<UUID> deps, int plotX, int plotZ) {
     }
 
-    public static Map<UUID, List<EntryMeta>> scanEntryMetaStrict(Map<String, Path> dims) throws IOException {
+    public static Map<UUID, List<EntryMeta>> scanEntryMetaStrict(Map<String, Path> dims,
+                                                                 List<String> warnings) throws IOException {
         Map<UUID, List<EntryMeta>> meta = new HashMap<>();
         for (Map.Entry<String, Path> dimension : dims.entrySet()) {
             String dim = dimension.getKey();
@@ -188,24 +192,25 @@ public final class DiskScanner {
             try (var stream = Files.list(dir)) {
                 files = stream.filter(path -> SLVLS.matcher(path.getFileName().toString()).matches()).toList();
             }
-            for (Path file : files) collectFileMetaStrict(dim, file, dir, meta);
+            for (Path file : files) collectFileMetaStrict(dim, file, dir, meta, warnings);
         }
         return meta;
     }
 
     private static void collectFileMetaStrict(String dim, Path file, Path dir,
-                                              Map<UUID, List<EntryMeta>> meta) throws IOException {
+                                              Map<UUID, List<EntryMeta>> meta,
+                                              List<String> warnings) throws IOException {
         Matcher matcher = SLVLS.matcher(file.getFileName().toString());
         if (!matcher.matches()) return;
         int rx = Integer.parseInt(matcher.group(1));
         int rz = Integer.parseInt(matcher.group(2));
         int storage = Integer.parseInt(matcher.group(3));
-        forEachEntryStrict(file, dir, rx, rz, 4096, (index, tag) -> {
+        forEachEntryStrict(file, dir, rx, rz, 4096, warnings, (index, tag) -> {
             UUID uuid;
             try {
                 uuid = tag.getUUID("uuid");
             } catch (Exception error) {
-                throw new IOException("NBT 条目缺少有效 UUID: " + file + "#" + index, error);
+                throw new IOException("NBT 条目缺少有效 UUID: " + file.getFileName() + "#" + index, error);
             }
             CompoundTag plot = tag.getCompound("plot");
             meta.computeIfAbsent(uuid, ignored -> new ArrayList<>())
@@ -289,10 +294,11 @@ public final class DiskScanner {
     }
 
     /** 严格统计仍引用目标存储槽的 .slvlr holding 指针。 */
-    public static Map<EntryKey, Integer> countPointersStrict(Map<String, Path> dims, Set<EntryKey> targets)
-            throws IOException {
+    public static Map<EntryKey, Integer> countPointersStrict(Map<String, Path> dims, Set<EntryKey> targets,
+                                                             List<String> warnings) throws IOException {
         Map<EntryKey, Integer> counts = new HashMap<>();
-        for (Map.Entry<EntryKey, List<LiveLocation>> entry : locatePointersStrict(dims, targets).entrySet()) {
+        for (Map.Entry<EntryKey, List<LiveLocation>> entry
+                : locatePointersStrict(dims, targets, warnings).entrySet()) {
             counts.put(entry.getKey(), entry.getValue().size());
         }
         return counts;
@@ -300,7 +306,8 @@ public final class DiskScanner {
 
     /** 删除准备使用:严格收集每个存储槽的全部 holding 指针,保留重复引用。 */
     public static Map<EntryKey, List<LiveLocation>> locatePointersStrict(Map<String, Path> dims,
-                                                                          Set<EntryKey> targets)
+                                                                          Set<EntryKey> targets,
+                                                                          List<String> warnings)
             throws IOException {
         Map<EntryKey, List<LiveLocation>> located = new HashMap<>();
         for (Map.Entry<String, Path> dimension : dims.entrySet()) {
@@ -316,7 +323,7 @@ public final class DiskScanner {
                 if (!matcher.matches()) continue;
                 int rx = Integer.parseInt(matcher.group(1));
                 int rz = Integer.parseInt(matcher.group(2));
-                forEachEntryStrict(file, dir, rx, rz, 128, (index, tag) -> {
+                forEachEntryStrict(file, dir, rx, rz, 128, warnings, (index, tag) -> {
                     int chunkX = rx * 32 + (index & 31);
                     int chunkZ = rz * 32 + (index >> 5);
                     for (int packed : tag.getIntArray("pointers")) {
@@ -337,14 +344,29 @@ public final class DiskScanner {
         void accept(int index, CompoundTag tag) throws IOException;
     }
 
+    /**
+     * 全目录扫描的存储文件遍历。唯一的容错:头部截断(<4096 字节)按 sable 的
+     * SubLevelStorageFile 同款语义处理 —— 零填充 buffer 读入可读前缀,缺失槽位视为空闲,
+     * 并记入 warnings(这是崩溃残留的确定形态,面板与 sable 解析逐位一致)。
+     * 文件打不开、前缀读不满、已声明 span 的条目读不出 —— 全部照常上抛,由调用方整体失败:
+     * 这些可能是权限/瞬态 IO/并发写,数据对 sable 依然可见,静默跳过会造成误报成功。
+     */
     private static void forEachEntryStrict(Path file, Path dir, int rx, int rz, int sectorSize,
-                                           StrictEntryConsumer consumer) throws IOException {
+                                           List<String> warnings, StrictEntryConsumer consumer)
+            throws IOException {
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
             long fileSize = channel.size();
-            if (fileSize < 4096) throw new IOException("存储头不完整: " + file);
             ByteBuffer header = ByteBuffer.allocate(4096);
-            readFully(channel, header, 0, file);
-            header.flip();
+            if (fileSize < 4096) {
+                warnings.add("存储头截断(" + fileSize + " 字节): " + file.getFileName()
+                        + ",已按可读前缀处理;建议停服备份后删除该文件");
+            }
+            int available = (int) Math.min(fileSize, 4096);
+            if (available > 0) {
+                ByteBuffer prefix = ByteBuffer.allocate(available);
+                readFully(channel, prefix, 0, file);
+                header.put(0, prefix.array(), 0, available);
+            }
             for (int index = 0; index < 1024; index++) {
                 int span = header.getInt(index * 4);
                 if (span == 0) continue;
@@ -360,17 +382,17 @@ public final class DiskScanner {
             throws IOException {
         int start = (span >> 8) & 0xFFFFFF;
         int sectors = span & 0xFF;
-        if (start <= 0 || sectors <= 0) throw new IOException("存储槽位范围无效: " + file + "#" + index);
+        if (start <= 0 || sectors <= 0) throw new IOException("存储槽位范围无效: " + file.getFileName() + "#" + index);
         long offset = (long) start * sectorSize;
         long capacity = (long) sectors * sectorSize;
-        if (offset + 5 > fileSize) throw new IOException("存储槽位超出文件: " + file + "#" + index);
+        if (offset + 5 > fileSize) throw new IOException("存储槽位超出文件: " + file.getFileName() + "#" + index);
 
         ByteBuffer metadata = ByteBuffer.allocate(5);
         readFully(channel, metadata, offset, file);
         metadata.flip();
         int size = metadata.getInt();
         byte type = metadata.get();
-        if (size <= 0) throw new IOException("存储槽位长度无效: " + file + "#" + index);
+        if (size <= 0) throw new IOException("存储槽位长度无效: " + file.getFileName() + "#" + index);
 
         byte[] payload;
         if ((type & 0x10) != 0) {
@@ -380,7 +402,7 @@ public final class DiskScanner {
         } else {
             long recordSize = 4L + size;
             if (recordSize > capacity || offset + recordSize > fileSize) {
-                throw new IOException("存储槽位内容不完整: " + file + "#" + index);
+                throw new IOException("存储槽位内容不完整: " + file.getFileName() + "#" + index);
             }
             payload = new byte[size - 1];
             readFully(channel, ByteBuffer.wrap(payload), offset + 5, file);
@@ -390,7 +412,7 @@ public final class DiskScanner {
             return NbtIo.readCompressed(
                     new DataInputStream(new ByteArrayInputStream(payload)), NbtAccounter.unlimitedHeap());
         } catch (Exception error) {
-            throw new IOException("NBT 条目无法解析: " + file + "#" + index, error);
+            throw new IOException("NBT 条目无法解析: " + file.getFileName() + "#" + index, error);
         }
     }
 
@@ -398,7 +420,7 @@ public final class DiskScanner {
             throws IOException {
         while (buffer.hasRemaining()) {
             int read = channel.read(buffer, position + buffer.position());
-            if (read <= 0) throw new IOException("文件读取不完整: " + file);
+            if (read <= 0) throw new IOException("文件读取不完整: " + file.getFileName());
         }
     }
 
@@ -416,13 +438,21 @@ public final class DiskScanner {
         void accept(int index, CompoundTag tag);
     }
 
+    /** 后台扫描发现的截断文件,每个路径只告警一次,避免每轮扫描刷屏 */
+    private static final Set<String> WARNED_TRUNCATED = ConcurrentHashMap.newKeySet();
+
     private static void forEachEntry(Path file, Path dir, int rx, int rz, int sectorSize, EntryConsumer consumer) {
         try (FileChannel ch = FileChannel.open(file, StandardOpenOption.READ)) {
             long fileSize = ch.size();
-            if (fileSize < 4096) return;
+            if (fileSize < 4096 && WARNED_TRUNCATED.add(file.toAbsolutePath().toString())) {
+                SablePanel.LOGGER.warn("sablepanel: 存储头截断({} 字节),与 sable 相同仅可读前缀有效,"
+                        + "建议停服备份后删除该文件: {}", fileSize, file);
+            }
+            // 头部零填充:截断文件按 sable 语义取可读前缀,缺失槽位视为空
             ByteBuffer header = ByteBuffer.allocate(4096);
-            ch.read(header, 0);
-            header.flip();
+            while (header.hasRemaining()) {
+                if (ch.read(header, header.position()) <= 0) break;
+            }
             for (int idx = 0; idx < 1024; idx++) {
                 int span = header.getInt(idx * 4);
                 if (span == 0) continue;
