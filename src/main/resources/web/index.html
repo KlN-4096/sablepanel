@@ -71,7 +71,7 @@ header{display:flex;align-items:center;gap:14px;height:54px;padding:0 16px;posit
 #loadPill .kv{display:flex;flex-direction:column;line-height:1.2}
 #loadPill .kv b{font-size:13.5px;font-family:var(--mono)}
 #loadPill .kv span{font-size:10px;color:var(--dim);letter-spacing:.2px}
-#pillSpark{display:block;opacity:.9}
+#pillSpark{display:block;width:132px;height:30px;flex:0 0 132px;opacity:.9}
 #statPop{position:absolute;top:56px;left:0;z-index:40;background:var(--card2);border:1px solid var(--line2);
   border-radius:var(--r);padding:13px 15px;min-width:290px;display:none;box-shadow:0 10px 30px rgba(0,0,0,.55)}
 #statPop table{width:100%;border-collapse:collapse;font-size:12px}
@@ -139,7 +139,22 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
 .legend span{display:flex;align-items:center;gap:6px}
 .legend i{width:9px;height:9px;border-radius:3px;display:block}
 .legend b{color:var(--fg2);font-family:var(--mono);font-weight:500}
-#physChart{width:100%;height:132px;display:block}
+#physChartWrap{height:176px;position:relative;border:1px solid var(--line);background:#0d1118;overflow:hidden}
+#physChart{width:100%;height:100%;display:block}
+#chartTip{position:absolute;display:none;pointer-events:none;z-index:4;min-width:190px;max-width:280px;
+  padding:7px 10px;background:#0b0f16f2;border:1px solid var(--line2);box-shadow:0 7px 20px rgba(0,0,0,.55);
+  font-size:11.5px;line-height:1.5;color:var(--fg2)}
+#chartTip b{display:block;color:var(--fg);font-family:var(--mono);font-size:11px;margin-bottom:3px}
+#chartTip .ctRow{display:flex;align-items:center;gap:7px;white-space:nowrap}
+#chartTip .ctRow i{width:7px;height:7px;flex:none}
+#chartTip .ctRow span{flex:1;overflow:hidden;text-overflow:ellipsis}
+#chartTip .ctRow em{font-style:normal;font-family:var(--mono);color:var(--fg)}
+.chartTools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:-2px 0 9px}
+.chartPresets{display:flex;gap:2px;padding:2px;background:#0d1118;border:1px solid var(--line)}
+.chartPresets button{border:none;background:transparent;padding:3px 8px;font-size:11px}
+.chartPresets button.on{background:#1d2a3e;color:var(--acc)}
+.chartTools input{width:168px;padding:4px 7px;font-family:var(--mono);font-size:11px}
+.chartTools .chartMeta{margin-left:auto;color:var(--dim);font-size:10.5px;font-family:var(--mono)}
 .mini{font-size:12.5px}
 .mini table{width:100%;border-collapse:collapse}
 .mini td{padding:4px 3px;border-bottom:1px solid var(--line);vertical-align:middle}
@@ -396,7 +411,15 @@ body.locked>header,body.locked>#views{visibility:hidden}
     <div class="split">
       <div class="card">
         <h4 id="physChartTitle"></h4>
-        <canvas id="physChart"></canvas>
+        <div class="chartTools">
+          <div class="chartPresets" id="chartPresets"></div>
+          <input type="datetime-local" id="chartFrom" onchange="applyChartDates()">
+          <span class="muted">-</span>
+          <input type="datetime-local" id="chartTo" onchange="applyChartDates()">
+          <button id="chartLiveBtn" onclick="returnChartLive()" data-i18n="chartLive">回到实时</button>
+          <span class="chartMeta" id="chartMeta"></span>
+        </div>
+        <div id="physChartWrap"><canvas id="physChart"></canvas><div id="chartTip"></div></div>
         <div class="legend" style="margin-top:10px" id="physLegend"></div>
         <div class="hint" data-i18n="physHint">物理引擎按维度整体步进,单体开销见右侧;两者都不含服务器其它 mod 的耗时。</div>
       </div>
@@ -799,6 +822,10 @@ function applyI18n(){
   document.getElementById('langLabel').textContent = LANG === 'zh' ? 'EN' : '中文';
   document.documentElement.lang = LANG;
   document.getElementById('physChartTitle').textContent = t('physChartT');
+  renderChartPresets();
+  updateChartControls();
+  if (document.getElementById('manualBack').style.display === 'flex') renderManual();
+  if (COPY_SCAN && document.getElementById('copyBack').style.display === 'flex') renderDedupe(COPY_SCAN);
   renderSortRows();
 }
 function toggleLang(){
@@ -1080,16 +1107,86 @@ function reselect(uuid){
   }
   SEL = null; SELG = null;
 }
+function chartDuration(seconds){
+  const value = Math.max(1, Math.round(seconds));
+  if (LANG === 'zh') {
+    if (value < 60) return `${value} 秒`;
+    if (value < 3600) return `${Math.round(value/60)} 分钟`;
+    if (value < 86400) return `${Math.round(value/3600)} 小时`;
+    return `${Math.round(value/86400)} 天`;
+  }
+  if (value < 60) return `${value}s`;
+  if (value < 3600) return `${Math.round(value/60)} min`;
+  if (value < 86400) return `${Math.round(value/3600)} hr`;
+  return `${Math.round(value/86400)} d`;
+}
+function chartPresetLabel(seconds){
+  const labels = LANG === 'zh'
+    ? {300:'5 分钟',900:'15 分钟',3600:'1 小时',21600:'6 小时',86400:'24 小时',604800:'7 天',2592000:'30 天'}
+    : {300:'5 min',900:'15 min',3600:'1 hr',21600:'6 hr',86400:'24 hr',604800:'7 d',2592000:'30 d'};
+  return labels[seconds];
+}
+function renderChartPresets(){
+  const box = document.getElementById('chartPresets');
+  if (!box) return;
+  box.innerHTML = CHART_PRESETS.map(seconds=>
+    `<button class="${CHART.live&&CHART.preset===seconds?'on':''}" onclick="setChartPreset(${seconds})">${chartPresetLabel(seconds)}</button>`).join('');
+}
+function localDateInput(epochSecond){
+  const date = new Date(epochSecond * 1000 - new Date(epochSecond * 1000).getTimezoneOffset() * 60000);
+  return date.toISOString().slice(0,16);
+}
+function updateChartControls(){
+  const now = Math.floor(Date.now()/1000);
+  const from = CHART.from || now - CHART.span;
+  const to = CHART.to || now;
+  if (!['chartFrom','chartTo'].includes(document.activeElement && document.activeElement.id)) {
+    document.getElementById('chartFrom').value = localDateInput(from);
+    document.getElementById('chartTo').value = localDateInput(to);
+  }
+  const live = document.getElementById('chartLiveBtn');
+  if (live) { live.disabled = CHART.live; live.classList.toggle('primary', !CHART.live); }
+  renderChartPresets();
+  const points = STATS && STATS.t ? STATS.t.length : 0;
+  const step = STATS && STATS.step_seconds ? chartDuration(STATS.step_seconds) : chartDuration(1);
+  const aggregation = STATS && STATS.aggregation === 'peak' ? t('chartPeak') : t('chartRaw');
+  document.getElementById('chartMeta').textContent = t('chartMeta')(points, step, aggregation);
+}
+function setChartPreset(seconds){
+  CHART.span = seconds; CHART.live = true; CHART.preset = seconds; CHART.hoverIndex = -1;
+  loadStats();
+}
+function returnChartLive(){
+  CHART.live = true; CHART.preset = CHART_PRESETS.includes(CHART.span) ? CHART.span : null; CHART.hoverIndex = -1;
+  loadStats();
+}
+function applyChartDates(){
+  const from = Math.floor(new Date(document.getElementById('chartFrom').value).getTime()/1000);
+  const requestedTo = Math.floor(new Date(document.getElementById('chartTo').value).getTime()/1000);
+  const to = Math.min(requestedTo, Math.floor(Date.now()/1000));
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) { toast(t('chartInvalid'),'bad'); return; }
+  CHART.from = from; CHART.to = to; CHART.span = to-from; CHART.live = false; CHART.preset = null; CHART.hoverIndex = -1;
+  loadStats();
+}
 async function loadStats(){
+  const request = (CHART.request || 0) + 1;
+  CHART.request = request;
+  const now = Math.floor(Date.now()/1000);
+  if (CHART.live) { CHART.to = now; CHART.from = now - CHART.span; }
   try {
-    STATS = await api('/api/stats');
+    const result = await api(`/api/stats?from=${CHART.from}&to=${CHART.to}&max_points=2000`);
+    if (request !== CHART.request) return;
+    STATS = result;
+    CHART.from = Number(STATS.range_from ?? CHART.from);
+    CHART.to = Number(STATS.range_to ?? CHART.to);
     const loaded = Object.values(STATS.loaded||{}).reduce((a,b)=>a+b,0);
     document.getElementById('pillCost').textContent = (STATS.body_cost_total ?? 0).toFixed(2);
     document.getElementById('pillLoaded').textContent = loaded;
+    updateChartControls();
     drawPhysChart(document.getElementById('pillSpark'), false);
     renderStatPop();
     if (VIEW === 'dash') renderDash();
-  } catch(e){ /* 静默 */ }
+  } catch(e){ /* 统计失败不影响主体操作 */ }
 }
 async function loadRecycle(){
   try {
@@ -1945,7 +2042,7 @@ function renderDash(){
   document.getElementById('physLegend').innerHTML = STATS
     ? dims.map((d,i)=>`<span><i style="background:${DIM_COLORS[i%DIM_COLORS.length]}"></i>${esc(d.replace('minecraft:',''))}
         <b>${(STATS.phys_1m?.[d]??0).toFixed(2)} ms</b></span>`).join('')
-      + `<span><i style="background:var(--acc)"></i>${t('physBodies')} <b>${(STATS.body_cost_total??0).toFixed(2)} ms</b></span>`
+      + `<span><i style="background:${BODY_COLOR}"></i>${t('physBodies')} <b>${(STATS.body_cost_total??0).toFixed(2)} ms</b></span>`
     : '';
   document.getElementById('dashTopCost').innerHTML = topCostTable(8);
 }
@@ -1956,39 +2053,124 @@ function topCostTable(n){
       <td>${esc(x.name || x.uuid.slice(0,8))}</td><td>${x.cost.toFixed(3)} ms/t</td></tr>`).join('')}
     <tr><td class="muted">${t('bodyCostTotal')}</td><td>${(STATS.body_cost_total??0).toFixed(3)} ms/t</td></tr></table>`;
 }
-const DIM_COLORS = ['#b98cff','#46c96b','#e0a33a','#5aa9ff'];
-function drawPhysChart(cv, big){
+const DIM_COLORS = ['#b98cff','#46c96b','#e0a33a','#5aa9ff','#ef7e62','#55c5c2'];
+const BODY_COLOR = '#f28db2';
+function chartSeries(){
+  if (!STATS) return [];
+  const series = Object.entries(STATS.phys||{}).map(([name,values],index)=>
+    ({name:name.replace('minecraft:',''),values:(values||[]).map(Number),color:DIM_COLORS[index%DIM_COLORS.length]}));
+  if ((STATS.body_logic||[]).length) series.push({name:t('physBodies'),values:STATS.body_logic.map(Number),color:BODY_COLOR});
+  return series;
+}
+function chartGeometry(cv,big,times,width,height){
+  const w=width||cv.clientWidth||cv.width, h=height||cv.clientHeight||cv.height;
+  const left=big?45:1, right=big?9:1, top=big?10:1, bottom=big?22:1;
+  const from=big?(CHART.from||times[0]):times[0], to=big?(CHART.to||times[times.length-1]):times[times.length-1];
+  return {w,h,left,right,top,bottom,from,to:Math.max(from+1,to),plotW:Math.max(1,w-left-right),plotH:Math.max(1,h-top-bottom)};
+}
+function chartX(time,g){ return g.left+(time-g.from)/(g.to-g.from)*g.plotW; }
+function chartAxisTime(epoch,span){
+  const date=new Date(epoch*1000);
+  return span>86400 ? date.toLocaleString([], {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})
+    : date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+}
+function drawPhysChart(cv,big){
   if (!cv) return;
-  const ctx = cv.getContext('2d');
-  const w = cv.clientWidth || cv.width, h = cv.clientHeight || cv.height;
-  if (cv.width !== w) cv.width = w;
-  if (cv.height !== h) cv.height = h;
-  ctx.clearRect(0,0,w,h);
-  if (!STATS || !STATS.phys) return;
-  const series = Object.entries(STATS.phys).map(([k,arr],i)=>({d:arr.slice(-300), c:DIM_COLORS[i%DIM_COLORS.length]}));
-  if (!series.length || !series[0].d.length) return;
-  const max = Math.max(0.2, ...series.flatMap(s=>s.d));
-  const pad = big ? 8 : 3;
-  const y = v => h - (v/max)*(h-pad*2) - pad;
+  const rect=cv.getBoundingClientRect();
+  const w=Math.round(rect.width)||cv.clientWidth||cv.width, h=Math.round(rect.height)||cv.clientHeight||cv.height;
+  if (!w||!h) return;
+  const ratio=Math.min(window.devicePixelRatio||1,2);
+  const pw=Math.round(w*ratio), ph=Math.round(h*ratio);
+  if (cv.width!==pw||cv.height!==ph) { cv.width=pw; cv.height=ph; }
+  const ctx=cv.getContext('2d');
+  ctx.setTransform(ratio,0,0,ratio,0,0); ctx.clearRect(0,0,w,h);
+  const times=(STATS&&STATS.t||[]).map(Number), series=chartSeries();
+  if (!times.length||!series.length) return;
+  const g=chartGeometry(cv,big,times,w,h);
+  let max=.2;
+  for (const item of series) for (const value of item.values) if (Number.isFinite(value)) max=Math.max(max,value);
+  const y=value=>g.top+(1-Math.max(0,value)/max)*g.plotH;
   if (big) {
-    ctx.strokeStyle = '#ffffff0a'; ctx.lineWidth = 1;
-    for (let i=1;i<4;i++){ const yy = h/4*i; ctx.beginPath(); ctx.moveTo(0,yy); ctx.lineTo(w,yy); ctx.stroke(); }
-    ctx.fillStyle = '#79839a'; ctx.font = '10px monospace';
-    ctx.fillText(max.toFixed(2)+' ms', 4, 12);
-  }
-  for (const s of series) {
-    const grad = ctx.createLinearGradient(0,0,0,h);
-    grad.addColorStop(0, s.c + '30'); grad.addColorStop(1, s.c + '00');
-    ctx.beginPath();
-    s.d.forEach((v,i)=>{ const x = i/(s.d.length-1||1)*w; i ? ctx.lineTo(x, y(v)) : ctx.moveTo(x, y(v)); });
-    if (big) {
-      ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
-      ctx.fillStyle = grad; ctx.fill();
-      ctx.beginPath();
-      s.d.forEach((v,i)=>{ const x = i/(s.d.length-1||1)*w; i ? ctx.lineTo(x, y(v)) : ctx.moveTo(x, y(v)); });
+    ctx.strokeStyle='#ffffff0d'; ctx.lineWidth=1; ctx.fillStyle='#79839a'; ctx.font='10px monospace';
+    for (let i=0;i<=4;i++) {
+      const yy=g.top+g.plotH*i/4, value=max*(1-i/4);
+      ctx.beginPath(); ctx.moveTo(g.left,yy); ctx.lineTo(g.left+g.plotW,yy); ctx.stroke();
+      if (i<4) ctx.fillText(value.toFixed(2),3,yy+3);
     }
-    ctx.strokeStyle = s.c; ctx.lineWidth = big ? 1.6 : 1.3; ctx.stroke();
+    ctx.textAlign='center';
+    for (let i=0;i<=3;i++) {
+      const epoch=g.from+(g.to-g.from)*i/3;
+      ctx.fillText(chartAxisTime(epoch,g.to-g.from),g.left+g.plotW*i/3,h-5);
+    }
+    ctx.textAlign='left';
   }
+  for (const item of series) {
+    ctx.beginPath(); let started=false;
+    times.forEach((time,index)=>{
+      const value=item.values[index];
+      if (!Number.isFinite(value)) { started=false; return; }
+      const xx=chartX(time,g), yy=y(value);
+      if (!started) { ctx.moveTo(xx,yy); started=true; } else ctx.lineTo(xx,yy);
+    });
+    ctx.strokeStyle=item.color; ctx.lineWidth=big?1.6:1.3; ctx.stroke();
+  }
+  if (big&&CHART.hoverIndex>=0&&CHART.hoverIndex<times.length) {
+    const index=CHART.hoverIndex, xx=chartX(times[index],g);
+    ctx.strokeStyle='#dce8f566'; ctx.lineWidth=1; ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(xx,g.top); ctx.lineTo(xx,g.top+g.plotH); ctx.stroke(); ctx.setLineDash([]);
+    for (const item of series) {
+      const value=item.values[index]; if (!Number.isFinite(value)) continue;
+      ctx.fillStyle=item.color; ctx.beginPath(); ctx.arc(xx,y(value),3,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='#0d1118'; ctx.stroke();
+    }
+  }
+}
+function nearestChartIndex(times,target){
+  let low=0,high=times.length-1;
+  while (low<high) { const mid=Math.floor((low+high)/2); if (times[mid]<target) low=mid+1; else high=mid; }
+  if (low>0&&Math.abs(times[low-1]-target)<=Math.abs(times[low]-target)) return low-1;
+  return low;
+}
+function chartMouseMove(event){
+  const cv=document.getElementById('physChart'), times=(STATS&&STATS.t||[]).map(Number);
+  if (!times.length) return;
+  const rect=cv.getBoundingClientRect(), g=chartGeometry(cv,true,times);
+  const localX=event.clientX-rect.left;
+  if (localX<g.left||localX>g.left+g.plotW) { chartMouseLeave(); return; }
+  const target=g.from+(localX-g.left)/g.plotW*(g.to-g.from);
+  CHART.hoverIndex=nearestChartIndex(times,target);
+  const index=CHART.hoverIndex, step=Number(STATS.step_seconds||1), start=times[index];
+  const interval=step>1 ? `<div class="cloneReason">${t('chartInterval')(`${new Date(start*1000).toLocaleString()} - ${new Date((start+step)*1000).toLocaleString()}`)}</div>` : '';
+  const tip=document.getElementById('chartTip');
+  tip.innerHTML=`<b>${new Date(start*1000).toLocaleString()}</b>${interval}`+chartSeries().map(item=>
+    `<div class="ctRow"><i style="background:${item.color}"></i><span>${esc(item.name)}</span><em>${Number(item.values[index]||0).toFixed(2)} ms</em></div>`).join('');
+  tip.style.display='block';
+  tip.style.left=Math.min(g.w-tip.offsetWidth-6,Math.max(4,localX+12))+'px';
+  tip.style.top='8px';
+  drawPhysChart(cv,true);
+}
+function chartMouseLeave(){
+  CHART.hoverIndex=-1; document.getElementById('chartTip').style.display='none';
+  drawPhysChart(document.getElementById('physChart'),true);
+}
+function chartWheel(event){
+  if (!STATS) return;
+  event.preventDefault();
+  const cv=document.getElementById('physChart'), rect=cv.getBoundingClientRect();
+  const ratio=Math.max(0,Math.min(1,(event.clientX-rect.left-45)/Math.max(1,rect.width-54)));
+  const oldSpan=Math.max(60,CHART.to-CHART.from), newSpan=Math.round(Math.max(60,Math.min(2592000,oldSpan*(event.deltaY>0?1.35:1/1.35))));
+  const anchor=CHART.from+oldSpan*ratio, now=Math.floor(Date.now()/1000);
+  let from=Math.round(anchor-newSpan*ratio), to=from+newSpan;
+  if (to>now) { from-=to-now; to=now; }
+  CHART.from=from; CHART.to=to; CHART.span=newSpan; CHART.live=false; CHART.preset=null; CHART.hoverIndex=-1;
+  updateChartControls();
+  clearTimeout(CHART.fetchTimer); CHART.fetchTimer=setTimeout(loadStats,180);
+}
+function initChartInteractions(){
+  const cv=document.getElementById('physChart');
+  cv.addEventListener('mousemove',chartMouseMove);
+  cv.addEventListener('mouseleave',chartMouseLeave);
+  cv.addEventListener('wheel',chartWheel,{passive:false});
 }
 function renderStatPop(){
   const pop = document.getElementById('statPop');
@@ -2217,6 +2399,7 @@ window.addEventListener('resize', () => { resizeGL(); if (VIEW==='dash') renderD
 /* ===================== 启动 ===================== */
 applyI18n();
 renderSortRows();
+initChartInteractions();
 if (typeof THREE !== 'undefined') initGL();
 else document.getElementById('pvInfo').textContent = 'three.js missing';
 setView(VIEW);
@@ -2225,7 +2408,7 @@ else showLogin('');
 // 成员表会变(有服启动/停服/接管),定期重拉。
 // 后台标签页一律停止轮询:页面没人看就别打请求,服务端才能进入空闲态(扫描全停)
 setInterval(() => { if (authenticated && !document.hidden) loadServers(); }, 20000);
-setInterval(() => { if (authenticated && !document.hidden) loadStats(); }, 15000);
+setInterval(() => { if (authenticated && !document.hidden && CHART.live) loadStats(); }, 15000);
 setInterval(() => {
   if (!authenticated || document.hidden) return;
   refreshTimer--;
@@ -2233,7 +2416,7 @@ setInterval(() => {
   if (refreshTimer <= 0) { refreshTimer = 60; loadBodies(); }
 }, 1000);
 // 切回前台立刻补一次统计,曲线不留豁口
-document.addEventListener('visibilitychange', () => { if (authenticated && !document.hidden) loadStats(); });
+document.addEventListener('visibilitychange', () => { if (authenticated && !document.hidden && CHART.live) loadStats(); });
 </script>
 </body>
 </html>
