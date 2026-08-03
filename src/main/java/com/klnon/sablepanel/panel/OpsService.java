@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -75,6 +76,14 @@ public final class OpsService {
     }
 
     private record SnatchRequest(UUID uuid, DeleteCopy copy, DiskScanner.LiveLocation location) {
+    }
+
+    private record CopyCandidate(DiskScanner.EntryKey key, CompoundTag tag, int blocks,
+                                 List<DiskScanner.LiveLocation> pointers) {
+    }
+
+    private record CopyInspection(Map<String, Path> dimensions, List<CopyCandidate> copies,
+                                  CopyCandidate keep, boolean identical) {
     }
 
     private static final class DeleteComponent {
@@ -560,13 +569,17 @@ public final class OpsService {
     }
 
     private static GlobalSavedSubLevelPointer fallbackPointer(DeleteCopy copy) {
-        CompoundTag posTag = copy.tag().getCompound("pose").getCompound("position");
+        return fallbackPointer(copy.key(), copy.tag());
+    }
+
+    private static GlobalSavedSubLevelPointer fallbackPointer(DiskScanner.EntryKey key, CompoundTag tag) {
+        CompoundTag posTag = tag.getCompound("pose").getCompound("position");
         int chunkX = clamp(((int) Math.floor(posTag.getDouble("x"))) >> 4,
-                copy.key().rx() * 32, copy.key().rx() * 32 + 31);
+                key.rx() * 32, key.rx() * 32 + 31);
         int chunkZ = clamp(((int) Math.floor(posTag.getDouble("z"))) >> 4,
-                copy.key().rz() * 32, copy.key().rz() * 32 + 31);
+                key.rz() * 32, key.rz() * 32 + 31);
         return new GlobalSavedSubLevelPointer(new ChunkPos(chunkX, chunkZ),
-                (short) copy.key().storage(), (short) copy.key().index());
+                (short) key.storage(), (short) key.index());
     }
 
     private void flushDeleteLevels(DeleteFlush flush, Map<UUID, DeleteStatus> statuses) {
@@ -1004,6 +1017,12 @@ public final class OpsService {
         return String.valueOf(error.getMessage() != null ? error.getMessage() : error);
     }
 
+    private static JsonArray numberArray(double[] values) {
+        JsonArray out = new JsonArray();
+        for (double value : values) out.add(value);
+        return out;
+    }
+
     /** 孤儿收养(依赖闭包一起):不动盘,全部经 sable 原生 loadHoldingSubLevel 入场 */
     public JsonObject adopt(UUID uuid) throws Exception {
         Map<UUID, MemberPlan> chain = prepareChain(uuid);
@@ -1038,6 +1057,207 @@ public final class OpsService {
         });
         this.rescan.run();
         return result;
+    }
+
+    /** 实时副本审查:列表快照只负责提示,真正操作前始终严格重扫并深比较完整 NBT。 */
+    public JsonObject inspectCopies(UUID uuid) throws Exception {
+        return copiesJson(inspectCopyState(uuid));
+    }
+
+    /**
+     * 只整理内容完全一致的同 UUID 磁盘条目。保留活动/可达副本,其余通过 sable 自身
+     * queueDeletion + saveAll 清理；内容不同的一律拒绝,不猜哪份才是玩家资产。
+     */
+    public synchronized JsonObject deduplicate(UUID uuid) throws Exception {
+        CopyInspection inspection = inspectCopyState(uuid);
+        if (inspection.copies().size() < 2) {
+            JsonObject out = new JsonObject();
+            out.addProperty("ok", true);
+            out.addProperty("removed", 0);
+            out.addProperty("kept_entry", inspection.keep().key().id());
+            return out;
+        }
+        if (!inspection.identical()) {
+            throw new IllegalStateException("副本内容不一致，未执行去重");
+        }
+
+        // 执行端再做一轮完整扫描；GET 结果和本方法首轮都只用于展示/早拒绝。
+        // 文件读取留在 HTTP 线程，主线程只碰 Sable 运行时。
+        CopyInspection prepared = inspectCopyState(uuid);
+        if (prepared.copies().size() < 2) {
+            JsonObject out = copiesJson(prepared);
+            out.addProperty("ok", true);
+            out.addProperty("removed", 0);
+            return out;
+        }
+        if (!prepared.identical()) {
+            throw new IllegalStateException("副本内容在确认后发生变化，未执行去重");
+        }
+        CopyCandidate keep = prepared.keep();
+        Map<UUID, MemberPlan> chain = prepareChain(uuid);
+        chain.put(uuid, new MemberPlan(keep.key(), keep.tag(),
+                keep.pointers().isEmpty() ? null : keep.pointers().get(0)));
+        int removed = prepared.copies().size() - 1;
+        onMainUntilComplete(() -> {
+            String active = activePointerEntryId(uuid);
+            if (active != null && !active.equals(keep.key().id())) {
+                throw new IllegalStateException("活动副本在准备后发生变化，请重试");
+            }
+            ServerSubLevel body = ensureLoaded(uuid, chain);
+            GlobalSavedSubLevelPointer originalPointer = body.getLastSerializationPointer();
+            Set<ServerLevel> touched = new LinkedHashSet<>();
+            touched.add(body.getLevel());
+            try {
+                for (CopyCandidate copy : prepared.copies()) {
+                    if (copy.key().equals(keep.key())) continue;
+                    ServerLevel level = levelOf(copy.key().dim());
+                    ServerSubLevelContainer container = level == null ? null : SubLevelContainer.getContainer(level);
+                    if (container == null) throw new IllegalStateException("副本所在维度不可用: " + copy.key().dim());
+                    touched.add(level);
+                    List<GlobalSavedSubLevelPointer> targets = new ArrayList<>();
+                    if (copy.pointers().isEmpty()) {
+                        targets.add(fallbackPointer(copy.key(), copy.tag()));
+                    } else {
+                        for (DiskScanner.LiveLocation location : copy.pointers()) targets.add(toPointer(location));
+                    }
+                    // locatePointersStrict 会保留重复引用；每次 queueDeletion 只移除列表中的一个引用。
+                    for (GlobalSavedSubLevelPointer pointer : targets) {
+                        body.setLastSerializationPointer(pointer);
+                        container.getHoldingChunkMap().queueDeletion(body);
+                    }
+                }
+            } finally {
+                body.setLastSerializationPointer(originalPointer);
+            }
+            for (ServerLevel level : touched) {
+                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+                if (container == null) throw new IllegalStateException("物理体容器不存在");
+                container.getHoldingChunkMap().saveAll();
+            }
+            JsonObject out = new JsonObject();
+            out.addProperty("queued", removed);
+            return out;
+        });
+
+        CopyInspection verified = inspectCopyState(uuid);
+        if (verified.copies().size() != 1) {
+            throw new IllegalStateException("去重后仍有 " + verified.copies().size() + " 个磁盘条目");
+        }
+        if (verified.keep().pointers().isEmpty()) {
+            throw new IllegalStateException("去重后主副本没有有效 holding 指针");
+        }
+        Set<DiskScanner.EntryKey> removedKeys = new LinkedHashSet<>();
+        for (CopyCandidate copy : prepared.copies()) {
+            if (!copy.key().equals(keep.key())) removedKeys.add(copy.key());
+        }
+        int stalePointers = DiskScanner.locatePointersStrict(verified.dimensions(), removedKeys).values().stream()
+                .mapToInt(List::size).sum();
+        if (stalePointers > 0) {
+            throw new IllegalStateException("去重后仍有 " + stalePointers + " 个多余 holding 指针");
+        }
+        JsonObject detail = new JsonObject();
+        detail.addProperty("removed", removed);
+        detail.addProperty("kept_entry", verified.keep().key().id());
+        audit("dedupe", uuid, null, detail.toString());
+        this.rescan.run();
+        JsonObject out = copiesJson(verified);
+        out.addProperty("ok", true);
+        out.addProperty("removed", removed);
+        out.addProperty("kept_entry", verified.keep().key().id());
+        return out;
+    }
+
+    private CopyInspection inspectCopyState(UUID uuid) throws Exception {
+        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
+        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions);
+        List<DiskScanner.EntryMeta> entries = meta.getOrDefault(uuid, List.of());
+        if (entries.isEmpty()) throw new IllegalStateException("找不到该体的磁盘条目");
+        Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
+        for (DiskScanner.EntryMeta entry : entries) keys.add(entry.key());
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
+                DiskScanner.locatePointersStrict(dimensions, keys);
+        JsonObject activeState = onMain(() -> {
+            JsonObject out = new JsonObject();
+            String id = activePointerEntryId(uuid);
+            if (id != null) out.addProperty("entry", id);
+            return out;
+        });
+        String active = activeState.has("entry") ? activeState.get("entry").getAsString() : null;
+
+        List<CopyCandidate> copies = new ArrayList<>();
+        for (DiskScanner.EntryMeta entry : entries) {
+            CompoundTag tag = readCopy(dimensions, uuid, entry.key());
+            copies.add(new CopyCandidate(entry.key(), tag,
+                    DiskScanner.countBlocks(tag.getCompound("plot"), null),
+                    List.copyOf(pointers.getOrDefault(entry.key(), List.of()))));
+        }
+        copies.sort(Comparator
+                .comparing((CopyCandidate copy) -> !copy.key().id().equals(active))
+                .thenComparing(copy -> copy.pointers().isEmpty())
+                .thenComparing(copy -> copy.key().id()));
+        CopyCandidate keep = copies.get(0);
+        boolean identical = copies.stream().allMatch(copy -> copy.tag().equals(keep.tag()));
+        return new CopyInspection(dimensions, List.copyOf(copies), keep, identical);
+    }
+
+    private static CompoundTag readCopy(Map<String, Path> dimensions, UUID uuid, DiskScanner.EntryKey key)
+            throws IOException {
+        Path directory = dimensions.get(key.dim());
+        CompoundTag tag = directory == null ? null : DiskScanner.readEntryTag(directory, key);
+        if (tag == null || !uuid.equals(tagUuid(tag))) {
+            throw new IOException("副本槽位已经变化: " + key.id());
+        }
+        return tag;
+    }
+
+    private JsonObject copiesJson(CopyInspection inspection) {
+        JsonObject out = new JsonObject();
+        out.addProperty("uuid", tagUuid(inspection.keep().tag()).toString());
+        out.addProperty("identical", inspection.identical());
+        out.addProperty("keep_entry", inspection.keep().key().id());
+        JsonArray copies = new JsonArray();
+        for (CopyCandidate copy : inspection.copies()) {
+            DiskScanner.DiskEntry summary = DiskScanner.summarize(copy.key(), copy.tag());
+            JsonObject item = new JsonObject();
+            item.addProperty("entry", copy.key().id());
+            item.addProperty("keep", copy.key().equals(inspection.keep().key()));
+            item.addProperty("identical", copy.tag().equals(inspection.keep().tag()));
+            item.addProperty("reachable", !copy.pointers().isEmpty());
+            item.addProperty("pointer_count", copy.pointers().size());
+            item.addProperty("blocks", copy.blocks());
+            item.addProperty("dim", copy.key().dim());
+            item.add("pos", numberArray(summary.pos()));
+            item.add("size", numberArray(summary.size()));
+            copies.add(item);
+        }
+        out.add("copies", copies);
+        return out;
+    }
+
+    private String activePointerEntryId(UUID uuid) {
+        for (ServerLevel level : this.server.getAllLevels()) {
+            try {
+                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+                if (container == null) continue;
+                ServerSubLevel loaded = container.getSubLevel(uuid) instanceof ServerSubLevel body ? body : null;
+                GlobalSavedSubLevelPointer pointer = loaded != null ? loaded.getLastSerializationPointer() : null;
+                if (pointer == null) {
+                    HoldingSubLevel holding = container.getHoldingChunkMap().getHoldingSubLevel(uuid);
+                    if (holding != null) pointer = holding.pointer();
+                }
+                if (pointer != null) {
+                    return entryKey(level.dimension().location().toString(), pointer).id();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static DiskScanner.EntryKey entryKey(String dim, GlobalSavedSubLevelPointer pointer) {
+        return new DiskScanner.EntryKey(dim,
+                Math.floorDiv(pointer.chunkPos().x, 32), Math.floorDiv(pointer.chunkPos().z, 32),
+                pointer.storageIndex(), pointer.subLevelIndex());
     }
 
     // ---------- 内部:加载路径 ----------

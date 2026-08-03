@@ -221,9 +221,31 @@ public final class BodyIndex {
             String key = cloneKey(e);
             if (key != null) cloneKeys.computeIfAbsent(key, k -> new HashSet<>()).add(en.getKey());
         }
-        Set<UUID> cloneSuspects = new HashSet<>();
-        for (Set<UUID> s : cloneKeys.values()) {
-            if (s.size() >= 2) cloneSuspects.addAll(s);
+        Map<UUID, Integer> cloneSetByUuid = new HashMap<>();
+        JsonArray cloneSetArr = new JsonArray();
+        List<Map.Entry<String, Set<UUID>>> orderedCloneSets = cloneKeys.entrySet().stream()
+                .filter(en -> en.getValue().size() >= 2)
+                .sorted(Map.Entry.comparingByKey())
+                .toList();
+        for (int setId = 0; setId < orderedCloneSets.size(); setId++) {
+            List<UUID> matches = new ArrayList<>(orderedCloneSets.get(setId).getValue());
+            matches.sort(UUID::compareTo);
+            DiskScanner.DiskEntry sample = byUuid.get(matches.get(0));
+            JsonObject set = new JsonObject();
+            set.addProperty("id", setId);
+            set.addProperty("mode", sample.name() != null ? "named" : "unnamed");
+            if (sample.name() != null) set.addProperty("name", sample.name());
+            set.addProperty("blocks", sample.blocks());
+            JsonArray roundedSize = new JsonArray();
+            for (double axis : sample.size()) roundedSize.add(Math.round(axis));
+            set.add("rounded_size", roundedSize);
+            JsonArray setMembers = new JsonArray();
+            for (UUID match : matches) {
+                cloneSetByUuid.put(match, setId);
+                setMembers.add(match.toString());
+            }
+            set.add("members", setMembers);
+            cloneSetArr.add(set);
         }
 
         // 方块调色板(全局去重,body 引用索引)
@@ -345,8 +367,10 @@ public final class BodyIndex {
                     for (String id : entryIds.getOrDefault(u, List.of())) ea.add(id);
                     m.add("entries", ea);
                 }
-                if (cloneSuspects.contains(u)) {
+                Integer cloneSet = cloneSetByUuid.get(u);
+                if (cloneSet != null) {
                     m.addProperty("clone", true);
+                    m.addProperty("clone_set", cloneSet);
                     groupClone = true;
                 }
                 if (!e.deps().isEmpty()) m.addProperty("deps", e.deps().size());
@@ -398,6 +422,7 @@ public final class BodyIndex {
         policy.addProperty("be", this.config.protectBlockEntities);
         out.add("rec_policy", policy);
         out.add("block_palette", paletteArr);
+        out.add("clone_sets", cloneSetArr);
         out.add("groups", groupArr);
         return out;
     }

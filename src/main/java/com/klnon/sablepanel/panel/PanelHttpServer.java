@@ -38,10 +38,12 @@ import java.util.zip.GZIPOutputStream;
  *   POST /api/recycle/restore     {"ids":[...]}
  *   POST /api/recycle/config      {"max_files":500}
  *   GET  /api/body/{uuid}/mesh    体素预览(带 LRU 缓存)
+ *   GET  /api/body/{uuid}/copies 实时副本审查
  *   POST /api/rescan              立即触发磁盘重扫
  *   POST /api/body/{uuid}/teleport?x=&y=&z=
  *   POST /api/body/{uuid}/delete
  *   POST /api/body/{uuid}/adopt   孤儿收养(含依赖闭包)
+ *   POST /api/body/{uuid}/deduplicate 仅清理内容完全一致的副本
  *   POST /api/ops/batch_delete    {"uuids":[...]}
  *   POST /api/cluster/register    集群成员注册/心跳(仅本机回环)
  *   POST /api/cluster/token       修改访问口令(HOST 收到会推给全体成员)
@@ -314,12 +316,18 @@ public final class PanelHttpServer {
                 send(ex, 200, "application/json", mesh.toString().getBytes(StandardCharsets.UTF_8), true);
                 return;
             }
-            var m = java.util.regex.Pattern.compile("/api/body/([0-9a-fA-F-]{36})/(mesh|teleport|delete|adopt)").matcher(path);
+            var m = java.util.regex.Pattern.compile(
+                    "/api/body/([0-9a-fA-F-]{36})/(mesh|copies|teleport|delete|adopt|deduplicate)").matcher(path);
             if (m.matches()) {
                 UUID uuid = UUID.fromString(m.group(1));
                 switch (m.group(2)) {
                     case "mesh" -> {
                         handleMesh(ex, uuid);
+                        return;
+                    }
+                    case "copies" -> {
+                        JsonObject r = this.ops.inspectCopies(uuid);
+                        send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), true);
                         return;
                     }
                     case "teleport" -> {
@@ -339,6 +347,12 @@ public final class PanelHttpServer {
                     case "adopt" -> {
                         requirePost(ex);
                         JsonObject r = this.ops.adopt(uuid);
+                        send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
+                        return;
+                    }
+                    case "deduplicate" -> {
+                        requirePost(ex);
+                        JsonObject r = this.ops.deduplicate(uuid);
                         send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
                         return;
                     }
