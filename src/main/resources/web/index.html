@@ -813,6 +813,64 @@ const I18N = {
     selAdoptDone:(o,n)=>`Adopted ${o}/${n}`,
   }
 };
+const MANUAL = {
+  zh: [
+    {k:'states',label:'manualStates',sections:[
+      {h:'运行与存档状态',body:'<ul><li><b>loaded</b>：物理体已加载并参与运行。</li><li><b>stored</b>：磁盘中有条目和有效 holding 指针，但当前未加载。</li><li><b>holding</b>：由 holding chunk 在内存中持有，尚待正常保存流程处理。</li><li><b>orphan</b>：磁盘条目仍在，但没有任何有效 holding 指针，正常流程无法再找到它。</li></ul>'},
+      {h:'组合与异常',body:'<ul><li><b>依赖组</b>：按 Sable 依赖关系合并的一组物理体。删除和恢复以完整依赖组为边界。</li><li><b>副本</b>：同一个 UUID 在磁盘中出现多个条目，不代表内容一定相同。</li><li><b>疑似克隆</b>：不同 UUID 命中相同外形摘要，仅用于提示，不等同于确认重复。</li></ul>'},
+      {h:'疑似克隆条件',body:'<p>命名体比较完整名称、方块数和取整后的包围盒；未命名体还要求不少于 50 块，再比较方块数和取整包围盒。该判断不比较体素、方块组成、维度和位置，因此可能误报，也可能漏报。</p>'}
+    ]},
+    {k:'cleanup',label:'manualCleanup',sections:[
+      {h:'推荐删除',body:'<p>必须同时满足：整组无名称、总方块数低于动态阈值、方块种类低于动态阈值、方块实体数低于动态阈值、容器全空、无人乘坐、没有第三方数据。阈值来自 <code>config/sablepanel-server.json</code>。</p>'},
+      {h:'保护条件',body:'<p>依赖组中任一成员有名称、玩家乘坐、第三方数据、非空容器，或整组达到任一保护阈值，就不会进入推荐删除。副本和疑似克隆只是异常提示，不会单独证明内容可删。</p>'}
+    ]},
+    {k:'operations',label:'manualOps',sections:[
+      {h:'日常操作',body:'<ul><li><b>重扫</b>：立即重建磁盘索引；后台也会每 120 秒自动扫描。</li><li><b>传送</b>：未加载体会先强制加载；孤儿会先尝试连同依赖一起收养。</li><li><b>收养</b>：重建 holding 指针并接回加载管线，不删除或改写原有物理体条目。</li><li><b>删除</b>：按完整依赖组执行，严格验收成功后才提交回收站备份。</li><li><b>批量操作</b>：勾选会跨筛选保留；批量删除仍会按依赖组去重并逐组验收。</li></ul>'},
+      {h:'副本去重',body:'<p>打开后会重新读取同 UUID 的每个槽位和全部 holding 指针。优先保留运行时正在使用的条目，其次保留有有效指针的条目，最后按条目 ID 稳定选择。只有所有完整 CompoundTag 深度相等时才可执行；操作通过 Sable 的 queueDeletion 与 saveAll 清理其它槽位，不直接改 region 文件，也不生成回收站备份。</p>'}
+    ]},
+    {k:'recycle',label:'manualRecycle',sections:[
+      {h:'何时进入回收站',body:'<p>删除前会暂存完整依赖组备份；磁盘条目和 holding 指针通过删除后验收时记为待恢复。删除或自动回滚中断时，完整备份会记为需恢复，不再隐藏。</p>'},
+      {h:'恢复与容量',body:'<ul><li>恢复始终恢复完整依赖组，并在保存的维度和位置重新加载；旧备份若没有维度则按主世界处理。</li><li><b>待恢复</b>表示删除成功且备份可用；<b>需恢复</b>会先清除同 UUID 残留再从快照重建整组，且不会被容量策略自动淘汰；<b>已恢复</b>表示该记录已经成功执行过恢复。</li><li>容量按实际备份文件计数。超过上限时，按删除日期淘汰最早的普通完整依赖组；需恢复备份占满容量时，新删除会在执行前被拒绝。</li></ul>'}
+    ]},
+    {k:'performance',label:'manualPerformance',sections:[
+      {h:'曲线口径',body:'<ul><li><b>各维度物理引擎</b>：该维度物理步进耗时按服务器 tick 折算的毫秒值。</li><li><b>物理体逻辑</b>：所有已加载物理体 Java 逻辑每 tick 的采样合计，不包含服务器其它 mod。</li><li>历史同时保存 tick 数、平均 MSPT 与峰值 MSPT，供区间聚合和接口查询。</li></ul>'},
+      {h:'查询与交互',body:'<p>每秒采样异步写入 <code>config/sablepanel/stats/</code>。短范围读取秒级原始数据，长范围读取分钟数据并按时间桶保留峰值。悬停查看精确时间和各曲线值；滚轮以指针所在时间为锚点缩放；日期输入查看固定历史区间，此时停止自动刷新，点击“回到实时”恢复。</p>'},
+      {h:'保留时间',body:'<p>默认保留 30 天，由 <code>statsRetentionDays</code> 控制。跨日文件会压缩，损坏行或未写完整的末行会跳过，不影响实时面板。</p>'}
+    ]},
+    {k:'maintenance',label:'manualMaintenance',sections:[
+      {h:'口令与监听',body:'<p>访问口令作为页面密码保存在浏览器当前设备中；维护卡片修改后会同步到当前集群。<code>bind</code>、<code>port</code>、<code>statsRetentionDays</code> 位于 <code>config/sablepanel-server.json</code>，修改后重启服务端生效。</p>'},
+      {h:'集群',body:'<p>同机、同端口且同口令的实例组成面板集群。先占用端口的实例托管页面，其它实例注册为成员；顶部服务器选择器只切换查看目标，不迁移物理体数据。</p>'}
+    ]}
+  ],
+  en: [
+    {k:'states',label:'manualStates',sections:[
+      {h:'Runtime and storage states',body:'<ul><li><b>loaded</b>: active in the running world.</li><li><b>stored</b>: present on disk with a valid holding pointer but not loaded.</li><li><b>holding</b>: held in memory by a holding chunk and awaiting the normal save path.</li><li><b>orphan</b>: present on disk with no valid holding pointer.</li></ul>'},
+      {h:'Groups and anomalies',body:'<ul><li><b>Dependency group</b>: bodies joined by Sable dependencies; delete and restore operate on the whole group.</li><li><b>Copy</b>: multiple disk entries share one UUID; their contents may differ.</li><li><b>Clone suspect</b>: different UUIDs share an outline summary. This is a hint, not proof of duplication.</li></ul>'},
+      {h:'Clone-suspect rule',body:'<p>Named bodies compare exact name, block count, and rounded bounds. Unnamed bodies must also contain at least 50 blocks, then compare block count and rounded bounds. Voxels, block composition, dimension, and position are not compared, so false positives and false negatives are possible.</p>'}
+    ]},
+    {k:'cleanup',label:'manualCleanup',sections:[
+      {h:'Deletion recommendation',body:'<p>A group must be unnamed, below all dynamic block/type/block-entity thresholds, have empty containers, no rider, and no third-party data. Thresholds come from <code>config/sablepanel-server.json</code>.</p>'},
+      {h:'Protection',body:'<p>Any named member, rider, third-party data, non-empty container, or reached protection threshold excludes the whole dependency group. Copies and clone suspects alone never prove that data is safe to delete.</p>'}
+    ]},
+    {k:'operations',label:'manualOps',sections:[
+      {h:'Routine operations',body:'<ul><li><b>Rescan</b>: rebuilds the disk index immediately; an automatic scan also runs every 120 seconds.</li><li><b>Teleport</b>: force-loads stored bodies; orphans are adopted with dependencies first.</li><li><b>Adopt</b>: rebuilds holding pointers and reconnects the load path without deleting the body entry.</li><li><b>Delete</b>: processes a complete dependency group and commits its backup only after strict verification.</li><li><b>Batch actions</b>: selections survive filters; deletion still deduplicates and verifies dependency groups.</li></ul>'},
+      {h:'Copy deduplication',body:'<p>The scan rereads every slot and holding pointer. It keeps the active runtime entry first, then a reachable entry, then the stable lowest entry ID. Execution is allowed only when every complete CompoundTag is deeply equal. Extra slots are removed through Sable queueDeletion and saveAll, never by editing region files, and no recycle backup is created.</p>'}
+    ]},
+    {k:'recycle',label:'manualRecycle',sections:[
+      {h:'Admission',body:'<p>A complete dependency-group backup is staged before deletion. Verified deletion becomes Ready to restore. If deletion or automatic rollback is interrupted, the complete backup becomes Recovery needed instead of remaining hidden.</p>'},
+      {h:'Restore and capacity',body:'<ul><li>Restore always handles the whole dependency group at its saved dimension and position; data without a dimension uses the overworld.</li><li><b>Ready to restore</b> means deletion succeeded. <b>Recovery needed</b> removes same-UUID remnants before rebuilding the group and is exempt from automatic capacity eviction. <b>Restored</b> means a restore already succeeded.</li><li>The limit counts backup files. Overflow evicts the oldest ordinary complete groups; if protected recovery backups fill the limit, a new deletion is rejected before it starts.</li></ul>'}
+    ]},
+    {k:'performance',label:'manualPerformance',sections:[
+      {h:'Series',body:'<ul><li><b>Dimension physics</b>: physics-step time per dimension, normalized per server tick.</li><li><b>Body logic</b>: sampled Java logic total per tick across loaded bodies; other mods are excluded.</li><li>Tick count, average MSPT, and peak MSPT are also persisted for aggregation and API queries.</li></ul>'},
+      {h:'History controls',body:'<p>One-second samples are written asynchronously under <code>config/sablepanel/stats/</code>. Short ranges use raw seconds; long ranges use minute data and preserve peaks per bucket. Hover for time and values, use the wheel to zoom around the pointer time, or enter a fixed date range. Fixed history stops polling until “Back to live” is selected.</p>'},
+      {h:'Retention',body:'<p>The default is 30 days via <code>statsRetentionDays</code>. Completed days are compressed. Corrupt records and incomplete tail lines are skipped without breaking live data.</p>'}
+    ]},
+    {k:'maintenance',label:'manualMaintenance',sections:[
+      {h:'Token and listener',body:'<p>The access token acts as the page password and is remembered on this device. Changing it updates the current cluster. <code>bind</code>, <code>port</code>, and <code>statsRetentionDays</code> live in <code>config/sablepanel-server.json</code> and require a server restart.</p>'},
+      {h:'Cluster',body:'<p>Instances on the same machine with the same port and token form a panel cluster. The first instance owns the page; others register as members. The header selector changes only the viewed server and never migrates body data.</p>'}
+    ]}
+  ]
+};
 let LANG = localStorage.getItem('spLang') || 'zh';
 function t(k){ const v = I18N[LANG][k]; return v !== undefined ? v : (I18N.zh[k] ?? k); }
 function fmt(n){ return Number(n).toLocaleString('en-US'); }
@@ -983,6 +1041,21 @@ function maybeWarnDefaultToken(serverData){
 }
 function modalConfirm(){ modalCb && modalCb(true); }
 function modalCancel(){ modalCb && modalCb(false); }
+function openManual(){
+  document.getElementById('manualBack').style.display = 'flex';
+  renderManual();
+}
+function closeManual(){ document.getElementById('manualBack').style.display = 'none'; }
+function setManualTab(key){ MANUAL_TAB = key; renderManual(); }
+function renderManual(){
+  const pages = MANUAL[LANG];
+  const page = pages.find(item=>item.k===MANUAL_TAB) || pages[0];
+  MANUAL_TAB = page.k;
+  document.getElementById('manualTabs').innerHTML = pages.map(item=>
+    `<button class="${item.k===MANUAL_TAB?'on':''}" onclick="setManualTab('${item.k}')">${t(item.label)}</button>`).join('');
+  document.getElementById('manualContent').innerHTML = `<h3>${t(page.label)}</h3>` +
+    page.sections.map(section=>`<h4>${section.h}</h4>${section.body}`).join('');
+}
 document.getElementById('modalInput').addEventListener('keydown', e => { if (e.key === 'Enter') modalConfirm(); });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
@@ -2033,6 +2106,7 @@ function renderDash(){
       <button onclick="doRescan()">${t('rescan')}</button>
       <button onclick="loadAll(true)">${t('refresh')}</button>
       <button onclick="doChangeToken()">${t('tokenChange')}</button>
+      <button onclick="openManual()">${t('manualOpen')}</button>
     </div>
     <div class="hint">${t('scanInfo')}</div>
     <div class="hint">${t('tokenHint')}</div>`;
