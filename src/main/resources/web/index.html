@@ -459,6 +459,7 @@ body.locked>header,body.locked>#views{visibility:hidden}
       <input type="text" id="rSearch" data-i18n-ph="searchPh" placeholder="名称 / UUID" oninput="renderRecycle()">
       <h3 data-i18n="recycleState">恢复状态</h3>
       <label><input type="checkbox" class="rFState" value="deleted" checked onchange="renderRecycle()"> <span data-i18n="recycleDeleted">待恢复</span></label>
+      <label><input type="checkbox" class="rFState" value="recovery_required" checked onchange="renderRecycle()"> <span data-i18n="recycleRecovery">需恢复</span></label>
       <label><input type="checkbox" class="rFState" value="restored" checked onchange="renderRecycle()"> <span data-i18n="recycleRestored">已恢复</span></label>
       <h3 data-i18n="scale">规模</h3>
       <label><input type="checkbox" class="rFSize" value="huge" checked onchange="renderRecycle()"> <span data-i18n="szHuge">巨型 ≥10000</span></label>
@@ -560,14 +561,15 @@ const I18N = {
     adoptT:'收养孤儿物理体', adoptMsg:(n)=>`将把「${n}」重新接入 sable 加载管线(依赖体一并收养)。\n不修改任何磁盘数据,失败也无副作用。`,
     adoptOk:'收养成功,已重新加载', adoptPart:'收养完成(部分成员未能加载)', adoptFail:'收养失败: ',
     adoptTrunc:(n)=>`依赖链超过 ${n} 个成员上限,本次只收养了扫描到的前 ${n} 个`,
-    recycleT:'回收站', recycleEmpty:'回收站为空', recycleHint:'只显示严格验收成功的删除依赖组。',
-    recycleState:'恢复状态', recycleDeleted:'待恢复', recycleRestored:'已恢复', recycleStorage:'存储上限',
+    recycleT:'回收站', recycleEmpty:'回收站为空', recycleHint:'显示已验收删除和删除中断后保留的完整备份。',
+    recycleState:'恢复状态', recycleDeleted:'待恢复', recycleRecovery:'需恢复', recycleRestored:'已恢复', recycleStorage:'存储上限',
     apply:'应用', recycleUsage:(n,m)=>`${n} / ${m} 个备份文件`, pickRecycle:'选择一个备份物理体查看详情',
     restoreGroup:'恢复该依赖组', restoreHint:'恢复后会在保存位置重新加载',
     rTabAll:'全部', rTabNamed:'命名', rTabUnnamed:'未命名', rTabRestored:'已恢复',
     rShowing:(n,m)=>`显示 ${n} / ${m} 个依赖组`, rSelectInfo:(g,b)=>`已选 ${g} 组 · ${b} 个物理体`,
     restoreSelected:'恢复所选', restoreSelectedT:'恢复所选物理体',
     restoreSelectedMsg:(g,b,blk)=>`将恢复勾选的 ${g} 个依赖组,共 ${b} 个物理体、${fmt(blk)} 块。\n恢复后会在原保存位置重新加载。`,
+    restoreRecoveryWarn:(n)=>`\n其中 ${n} 个“需恢复”事务会先清除同 UUID 残留,再从备份重建整组。`,
     restoreDone:(n,m)=>`恢复完成:成功 ${n}/${m} 组`, restoreFail:'恢复失败: ',
     deletedAt:'删除时间', restoredAt:'恢复时间', backupFiles:'备份文件', backupGroup:'回收组',
     saveLimitOk:'回收站上限已更新', saveLimitFail:'更新上限失败: ', rEmpty:'没有符合条件的回收组',
@@ -655,14 +657,15 @@ const I18N = {
     adoptT:'Adopt orphan body', adoptMsg:(n)=>`Re-attach "${n}" into sable's loading pipeline (dependencies included).\nNo disk data is modified.`,
     adoptOk:'Adopted and loaded', adoptPart:'Adopted (some members failed)', adoptFail:'Adoption failed: ',
     adoptTrunc:(n)=>`Dependency chain exceeds the ${n}-member cap; only the first ${n} scanned members were adopted`,
-    recycleT:'Recycle bin', recycleEmpty:'Recycle bin is empty', recycleHint:'Only dependency groups whose deletion passed strict verification are shown.',
-    recycleState:'Restore state', recycleDeleted:'Ready to restore', recycleRestored:'Restored', recycleStorage:'Storage limit',
+    recycleT:'Recycle bin', recycleEmpty:'Recycle bin is empty', recycleHint:'Shows verified deletions and complete backups retained after interrupted deletion.',
+    recycleState:'Restore state', recycleDeleted:'Ready to restore', recycleRecovery:'Recovery needed', recycleRestored:'Restored', recycleStorage:'Storage limit',
     apply:'Apply', recycleUsage:(n,m)=>`${n} / ${m} backup files`, pickRecycle:'Select a backed-up body to inspect',
     restoreGroup:'Restore dependency group', restoreHint:'Reloads the group at its saved position',
     rTabAll:'All', rTabNamed:'Named', rTabUnnamed:'Unnamed', rTabRestored:'Restored',
     rShowing:(n,m)=>`Showing ${n} / ${m} dependency groups`, rSelectInfo:(g,b)=>`${g} groups selected · ${b} bodies`,
     restoreSelected:'Restore selected', restoreSelectedT:'Restore selected bodies',
     restoreSelectedMsg:(g,b,blk)=>`Restores ${g} selected dependency groups: ${b} bodies and ${fmt(blk)} blocks.\nBodies reload at their saved positions.`,
+    restoreRecoveryWarn:(n)=>`\n${n} Recovery needed transaction(s) will remove same-UUID remnants before rebuilding the complete group.`,
     restoreDone:(n,m)=>`Restore complete: ${n}/${m} groups`, restoreFail:'Restore failed: ',
     deletedAt:'Deleted', restoredAt:'Restored', backupFiles:'Backup files', backupGroup:'Recycle group',
     saveLimitOk:'Recycle limit updated', saveLimitFail:'Failed to update limit: ', rEmpty:'No recycle groups match',
@@ -1382,6 +1385,11 @@ function renderRecycleTabs(){
     `<button class="${R_TAB===tab.k?'on':''}" onclick="setRecycleTab('${tab.k}')">${t(tab.label)}
       <span class="cnt">${RECYCLE.groups.filter(tab.test).length}</span></button>`).join('');
 }
+function recycleStateTag(state){
+  if (state==='restored') return `<span class="tag ok">${t('recycleRestored')}</span>`;
+  if (state==='recovery_required') return `<span class="tag warn">${t('recycleRecovery')}</span>`;
+  return `<span class="tag acc">${t('recycleDeleted')}</span>`;
+}
 function renderRecycle(){
   renderRecycleTabs();
   const list = document.getElementById('rList');
@@ -1407,8 +1415,7 @@ function renderRecycle(){
   } else {
     list.innerHTML = visible.map(group => {
       const title = esc(group.name) || `${group.bodies[0].uuid.slice(0,8)}…`;
-      const state = group.state==='restored'
-        ? `<span class="tag ok">${t('recycleRestored')}</span>` : `<span class="tag acc">${t('recycleDeleted')}</span>`;
+      const state = recycleStateTag(group.state);
       const members = group.bodies.map(body=>
         `<div class="member ${RSEL&&RSELG&&RSELG.id===group.id&&RSEL.uuid===body.uuid?'sel':''}"
           data-rkey="${group.id}/${body.uuid}" onclick="selectRecycleBody('${group.id}','${body.uuid}')">
@@ -1467,7 +1474,7 @@ function renderRecycleDetail(){
   const rows=[];
   rows.push([t('name'),esc(body.name)||`<span class="muted">${t('unnamed')}</span>`]);
   rows.push(['UUID',`<span class="val" style="font-size:10.5px">${body.uuid}</span><button class="copyBtn" onclick="copyText('${body.uuid}')">⧉</button>`]);
-  rows.push([t('state'),group.state==='restored'?`<span class="tag ok">${t('recycleRestored')}</span>`:`<span class="tag acc">${t('recycleDeleted')}</span>`]);
+  rows.push([t('state'),recycleStateTag(group.state)]);
   rows.push([t('dim'),esc(body.dim||'minecraft:overworld')]);
   rows.push([t('coord'),`<span class="val">${(body.pos||[0,0,0]).map(v=>Number(v).toFixed(1)).join(', ')}</span>`]);
   rows.push([t('bbox'),`<span class="val">${(body.size||[0,0,0]).map(v=>Number(v).toFixed(1)).join(' × ')}</span>`]);
@@ -1510,7 +1517,9 @@ async function restoreSelectedGroups(){
 async function confirmRestore(groups){
   const bodies=groups.reduce((sum,group)=>sum+group.members,0);
   const blocks=groups.reduce((sum,group)=>sum+(group.blocks||0),0);
-  if (!await askModal(t('restoreSelectedT'),t('restoreSelectedMsg')(groups.length,bodies,blocks),false)) return;
+  const recovery=groups.filter(group=>group.state==='recovery_required').length;
+  const message=t('restoreSelectedMsg')(groups.length,bodies,blocks)+(recovery?t('restoreRecoveryWarn')(recovery):'');
+  if (!await askModal(t('restoreSelectedT'),message,false)) return;
   busy(t('loading'));
   try {
     const result=await api('/api/recycle/restore',{method:'POST',body:JSON.stringify({ids:groups.map(g=>g.id)})});
