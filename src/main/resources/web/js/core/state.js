@@ -11,7 +11,7 @@ const CHART_PRESETS = [300,900,3600,21600,86400,604800,2592000];
 let CHART = {from:0,to:0,span:300,live:true,preset:300,hoverIndex:-1,fetchTimer:null};
 let COPY_SCAN = null, COPY_UUID = null, MANUAL_TAB = 'states';
 
-/* 集群:同机多服共用一个端口,顶栏切换;CURSRV 为空表示"本机 HOST 自己" */
+/* 集群:同机多服共用 apiPort,顶栏切换;CURSRV 为空表示"本机 HOST 自己" */
 let SERVERS = [], CURSRV = localStorage.getItem('spServer') || '';
 
 /* 在线玩家(传送玩家用):选中体时拉取,15s 节流;切服作废 */

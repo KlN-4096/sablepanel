@@ -275,7 +275,7 @@ const MANUAL = {
     ]},
     {k:'maintenance',label:'manualMaintenance',sections:[
       {h:'口令与监听',body:'<p>访问口令作为页面密码保存在浏览器当前设备中；维护卡片修改后会同步到当前集群。网页默认使用 <code>webPort=25580</code>，TLS 数据接口默认使用 <code>apiPort=25581</code>；配置位于 <code>config/sablepanel-server.json</code>。</p>'},
-      {h:'集群',body:'<p>同机、同端口且同口令的实例组成面板集群。先占用端口的实例托管页面，其它实例注册为成员；顶部服务器选择器只切换查看目标，不迁移物理体数据。</p>'}
+      {h:'集群',body:'<p>同机且使用同一 <code>apiPort</code> 的实例组成面板集群。先占用数据端口的实例成为 HOST 并按 <code>webPort</code> 托管页面，其它实例通过回环地址注册为 PEER 并采纳 HOST 口令；顶部服务器选择器只切换查看目标，不迁移物理体数据。</p>'}
     ]}
   ],
   en: [
@@ -303,7 +303,7 @@ const MANUAL = {
     ]},
     {k:'maintenance',label:'manualMaintenance',sections:[
       {h:'Token and listener',body:'<p>The access token acts as the page password and is remembered on this device. The web page defaults to <code>webPort=25580</code> and the TLS data endpoint to <code>apiPort=25581</code>; settings live in <code>config/sablepanel-server.json</code>.</p>'},
-      {h:'Cluster',body:'<p>Instances on the same machine with the same port and token form a panel cluster. The first instance owns the page; others register as members. The header selector changes only the viewed server and never migrates body data.</p>'}
+      {h:'Cluster',body:'<p>Instances on the same machine using the same <code>apiPort</code> form a panel cluster. The first instance to bind the data port becomes HOST and serves the page on <code>webPort</code>; the others register over loopback as PEERs and adopt the HOST token. The header selector changes only the viewed server and never migrates body data.</p>'}
     ]}
   ]
 };
