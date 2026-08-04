@@ -33,7 +33,7 @@ public final class PhysicsTimer {
             long dur = System.nanoTime() - t0;
             STATS.computeIfAbsent(system, k -> new Stat()).add(dur);
             try {
-                com.klnon.sablepanel.panel.StatsCollector.INSTANCE.physics(
+                com.klnon.sablepanel.panel.data.StatsCollector.INSTANCE.physics(
                         system.getLevel().dimension().location().toString(), dur);
             } catch (Throwable ignored) {
             }

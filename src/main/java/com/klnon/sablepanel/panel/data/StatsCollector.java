@@ -1,5 +1,6 @@
-package com.klnon.sablepanel.panel;
+package com.klnon.sablepanel.panel.data;
 
+import com.klnon.sablepanel.panel.PanelConfig;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.SablePanel;

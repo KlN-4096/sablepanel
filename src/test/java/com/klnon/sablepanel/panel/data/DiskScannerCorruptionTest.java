@@ -1,4 +1,4 @@
-package com.klnon.sablepanel.panel;
+package com.klnon.sablepanel.panel.data;
 
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;

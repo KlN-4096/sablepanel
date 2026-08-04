@@ -11,7 +11,7 @@ run-server*.log
 
 # 本地分析脚本与扫描数据(tools/ 内含服务器凭据,勿入库)
 tools/
-data/
+/data/
 
 # Claude Code 本地配置
 .claude/

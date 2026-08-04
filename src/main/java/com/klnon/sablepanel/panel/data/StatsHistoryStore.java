@@ -1,5 +1,6 @@
-package com.klnon.sablepanel.panel;
+package com.klnon.sablepanel.panel.data;
 
+import com.klnon.sablepanel.panel.PanelConfig;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -32,7 +33,7 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 /** 每秒性能样本的异步日文件存储，以及跨日期范围查询。 */
-final class StatsHistoryStore implements AutoCloseable {
+public final class StatsHistoryStore implements AutoCloseable {
     private static final int QUEUE_CAPACITY = 4096;
     private static final long LIVE_SECONDS = 7200;
     private static final int FLUSH_EVERY = 10;
