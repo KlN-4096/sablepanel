@@ -6,6 +6,7 @@ import com.klnon.sablepanel.panel.api.PanelApiService;
 import com.klnon.sablepanel.panel.data.BodyIndex;
 import com.klnon.sablepanel.panel.data.DiskScanner;
 import com.klnon.sablepanel.panel.data.StatsCollector;
+import com.klnon.sablepanel.panel.service.JobService;
 import com.klnon.sablepanel.panel.service.OpsService;
 import com.klnon.sablepanel.panel.service.PauseService;
 import com.klnon.sablepanel.panel.transport.PanelClusterNode;
@@ -33,8 +34,11 @@ public final class PanelRuntime implements AutoCloseable {
     private final AtomicBoolean scanPending = new AtomicBoolean();
     private volatile PanelClusterNode panelNode;
     private volatile PanelWebGateway panelWeb;
+    private volatile JobService jobService;
     private volatile boolean stopping = true;
     private volatile boolean scanPauseLogged;
+    /** 作业结束后由 worker 线程置位,让下一 tick 立刻刷新运行时快照(见 onServerTick) */
+    private volatile boolean refreshRequested;
     private ScheduledExecutorService scanExecutor;
     private ScheduledFuture<?> heartbeatTask;
     private int ticksSinceRefresh;
@@ -85,7 +89,11 @@ public final class PanelRuntime implements AutoCloseable {
             };
             OpsService ops = new OpsService(server, this.bodyIndex, requestScan, config);
             StatsCollector.INSTANCE.start(config);
-            PanelApiService api = new PanelApiService(config, server, this.bodyIndex, ops);
+            JobService jobs = new JobService(() -> this.refreshRequested = true);
+            this.jobService = jobs;
+            SablePanel.LOGGER.info("sablepanel: operation workers <= {} ({} cores)",
+                    jobs.maxWorkers(), Runtime.getRuntime().availableProcessors());
+            PanelApiService api = new PanelApiService(config, server, this.bodyIndex, ops, jobs);
             createdNode = new PanelClusterNode(config, api);
             createdNode.start();
 
@@ -121,9 +129,12 @@ public final class PanelRuntime implements AutoCloseable {
         if (durationNanos > 0) StatsCollector.INSTANCE.tick(durationNanos);
         this.ticksSinceRefresh++;
         int interval = panel.isActive() ? RUNTIME_REFRESH_TICKS : RUNTIME_REFRESH_IDLE_TICKS;
-        if (this.ticksSinceRefresh < interval) return;
+        // 作业刚结束时插队刷新:否则前端要等最多 5 秒(空闲时 60 秒)才看得到状态变化,
+        // 这正是从前要在前端写死 setTimeout(loadBodies, 1200) 的原因
+        if (!this.refreshRequested && this.ticksSinceRefresh < interval) return;
+        this.refreshRequested = false;
         try {
-            this.bodyIndex.refreshRuntime(server, this.ticksSinceRefresh);
+            this.bodyIndex.refreshRuntime(server, Math.max(1, this.ticksSinceRefresh));
         } catch (Throwable ignored) {
         }
         this.ticksSinceRefresh = 0;
@@ -134,6 +145,7 @@ public final class PanelRuntime implements AutoCloseable {
         ScheduledFuture<?> heartbeat;
         ScheduledExecutorService executor;
         PanelClusterNode node;
+        JobService jobs;
         synchronized (this.lifecycleLock) {
             this.stopping = true;
             this.lifecycleGeneration.incrementAndGet();
@@ -141,13 +153,16 @@ public final class PanelRuntime implements AutoCloseable {
             heartbeat = this.heartbeatTask;
             executor = this.scanExecutor;
             node = this.panelNode;
+            jobs = this.jobService;
             this.heartbeatTask = null;
             this.scanExecutor = null;
             this.panelNode = null;
+            this.jobService = null;
         }
         if (heartbeat != null) heartbeat.cancel(true);
         closeServerWeb();
         if (node != null) node.close();
+        if (jobs != null) jobs.close();
         shutdownExecutor(executor);
         StatsCollector.INSTANCE.stop();
         PauseService.reset();
@@ -212,6 +227,7 @@ public final class PanelRuntime implements AutoCloseable {
 
     private void rollbackStartup(long generation, ScheduledExecutorService executor, PanelClusterNode node,
                                  ScheduledFuture<?> heartbeat) {
+        JobService jobs;
         synchronized (this.lifecycleLock) {
             boolean ownsLifecycle = this.lifecycleGeneration.compareAndSet(generation, generation + 1);
             if (ownsLifecycle) {
@@ -221,10 +237,13 @@ public final class PanelRuntime implements AutoCloseable {
             if (this.panelNode == node) this.panelNode = null;
             if (this.scanExecutor == executor) this.scanExecutor = null;
             if (this.heartbeatTask == heartbeat) this.heartbeatTask = null;
+            jobs = this.jobService;
+            this.jobService = null;
         }
         if (heartbeat != null) heartbeat.cancel(true);
         closeServerWeb();
         if (node != null) node.close();
+        if (jobs != null) jobs.close();
         shutdownExecutor(executor);
         StatsCollector.INSTANCE.stop();
         PauseService.reset();

@@ -216,12 +216,20 @@ public final class OpsService {
     public JsonObject setForced(List<UUID> uuids, boolean forced) throws Exception {
         Map<UUID, Map<UUID, MemberPlan>> chains = new LinkedHashMap<>();
         if (forced) {
-            for (UUID uuid : uuids) chains.put(uuid, prepareChain(uuid)); // HTTP 线程做磁盘定位
+            for (UUID uuid : uuids) {
+                // 已加载的体直接跳过建链:ensureLoaded 第一行 resolveLoaded 就会返回,
+                // 那条链一次都用不上。生产上曾为一个已加载的 178 依赖体白扫 16 分钟磁盘。
+                if (this.index.isLoaded(uuid)) continue;
+                chains.put(uuid, prepareChain(uuid)); // 作业线程做磁盘定位,不占主线程
+            }
         }
+        // ThreadLocal 到不了主线程,先在作业线程上取出来捕获进 lambda
+        JobService.Job job = JobService.current();
         JsonObject out = onMainUntilComplete(() -> {
             JsonArray failed = new JsonArray();
             int done = 0;
             for (UUID uuid : uuids) {
+                if (job != null) job.phase(forced ? "挂常驻票" : "摘常驻票");
                 if (!forced) {
                     ForceLoadService.removeOnMain(this.server, uuid);
                     done++;
@@ -1424,15 +1432,36 @@ public final class OpsService {
 
     // ---------- 内部:加载路径 ----------
 
-    /** HTTP 线程:为 uuid 及其依赖闭包准备条目数据(磁盘 IO 不占主线程) */
+    /**
+     * 作业线程:为 uuid 及其依赖闭包准备条目数据(磁盘 IO 不占主线程)。
+     * <p>
+     * 全局串行执行({@link JobService#underLocate}):链上每个成员在快照失配时都要全盘
+     * gunzip 一遍,多个作业并行读的是同一批文件、做的是同一份解压——并行毫无收益,
+     * 只会互相抢 IO 和 CPU 并把主线程饿着。生产上 4 个并行作业曾让服务端持续落后 10 秒。
+     */
     private Map<UUID, MemberPlan> prepareChain(UUID root) {
+        try {
+            return JobService.underLocate(() -> prepareChainSerial(root));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("磁盘定位被中断");
+        } catch (RuntimeException runtime) {
+            throw runtime;
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private Map<UUID, MemberPlan> prepareChainSerial(UUID root) {
         Map<UUID, MemberPlan> chain = new LinkedHashMap<>();
         Map<String, Path> dims = DiskScanner.sublevelDirs(this.server);
         Deque<UUID> queue = new ArrayDeque<>();
         queue.add(root);
+        JobService.phase("定位磁盘条目");
         while (!queue.isEmpty() && chain.size() < MAX_CHAIN) {
             UUID u = queue.poll();
             if (chain.containsKey(u)) continue;
+            JobService.detail(chain.size() + "/" + Math.min(MAX_CHAIN, chain.size() + queue.size() + 1));
             MemberPlan plan = locateMember(u, dims);
             if (plan == null) continue;
             chain.put(u, plan);
