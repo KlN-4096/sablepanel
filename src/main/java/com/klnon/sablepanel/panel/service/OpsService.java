@@ -208,6 +208,46 @@ public final class OpsService {
         return out;
     }
 
+    /**
+     * 常驻加载(sable force-load ticket)。开启前必须先把体加载出来 —— {@code addForceLoadTicket}
+     * 只接受已加载的 {@link ServerSubLevel};关闭则对未加载体也能摘票。
+     * 加载可能触发区块同步生成,故走不设超时的 {@link #onMainUntilComplete}。
+     */
+    public JsonObject setForced(List<UUID> uuids, boolean forced) throws Exception {
+        Map<UUID, Map<UUID, MemberPlan>> chains = new LinkedHashMap<>();
+        if (forced) {
+            for (UUID uuid : uuids) chains.put(uuid, prepareChain(uuid)); // HTTP 线程做磁盘定位
+        }
+        JsonObject out = onMainUntilComplete(() -> {
+            JsonArray failed = new JsonArray();
+            int done = 0;
+            for (UUID uuid : uuids) {
+                if (!forced) {
+                    ForceLoadService.removeOnMain(this.server, uuid);
+                    done++;
+                    continue;
+                }
+                try {
+                    ForceLoadService.addOnMain(ensureLoaded(uuid, chains.getOrDefault(uuid, Map.of())));
+                    done++;
+                } catch (Throwable t) {
+                    JsonObject f = new JsonObject();
+                    f.addProperty("uuid", uuid.toString());
+                    f.addProperty("error", String.valueOf(t.getMessage()));
+                    failed.add(f);
+                }
+            }
+            JsonObject o = new JsonObject();
+            o.addProperty("ok", true);
+            o.addProperty("forced", forced);
+            o.addProperty("count", done);
+            if (!failed.isEmpty()) o.add("failed", failed);
+            return o;
+        });
+        for (UUID uuid : uuids) audit(forced ? "force_load" : "force_unload", uuid, null, null);
+        return out;
+    }
+
     /** 在线玩家列表(主线程读取,给"传送玩家"下拉用) */
     public JsonObject listPlayers() throws Exception {
         return onMain(() -> {

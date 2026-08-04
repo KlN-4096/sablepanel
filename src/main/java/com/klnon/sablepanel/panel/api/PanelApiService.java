@@ -119,6 +119,12 @@ public final class PanelApiService {
                 return PanelResponse.json(200,
                         this.ops.setPaused(readUuids(body), body.has("paused") && body.get("paused").getAsBoolean()), false);
             }
+            case "/api/ops/force_load" -> {
+                requirePost(request);
+                JsonObject body = request.jsonBody();
+                return PanelResponse.json(200,
+                        this.ops.setForced(readUuids(body), body.has("forced") && body.get("forced").getAsBoolean()), false);
+            }
         }
 
         var recycleMesh = RECYCLE_MESH.matcher(path);

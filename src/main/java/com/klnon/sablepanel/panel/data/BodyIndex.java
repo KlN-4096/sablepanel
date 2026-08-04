@@ -64,6 +64,9 @@ public final class BodyIndex {
 
     /** 主线程调用:刷新运行时加载态 + holding 态 + 逐体耗时 + 孤儿告警 */
     public void refreshRuntime(MinecraftServer server, int ticksSinceLast) {
+        // 先守护常驻体(sable 只在世界 initialize 时按票加载一次,掉线后不会自愈),
+        // 这样本轮拉回的体能立刻计入下面的运行时视图
+        com.klnon.sablepanel.panel.service.ForceLoadService.guardOnMain(server);
         Map<UUID, JsonObject> map = new HashMap<>();
         Map<String, Integer> loadedPerDim = new HashMap<>();
         for (ServerLevel level : server.getAllLevels()) {
@@ -454,6 +457,10 @@ public final class BodyIndex {
         JsonArray pausedArr = new JsonArray();
         for (UUID u : com.klnon.sablepanel.panel.service.PauseService.snapshot()) pausedArr.add(u.toString());
         out.add("paused", pausedArr);
+        // 常驻加载集合(sable force-load ticket,含未加载体的意图):前端据此变色/置顶/渲染 📌
+        JsonArray forcedArr = new JsonArray();
+        for (UUID u : com.klnon.sablepanel.panel.service.ForceLoadService.snapshot()) forcedArr.add(u.toString());
+        out.add("forced", forcedArr);
         JsonObject policy = new JsonObject();
         policy.addProperty("blocks", this.config.protectBlocks);
         policy.addProperty("types", this.config.protectBlockTypes);

@@ -35,6 +35,8 @@ public class SablePanel {
     private long tickStartNanos;
 
     public SablePanel() {
+        // 票种注册必须早于世界读档,否则存档里的常驻票 byName 查不到会被静默丢弃
+        com.klnon.sablepanel.panel.service.ForceLoadService.init();
         if (FMLEnvironment.dist == Dist.CLIENT) ClientPanelBootstrap.start();
         NeoForge.EVENT_BUS.addListener(this::onContainerReady);
         NeoForge.EVENT_BUS.addListener(this::onPrePhysics);
