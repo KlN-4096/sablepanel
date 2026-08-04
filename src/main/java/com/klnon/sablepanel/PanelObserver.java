@@ -1,5 +1,6 @@
 package com.klnon.sablepanel;
 
+import com.klnon.sablepanel.panel.service.PauseService;
 import com.google.gson.JsonObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelObserver;
 import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
@@ -39,6 +40,8 @@ public final class PanelObserver implements SubLevelObserver {
                     o.addProperty("split_from", splitFrom.toString());
                     checkFragmentStorm(splitFrom);
                 }
+                // 有暂停意图的体(含重启恢复)在加载时重新挂固定约束
+                PauseService.onBodyLoaded(ssl);
             }
             EventLog.write(o);
         } catch (Throwable t) {
@@ -69,6 +72,7 @@ public final class PanelObserver implements SubLevelObserver {
     @Override
     public void onSubLevelRemoved(SubLevel subLevel, SubLevelRemovalReason reason) {
         try {
+            PauseService.onBodyUnloaded(subLevel.getUniqueId());
             JsonObject o = base("remove", subLevel);
             o.addProperty("reason", reason.name());
             EventLog.write(o);

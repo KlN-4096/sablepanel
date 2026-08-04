@@ -1,12 +1,13 @@
 package com.klnon.sablepanel;
 
+import com.klnon.sablepanel.panel.service.PauseService;
 import com.google.gson.JsonObject;
-import com.klnon.sablepanel.panel.BodyIndex;
-import com.klnon.sablepanel.panel.DiskScanner;
-import com.klnon.sablepanel.panel.OpsService;
+import com.klnon.sablepanel.panel.data.BodyIndex;
+import com.klnon.sablepanel.panel.data.DiskScanner;
+import com.klnon.sablepanel.panel.service.OpsService;
 import com.klnon.sablepanel.panel.PanelConfig;
-import com.klnon.sablepanel.panel.PanelHttpServer;
-import com.klnon.sablepanel.panel.StatsCollector;
+import com.klnon.sablepanel.panel.web.PanelHttpServer;
+import com.klnon.sablepanel.panel.data.StatsCollector;
 import com.mojang.logging.LogUtils;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
@@ -74,6 +75,7 @@ public class SablePanel {
             }
             BodyCostTracker.ENABLED = true;
             this.bodyIndex.setConfig(config);
+            PauseService.load();
             var server = event.getServer();
             // 2 线程:磁盘扫描可能跑几百毫秒,不能把集群心跳挤过 TTL
             this.scanExecutor = Executors.newScheduledThreadPool(2, r -> {
@@ -221,6 +223,7 @@ public class SablePanel {
             this.scanExecutor = null;
         }
         StatsCollector.INSTANCE.stop();
+        PauseService.reset();
         EventLog.close();
     }
 }
