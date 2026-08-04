@@ -15,12 +15,20 @@ import java.util.zip.GZIPOutputStream;
 final class PanelWire {
     static final int MAX_FRAME_BYTES = 32 * 1024 * 1024;
     static final int MAX_REQUEST_BODY = 1024 * 1024;
+    static final int MAX_META_BYTES = 64 * 1024;
+    static final int FRAME_HEADER_BYTES = 13;
+    static final int LENGTH_FIELD_BYTES = 4;
+    static final int CONNECT_TIMEOUT_MILLIS = 5_000;
+    static final int HANDSHAKE_TIMEOUT_SECONDS = 10;
     private static final int COMPRESS_AFTER = 1024;
 
     private PanelWire() {
     }
 
     static PanelFrame request(long id, PanelRequest request) {
+        if (request.body().length > MAX_REQUEST_BODY) {
+            throw new IllegalArgumentException("request body too large");
+        }
         JsonObject meta = new JsonObject();
         meta.addProperty("method", request.method());
         meta.addProperty("path", request.path());
@@ -51,6 +59,10 @@ final class PanelWire {
         meta.addProperty("status", response.status());
         meta.addProperty("content_type", response.contentType());
         meta.addProperty("gzip", compressed);
+        int metaBytes = meta.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        if (LENGTH_FIELD_BYTES + metaBytes + (long) FRAME_HEADER_BYTES + body.length > MAX_FRAME_BYTES) {
+            throw new IOException("response frame too large");
+        }
         return new PanelFrame(PanelFrame.RESPONSE, id, meta, body);
     }
 

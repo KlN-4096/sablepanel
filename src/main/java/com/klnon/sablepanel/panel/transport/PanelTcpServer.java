@@ -12,7 +12,6 @@ import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.codec.LengthFieldPrepender;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.timeout.IdleStateEvent;
@@ -24,43 +23,78 @@ import java.net.InetSocketAddress;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
 public final class PanelTcpServer implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(PanelTcpServer.class);
+    private static final int CALLBACK_THREADS = 4;
+    private static final int CALLBACK_QUEUE_CAPACITY = 64;
+    private static final int MAX_IN_FLIGHT_PER_CONNECTION = 4;
+    private static final int DEFAULT_READER_IDLE_SECONDS = 45;
+    private static final int DEFAULT_WRITER_IDLE_SECONDS = 20;
+    private static final int DEFAULT_PONG_TIMEOUT_SECONDS = 10;
+    private static final int SHUTDOWN_TIMEOUT_SECONDS = 2;
+    private static final AtomicLong CALLBACK_THREAD_IDS = new AtomicLong();
     private final NioEventLoopGroup boss = new NioEventLoopGroup(1);
     private final NioEventLoopGroup workers = new NioEventLoopGroup(2);
-    private final ExecutorService callbacks = Executors.newFixedThreadPool(4);
+    private final ExecutorService callbacks = new ThreadPoolExecutor(
+            CALLBACK_THREADS, CALLBACK_THREADS, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(CALLBACK_QUEUE_CAPACITY), runnable -> {
+                Thread thread = new Thread(runnable,
+                        "sablepanel-tcp-server-callback-" + CALLBACK_THREAD_IDS.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+            }, new ThreadPoolExecutor.AbortPolicy());
     private final Map<String, ConnectionHandler> peers = new ConcurrentHashMap<>();
+    private final Set<ConnectionHandler> connections = ConcurrentHashMap.newKeySet();
     private final Function<PanelRequest, PanelResponse> managerRequests;
     private final Supplier<String> token;
     private final String selfId;
+    private final int readerIdleSeconds;
+    private final int writerIdleSeconds;
+    private final int pongTimeoutSeconds;
+    private final AtomicBoolean closed = new AtomicBoolean();
     private volatile Channel channel;
 
     public PanelTcpServer(String selfId, Function<PanelRequest, PanelResponse> managerRequests,
                           Supplier<String> token) {
+        this(selfId, managerRequests, token, DEFAULT_READER_IDLE_SECONDS,
+                DEFAULT_WRITER_IDLE_SECONDS, DEFAULT_PONG_TIMEOUT_SECONDS);
+    }
+
+    PanelTcpServer(String selfId, Function<PanelRequest, PanelResponse> managerRequests,
+                   Supplier<String> token, int readerIdleSeconds, int writerIdleSeconds,
+                   int pongTimeoutSeconds) {
         this.selfId = selfId;
         this.managerRequests = managerRequests;
         this.token = token;
+        this.readerIdleSeconds = readerIdleSeconds;
+        this.writerIdleSeconds = writerIdleSeconds;
+        this.pongTimeoutSeconds = pongTimeoutSeconds;
     }
 
     public void start(String bind, int port, SslContext ssl) throws InterruptedException {
+        if (this.closed.get()) throw new IllegalStateException("TCP 服务器已关闭");
         ServerBootstrap bootstrap = new ServerBootstrap().group(this.boss, this.workers)
                 .channel(NioServerSocketChannel.class).childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel channel) {
                         channel.pipeline().addLast(ssl.newHandler(channel.alloc()));
-                        channel.pipeline().addLast(new IdleStateHandler(45, 20, 0));
-                        channel.pipeline().addLast(new LengthFieldBasedFrameDecoder(
-                                PanelWire.MAX_FRAME_BYTES, 0, 4, 0, 4));
-                        channel.pipeline().addLast(new LengthFieldPrepender(4));
+                        channel.pipeline().addLast(new IdleStateHandler(
+                                readerIdleSeconds, writerIdleSeconds, 0));
+                        channel.pipeline().addLast(new PanelFrameDecoder(false));
+                        channel.pipeline().addLast(new LengthFieldPrepender(PanelWire.LENGTH_FIELD_BYTES));
                         channel.pipeline().addLast(new PanelFrameCodec());
                         channel.pipeline().addLast(new ConnectionHandler());
                     }
@@ -76,6 +110,11 @@ public final class PanelTcpServer implements AutoCloseable {
     public int port() {
         if (this.channel == null) return -1;
         return ((InetSocketAddress) this.channel.localAddress()).getPort();
+    }
+
+    public boolean isActive() {
+        Channel current = this.channel;
+        return !this.closed.get() && current != null && current.isActive();
     }
 
     public CompletableFuture<PanelResponse> requestPeer(String id, PanelRequest request) {
@@ -97,22 +136,44 @@ public final class PanelTcpServer implements AutoCloseable {
 
     @Override
     public void close() {
-        if (this.channel != null) this.channel.close().awaitUninterruptibly();
-        this.peers.values().forEach(ConnectionHandler::close);
-        this.callbacks.shutdownNow();
+        if (!this.closed.compareAndSet(false, true)) return;
+        Channel current = this.channel;
+        this.channel = null;
+        if (current != null) current.close().awaitUninterruptibly();
+        this.connections.forEach(ConnectionHandler::close);
+        this.connections.clear();
+        this.peers.clear();
+        shutdownCallbacks();
         this.workers.shutdownGracefully(0, 1, TimeUnit.SECONDS).awaitUninterruptibly();
         this.boss.shutdownGracefully(0, 1, TimeUnit.SECONDS).awaitUninterruptibly();
+    }
+
+    private void shutdownCallbacks() {
+        this.callbacks.shutdown();
+        try {
+            if (!this.callbacks.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                this.callbacks.shutdownNow();
+                this.callbacks.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException interrupted) {
+            this.callbacks.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 
     private final class ConnectionHandler extends SimpleChannelInboundHandler<PanelFrame> {
         private final Map<Long, CompletableFuture<PanelResponse>> pending = new ConcurrentHashMap<>();
         private final AtomicLong ids = new AtomicLong();
+        private final AtomicInteger inFlight = new AtomicInteger();
         private volatile ChannelHandlerContext context;
         private volatile String peerId;
+        private volatile boolean inactive;
+        private long awaitingPongId;
 
         @Override
         public void handlerAdded(ChannelHandlerContext context) {
             this.context = context;
+            connections.add(this);
         }
 
         @Override
@@ -120,19 +181,64 @@ public final class PanelTcpServer implements AutoCloseable {
             try {
                 switch (frame.type()) {
                     case PanelFrame.PEER_REGISTER -> registerPeer(context, frame);
-                    case PanelFrame.REQUEST -> callbacks.execute(() -> sendResponse(context, frame.requestId(),
-                            managerRequests.apply(PanelWire.request(frame))));
+                    case PanelFrame.REQUEST -> submitRequest(context, frame);
                     case PanelFrame.RESPONSE, PanelFrame.ERROR -> {
                         CompletableFuture<PanelResponse> future = this.pending.remove(frame.requestId());
                         if (future != null) future.complete(PanelWire.response(frame));
                     }
                     case PanelFrame.PING -> context.writeAndFlush(
                             new PanelFrame(PanelFrame.PONG, frame.requestId(), new JsonObject(), new byte[0]));
-                    case PanelFrame.PONG -> { }
+                    case PanelFrame.PONG -> acceptPong(frame.requestId());
                     default -> context.close();
                 }
             } catch (Exception error) {
                 context.close();
+            }
+        }
+
+        private void submitRequest(ChannelHandlerContext context, PanelFrame frame) {
+            boolean accepted = submitCallback(() -> {
+                PanelRequest request;
+                try {
+                    request = PanelWire.request(frame);
+                } catch (Exception error) {
+                    sendResponse(context, frame.requestId(), PanelResponse.error(400, messageOf(error)));
+                    return;
+                }
+                try {
+                    PanelResponse response = managerRequests.apply(request);
+                    sendResponse(context, frame.requestId(), response != null
+                            ? response : PanelResponse.error(500, "请求处理未返回响应"));
+                } catch (Exception error) {
+                    LOGGER.warn("sablepanel: TCP request handler failed {}", request.path(), error);
+                    sendResponse(context, frame.requestId(), PanelResponse.error(500, messageOf(error)));
+                }
+            });
+            if (!accepted) {
+                sendResponse(context, frame.requestId(), PanelResponse.error(503, "服务器繁忙,请稍后重试"));
+            }
+        }
+
+        private boolean submitCallback(Runnable task) {
+            if (closed.get() || this.inactive || this.context == null || !this.context.channel().isActive()) {
+                return false;
+            }
+            if (this.inFlight.incrementAndGet() > MAX_IN_FLIGHT_PER_CONNECTION) {
+                this.inFlight.decrementAndGet();
+                return false;
+            }
+            try {
+                callbacks.execute(() -> {
+                    try {
+                        if (!this.inactive) task.run();
+                    } finally {
+                        this.inFlight.decrementAndGet();
+                    }
+                });
+                return true;
+            } catch (RejectedExecutionException rejected) {
+                this.inFlight.decrementAndGet();
+                return false;
             }
         }
 
@@ -157,23 +263,45 @@ public final class PanelTcpServer implements AutoCloseable {
         }
 
         CompletableFuture<PanelResponse> request(PanelRequest request) {
-            long id = this.ids.incrementAndGet();
+            if (this.context == null || this.inactive || !this.context.channel().isActive()) {
+                return CompletableFuture.failedFuture(new IllegalStateException("PEER 已断开"));
+            }
+            PanelFrame frame;
+            try {
+                frame = PanelWire.request(this.ids.incrementAndGet(), request);
+            } catch (Exception error) {
+                return CompletableFuture.failedFuture(error);
+            }
+            long id = frame.requestId();
             CompletableFuture<PanelResponse> future = new CompletableFuture<>();
             this.pending.put(id, future);
-            this.context.writeAndFlush(PanelWire.request(id, request));
+            this.context.writeAndFlush(frame).addListener(write -> {
+                if (!write.isSuccess()) completePendingExceptionally(id, write.cause());
+            });
             scheduleTimeout(id);
             return future;
         }
 
         CompletableFuture<PanelResponse> updateToken(String next) {
+            if (this.context == null || this.inactive || !this.context.channel().isActive()) {
+                return CompletableFuture.failedFuture(new IllegalStateException("PEER 已断开"));
+            }
             long id = this.ids.incrementAndGet();
             CompletableFuture<PanelResponse> future = new CompletableFuture<>();
             this.pending.put(id, future);
             JsonObject meta = new JsonObject();
             meta.addProperty("token", next);
-            this.context.writeAndFlush(new PanelFrame(PanelFrame.TOKEN_UPDATE, id, meta, new byte[0]));
+            this.context.writeAndFlush(new PanelFrame(PanelFrame.TOKEN_UPDATE, id, meta, new byte[0]))
+                    .addListener(write -> {
+                        if (!write.isSuccess()) completePendingExceptionally(id, write.cause());
+                    });
             scheduleTimeout(id);
             return future;
+        }
+
+        private void completePendingExceptionally(long id, Throwable error) {
+            CompletableFuture<PanelResponse> future = this.pending.remove(id);
+            if (future != null) future.completeExceptionally(error);
         }
 
         private void scheduleTimeout(long id) {
@@ -192,14 +320,39 @@ public final class PanelTcpServer implements AutoCloseable {
         }
 
         @Override
-        public void userEventTriggered(ChannelHandlerContext context, Object event) {
+        public void userEventTriggered(ChannelHandlerContext context, Object event) throws Exception {
             if (event instanceof IdleStateEvent) {
-                context.writeAndFlush(new PanelFrame(PanelFrame.PING, this.ids.incrementAndGet(), new JsonObject(), new byte[0]));
+                sendPingOrClose(context);
+                return;
             }
+            super.userEventTriggered(context, event);
+        }
+
+        private void sendPingOrClose(ChannelHandlerContext context) {
+            if (this.awaitingPongId != 0) {
+                context.close();
+                return;
+            }
+            long pingId = this.ids.incrementAndGet();
+            this.awaitingPongId = pingId;
+            context.writeAndFlush(new PanelFrame(PanelFrame.PING, pingId, new JsonObject(), new byte[0]))
+                    .addListener(write -> {
+                        if (!write.isSuccess()) context.close();
+                    });
+            context.executor().schedule(() -> {
+                if (this.awaitingPongId == pingId && context.channel().isActive()) context.close();
+            }, pongTimeoutSeconds, TimeUnit.SECONDS);
+        }
+
+        private void acceptPong(long id) {
+            if (this.awaitingPongId == id) this.awaitingPongId = 0;
         }
 
         @Override
         public void channelInactive(ChannelHandlerContext context) {
+            this.inactive = true;
+            this.awaitingPongId = 0;
+            connections.remove(this);
             if (this.peerId != null) peers.remove(this.peerId, this);
             this.pending.values().forEach(future -> future.completeExceptionally(new IllegalStateException("PEER 已断开")));
             this.pending.clear();
@@ -211,7 +364,14 @@ public final class PanelTcpServer implements AutoCloseable {
         }
 
         void close() {
+            this.inactive = true;
             if (this.context != null) this.context.close();
         }
+    }
+
+    private static String messageOf(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null) current = current.getCause();
+        return current.getMessage() != null ? current.getMessage() : current.toString();
     }
 }

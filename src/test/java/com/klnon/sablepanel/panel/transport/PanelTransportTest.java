@@ -2,14 +2,31 @@ package com.klnon.sablepanel.panel.transport;
 
 import com.klnon.sablepanel.panel.api.PanelRequest;
 import com.klnon.sablepanel.panel.api.PanelResponse;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.TooLongFrameException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,6 +59,28 @@ class PanelTransportTest {
         PanelFrame oversized = new PanelFrame(PanelFrame.REQUEST, 8, new com.google.gson.JsonObject(),
                 new byte[PanelWire.MAX_REQUEST_BODY + 1]);
         assertThrows(IllegalArgumentException.class, () -> PanelWire.request(oversized));
+        PanelRequest oversizedRequest = new PanelRequest("POST", "/api/test", Map.of(),
+                new byte[PanelWire.MAX_REQUEST_BODY + 1], "token", "");
+        assertThrows(IllegalArgumentException.class, () -> PanelWire.request(9, oversizedRequest));
+    }
+
+    @Test
+    void oversizedRequestIsRejectedFromTheHeaderBeforeBodyArrives() {
+        ByteBuf header = Unpooled.buffer(PanelWire.LENGTH_FIELD_BYTES + PanelWire.FRAME_HEADER_BYTES);
+        header.writeInt(PanelWire.FRAME_HEADER_BYTES + PanelWire.MAX_REQUEST_BODY + 1);
+        header.writeByte(PanelFrame.REQUEST);
+        header.writeLong(11);
+        header.writeInt(0);
+        EmbeddedChannel channel = new EmbeddedChannel(new PanelFrameDecoder(false));
+        try {
+            assertThrows(TooLongFrameException.class, () -> channel.writeInbound(header));
+        } finally {
+            if (channel.pipeline().context(PanelFrameDecoder.class) != null) {
+                channel.pipeline().remove(PanelFrameDecoder.class);
+            }
+            channel.finishAndReleaseAll();
+            if (header.refCnt() > 0) header.release();
+        }
     }
 
     @Test
@@ -120,5 +159,174 @@ class PanelTransportTest {
             if (peer != null) peer.close();
             server.close();
         }
+    }
+
+    @Test
+    void registrationAndTokenUpdatesPreserveWireOrder() throws Exception {
+        TlsIdentity identity = TlsIdentity.loadOrCreate(temp.resolve("token-order"), "host");
+        PanelTcpServer server = new PanelTcpServer("host", request ->
+                PanelResponse.json(200, "{}", false), () -> "old-token");
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        List<String> adopted = new CopyOnWriteArrayList<>();
+        PanelTcpClient peer = null;
+        CompletableFuture<PanelTcpClient> connecting = null;
+        try {
+            server.start("127.0.0.1", 0, identity.serverContext());
+            PanelEndpoint endpoint = new PanelEndpoint("127.0.0.1", server.port());
+            connecting = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return PanelTcpClient.connectPeer(endpoint, "peer", request ->
+                            PanelResponse.json(200, "{}", false), token -> {
+                        if ("old-token".equals(token)) {
+                            firstStarted.countDown();
+                            try {
+                                releaseFirst.await(5, TimeUnit.SECONDS);
+                            } catch (InterruptedException interrupted) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }
+                        adopted.add(token);
+                        return PanelResponse.json(200, "{}", false);
+                    });
+                } catch (Exception error) {
+                    throw new CompletionException(error);
+                }
+            });
+            assertTrue(firstStarted.await(5, TimeUnit.SECONDS));
+            CompletableFuture<PanelResponse> update = server.updatePeerToken("peer", "new-token");
+            releaseFirst.countDown();
+            peer = connecting.get(5, TimeUnit.SECONDS);
+            assertEquals(200, update.get(5, TimeUnit.SECONDS).status());
+            assertEquals(List.of("old-token", "new-token"), adopted);
+        } finally {
+            releaseFirst.countDown();
+            if (peer != null) peer.close();
+            else if (connecting != null) {
+                try {
+                    connecting.get(5, TimeUnit.SECONDS).close();
+                } catch (Exception ignored) {
+                }
+            }
+            server.close();
+        }
+    }
+
+    @Test
+    void handlerExceptionsReturnResponsesInsteadOfTimingOut() throws Exception {
+        TlsIdentity identity = TlsIdentity.loadOrCreate(temp.resolve("handler-error"), "handler-error");
+        PanelTcpServer server = new PanelTcpServer("self", request -> {
+            throw new IllegalStateException("handler exploded");
+        }, () -> "token");
+        PanelTcpClient client = null;
+        try {
+            server.start("127.0.0.1", 0, identity.serverContext());
+            client = PanelTcpClient.connectManager(
+                    new PanelEndpoint("127.0.0.1", server.port()), identity.fingerprint());
+            PanelResponse response = client.request(new PanelRequest("GET", "/api/error", Map.of(),
+                    new byte[0], "token", "")).get(5, TimeUnit.SECONDS);
+            assertEquals(500, response.status());
+            assertTrue(new String(response.body()).contains("handler exploded"));
+        } finally {
+            if (client != null) client.close();
+            server.close();
+        }
+    }
+
+    @Test
+    void peerHandlerExceptionsReturnResponsesInsteadOfTimingOut() throws Exception {
+        TlsIdentity identity = TlsIdentity.loadOrCreate(temp.resolve("peer-handler-error"), "host");
+        PanelTcpServer server = new PanelTcpServer("host", request ->
+                PanelResponse.json(200, "{}", false), () -> "token");
+        PanelTcpClient peer = null;
+        try {
+            server.start("127.0.0.1", 0, identity.serverContext());
+            peer = PanelTcpClient.connectPeer(new PanelEndpoint("127.0.0.1", server.port()), "peer",
+                    request -> {
+                        throw new IllegalArgumentException("peer handler exploded");
+                    }, token -> PanelResponse.json(200, "{}", false));
+            PanelResponse response = server.requestPeer("peer", new PanelRequest("GET", "/api/error",
+                    Map.of(), new byte[0], "token", "")).get(5, TimeUnit.SECONDS);
+            assertEquals(500, response.status());
+            assertTrue(new String(response.body()).contains("peer handler exploded"));
+        } finally {
+            if (peer != null) peer.close();
+            server.close();
+        }
+    }
+
+    @Test
+    void oneConnectionCannotQueueUnboundedRequests() throws Exception {
+        TlsIdentity identity = TlsIdentity.loadOrCreate(temp.resolve("backpressure"), "backpressure");
+        CountDownLatch release = new CountDownLatch(1);
+        PanelTcpServer server = new PanelTcpServer("self", request -> {
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            return PanelResponse.json(200, "{}", false);
+        }, () -> "token");
+        PanelTcpClient client = null;
+        try {
+            server.start("127.0.0.1", 0, identity.serverContext());
+            client = PanelTcpClient.connectManager(
+                    new PanelEndpoint("127.0.0.1", server.port()), identity.fingerprint());
+            List<CompletableFuture<PanelResponse>> requests = new ArrayList<>();
+            for (int i = 0; i < 16; i++) {
+                requests.add(client.request(new PanelRequest("GET", "/api/slow", Map.of(),
+                        new byte[0], "token", "")));
+            }
+            PanelResponse first = (PanelResponse) CompletableFuture.anyOf(
+                    requests.toArray(CompletableFuture[]::new)).get(3, TimeUnit.SECONDS);
+            assertEquals(503, first.status());
+            release.countDown();
+            CompletableFuture.allOf(requests.toArray(CompletableFuture[]::new)).get(10, TimeUnit.SECONDS);
+            assertTrue(requests.stream().map(CompletableFuture::join).anyMatch(response -> response.status() == 503));
+        } finally {
+            release.countDown();
+            if (client != null) client.close();
+            server.close();
+        }
+    }
+
+    @Test
+    void missingPongClosesTheConnection() throws Exception {
+        TlsIdentity identity = TlsIdentity.loadOrCreate(temp.resolve("pong-timeout"), "pong-timeout");
+        PanelTcpServer server = new PanelTcpServer("self", request ->
+                PanelResponse.json(200, "{}", false), () -> "token", 1, 1, 1);
+        try {
+            server.start("127.0.0.1", 0, identity.serverContext());
+            try (SSLSocket socket = (SSLSocket) trustAllTls().getSocketFactory()
+                    .createSocket("127.0.0.1", server.port())) {
+                socket.setSoTimeout(5_000);
+                socket.startHandshake();
+                while (socket.getInputStream().read() >= 0) {
+                    // Read the PING but intentionally never reply with PONG.
+                }
+            }
+        } finally {
+            server.close();
+        }
+    }
+
+    private static SSLContext trustAllTls() throws Exception {
+        TrustManager[] trust = {new X509TrustManager() {
+            @Override
+            public void checkClientTrusted(X509Certificate[] chain, String authType) {
+            }
+
+            @Override
+            public void checkServerTrusted(X509Certificate[] chain, String authType) {
+            }
+
+            @Override
+            public X509Certificate[] getAcceptedIssuers() {
+                return new X509Certificate[0];
+            }
+        }};
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, trust, new SecureRandom());
+        return context;
     }
 }
