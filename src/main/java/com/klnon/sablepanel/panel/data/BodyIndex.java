@@ -434,7 +434,7 @@ public final class BodyIndex {
                 if (e.name() != null) m.addProperty("name", e.name());
                 m.addProperty("dim", e.key().dim());
                 m.addProperty("blocks", e.blocks());
-                m.add("pos", arr(e.pos()));
+                m.add("pos", arr(displayPos(rto, e.pos())));
                 m.add("size", arr(e.size()));
                 m.addProperty("state", state);
                 if (e.blockEntities() > 0) m.addProperty("be", e.blockEntities());
@@ -592,6 +592,16 @@ public final class BodyIndex {
 
     private static void union(Map<UUID, UUID> parent, UUID a, UUID b) {
         parent.put(find(parent, a), find(parent, b));
+    }
+
+    /**
+     * 面板显示坐标:加载中的体以运行时坐标为准。磁盘条目要等 autosave 才回写,
+     * 传送完/物理漂移后列表会一直显示旧位置(虚空/极高空筛选也跟着错)。
+     */
+    static double[] displayPos(JsonObject runtime, double[] diskPos) {
+        if (runtime == null || !runtime.has("x")) return diskPos;
+        return new double[]{runtime.get("x").getAsDouble(),
+                runtime.get("y").getAsDouble(), runtime.get("z").getAsDouble()};
     }
 
     private static JsonArray arr(double[] v) {

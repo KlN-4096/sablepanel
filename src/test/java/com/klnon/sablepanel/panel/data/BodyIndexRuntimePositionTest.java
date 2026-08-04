@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -41,6 +42,21 @@ class BodyIndexRuntimePositionTest {
         assertTrue(index.updateDisk(List.of(entry(key, uuid, false))));
         assertFalse(index.updateDisk(List.of(entry(key, uuid, false))));
         assertTrue(index.updateDisk(List.of(entry(key, uuid, true))));
+    }
+
+    /** 传送后磁盘条目还是旧坐标(要等 autosave),列表必须显示运行时坐标 */
+    @Test
+    void displayPosPrefersRuntimeForLoadedBodies() {
+        double[] disk = {-11433, -6557, 796};
+        JsonObject runtime = new JsonObject();
+        runtime.addProperty("x", 1000.0);
+        runtime.addProperty("y", 400.0);
+        runtime.addProperty("z", 796.0);
+
+        assertArrayEquals(new double[]{1000, 400, 796}, BodyIndex.displayPos(runtime, disk));
+        // 未加载的体(没有运行时状态)只能用磁盘快照
+        assertArrayEquals(disk, BodyIndex.displayPos(null, disk));
+        assertArrayEquals(disk, BodyIndex.displayPos(new JsonObject(), disk));
     }
 
     private static DiskScanner.DiskEntry entry(DiskScanner.EntryKey key, UUID uuid, boolean reachable) {
