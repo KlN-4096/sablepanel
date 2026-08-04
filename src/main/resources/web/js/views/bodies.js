@@ -85,6 +85,12 @@ function cmpGroups(a, b){
 }
 
 /* ===================== 页签 ===================== */
+/* 人力不可达判定:体整个落在该维度建筑高度范围之外(bug 飞出去的结构)。
+   高度上下限用服务端给的真实值——模组会改,本地存档主世界上限实测就是 480 而非 320 */
+function dimRange(dim){ return DIMS[dim] || {min:-64, max:320}; }
+function isVoid(b){ return (b.pos[1] + b.size[1]) < dimRange(b.dim).min; }
+function isSky(b){ return b.pos[1] > dimRange(b.dim).max; }
+
 const TABS = [
   {k:'all',    label:'tabAll',     test:()=>true},
   {k:'fav',    label:'tabFav',     test:g=>FAV.has(g.gid)},
@@ -92,6 +98,8 @@ const TABS = [
   {k:'unnamed',label:'tabUnnamed', test:g=>!g.name},
   {k:'rec',    label:'tabRec',     test:g=>!!g.rec},
   {k:'anom',   label:'tabAnom',    test:g=>g.orphans>0 || g.dup || g.clone},
+  {k:'void',   label:'tabVoid',    test:g=>g.bodies.some(isVoid)},
+  {k:'sky',    label:'tabSky',     test:g=>g.bodies.some(isSky)},
 ];
 function tabTest(k){ return (TABS.find(x=>x.k===k)||TABS[0]).test; }
 function renderTabs(){
@@ -111,6 +119,16 @@ let renderLimit = 400;
 let lastVisibleGroups = [];
 /* 目的坐标输入框已预填过的体:同一个体的周期刷新不再覆盖用户输入 */
 let tpFilledFor = null;
+
+/* 处理中徽章:以 /api/bodies 的 busy 为单一事实源,显示阶段和已耗时。
+   巨型体的操作可能跑几分钟,这个徽章就是"看得见在动"的全部意义所在 */
+function busyTag(uuid){
+  const job = BUSY.get(uuid);
+  if (!job) return '';
+  const secs = Math.max(0, Math.round((Date.now() - job.since) / 1000));
+  const label = job.state === 'queued' ? t('jobQueued') : (job.phase || job.op);
+  return `<span class="tag busy" title="${esc(job.op)}"><i class="spin"></i>${esc(label)} ${secs}s</span>`;
+}
 
 /* 收藏以依赖组为单位(按组根 uuid 存),避免组内个别成员收藏造成状态歧义 */
 function toggleFav(gid){
@@ -160,6 +178,8 @@ function render() {
     div.className = 'group' + (forcedN ? ' is-forced' : g.orphans ? ' is-orphan' : g.rec ? ' is-rec' : '');
     div.dataset.gid = g.gid;
     const tags = [];
+    const busyMember = g.bodies.find(b => BUSY.has(b.uuid));
+    if (busyMember) { div.classList.add('is-busy'); tags.push(busyTag(busyMember.uuid)); }
     if (forcedN) tags.push(`<span class="tag forced" title="${t('forcedTag')}">${t('forcedBadge')}${forcedN>1?' ×'+forcedN:''}</span>`);
     const pausedN = g.bodies.filter(b=>PAUSED.has(b.uuid)).length;
     if (pausedN) tags.push(`<span class="tag warn">⏸${pausedN>1?'×'+pausedN:''}</span>`);
@@ -189,6 +209,9 @@ function render() {
       const m = document.createElement('div'); m.className = 'member'; m.dataset.uuid = b.uuid;
       if (SEL && SEL.uuid === b.uuid) m.classList.add('sel');
       const extra = [];
+      if (BUSY.has(b.uuid)) { m.classList.add('is-busy'); extra.push(busyTag(b.uuid)); }
+      if (isVoid(b)) extra.push(`<span class="tag bad" title="${t('voidTag')}">${t('voidBadge')}</span>`);
+      if (isSky(b)) extra.push(`<span class="tag warn" title="${t('skyTag')}">${t('skyBadge')}</span>`);
       if (FORCED.has(b.uuid)) extra.push(`<span class="tag forced" title="${t('forcedTag')}">${t('forcedBadge')}</span>`);
       if (PAUSED.has(b.uuid)) extra.push(`<span class="tag warn" title="${t('pausedTag')}">⏸</span>`);
       if (b.copies) extra.push(`<span class="tag warn">${b.copies} ${t('copiesX')}</span>`);
@@ -344,6 +367,13 @@ function cloneDetail(body){
 function renderDetail(){
   const b = SEL, g = SELG;
   if (!b) return;
+  // 该体有作业在跑时整片操作区禁用:重复提交后端会 409 挡掉,但按钮先灰掉更诚实
+  const ops = document.getElementById('ops');
+  if (ops) {
+    const job = BUSY.get(b.uuid);
+    ops.classList.toggle('is-busy', !!job);
+    ops.querySelectorAll('button').forEach(btn => btn.disabled = !!job);
+  }
   const rt = b.runtime || {};
   const live = rt.x !== undefined;
   const pos = live ? [rt.x, rt.y, rt.z] : b.pos;

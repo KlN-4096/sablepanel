@@ -10,12 +10,14 @@ document.addEventListener('keydown', e => {
 });
 /* ===================== 视图 ===================== */
 function setView(v, opts){
-  if (!['dash','bodies','recycle'].includes(v)) v = 'dash';
+  if (!['dash','bodies','recycle','jobs'].includes(v)) v = 'dash';
   VIEW = v;
   localStorage.setItem('spView', v);
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.view === v));
   document.querySelectorAll('.view').forEach(s => s.classList.remove('on'));
-  document.getElementById(v === 'dash' ? 'viewDash' : v === 'bodies' ? 'viewBodies' : 'viewRecycle').classList.add('on');
+  document.getElementById(v === 'dash' ? 'viewDash' : v === 'bodies' ? 'viewBodies'
+    : v === 'jobs' ? 'viewJobs' : 'viewRecycle').classList.add('on');
+  if (v === 'jobs') loadJobs();
   const previewHost = document.getElementById(v === 'recycle' ? 'recyclePreviewHost' : 'bodyPreviewHost');
   const preview = document.getElementById('previewWrap');
   if (!fsMode && preview.parentElement !== previewHost) previewHost.appendChild(preview);

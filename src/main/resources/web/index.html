@@ -33,6 +33,7 @@
     <button data-view="dash" onclick="setView('dash')">◧ <span data-i18n="navDash">总览</span></button>
     <button data-view="bodies" onclick="setView('bodies')">⬢ <span data-i18n="navBodies">物理体</span></button>
     <button data-view="recycle" onclick="setView('recycle')">♲ <span data-i18n="navRecycle">回收站</span></button>
+    <button data-view="jobs" onclick="setView('jobs')">▤ <span data-i18n="navJobs">日志</span></button>
   </div>
   <div id="srvWrap" style="position:relative;display:none">
     <button class="hbtn" id="srvBtn" onclick="toggleSrvPop()"></button>
@@ -216,6 +217,20 @@
       </div>
     </div>
   </section>
+
+  <!-- ===================== 日志(面板操作作业) ===================== -->
+  <section class="view" id="viewJobs">
+    <div id="jobsWrap">
+      <div id="jobsBar">
+        <span data-i18n="jobsFile">日志文件</span>
+        <select id="jobsFileSel" onchange="setJobsFile(this.value)"></select>
+        <button id="jobsFailedBtn" onclick="toggleJobsFailed()" data-i18n="jobsOnlyFailed">只看失败</button>
+        <button onclick="loadJobs()" data-i18n="refresh">刷新</button>
+        <span id="jobsWorkers" class="muted"></span>
+      </div>
+      <div id="jobsList"></div>
+    </div>
+  </section>
 </div>
 
 <div id="fsOverlay">
@@ -262,6 +277,7 @@
 <script src="/js/views/dash.js"></script>
 <script src="/js/views/bodies.js"></script>
 <script src="/js/views/recycle.js"></script>
+<script src="/js/views/jobs.js"></script>
 <script src="/js/views/preview.js"></script>
 <script src="/js/views/manual.js"></script>
 <script src="/js/main.js"></script>

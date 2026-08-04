@@ -383,3 +383,30 @@ body.locked>header,body.locked>#views{visibility:hidden}
 .spinner{width:36px;height:36px;border:3px solid var(--line2);border-top-color:var(--acc);border-radius:50%;animation:spin .75s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 #busyText{font-size:13px;color:var(--fg2)}
+
+/* ---------- 处理中(后台作业) ---------- */
+/* 复用已有的 @keyframes spin;行内小转圈,不占一行高度 */
+.spin{width:9px;height:9px;border:1.5px solid #5aa9ff40;border-top-color:var(--acc);border-radius:50%;
+  animation:spin .7s linear infinite;display:inline-block;flex:none}
+.tag.busy{background:#5aa9ff1c;border-color:#5aa9ff4d;color:#9ecbff}
+.group.is-busy{border-color:#3b7fc4}
+.member.is-busy{background:#5aa9ff0d}
+.ops.is-busy{opacity:.5;pointer-events:none}
+
+/* ---------- 日志页 ---------- */
+#jobsWrap{display:flex;flex-direction:column;min-width:0;width:100%;padding:12px 14px;gap:10px}
+#jobsBar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:12px;color:var(--fg2)}
+#jobsBar select{font-family:var(--mono);font-size:11.5px}
+#jobsFailedBtn.on{background:#f2635c1c;border-color:#f2635c4d;color:var(--bad)}
+#jobsList{flex:1;min-height:0;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--card)}
+.jobRow{display:grid;grid-template-columns:74px 88px minmax(80px,1fr) auto 62px minmax(0,1.5fr);
+  gap:10px;align-items:center;padding:6px 11px;border-bottom:1px solid var(--line);cursor:pointer;font-size:12px}
+.jobRow:hover{background:#ffffff06}
+.jobRow.is-bad{background:#f2635c0a}
+.jobTime{color:var(--dim);font-size:11px}
+.jobOp{color:var(--fg2)}
+.jobTarget,.jobMsg{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jobMs{text-align:right;font-size:11px}
+.jobDetail{padding:7px 11px 10px 95px;border-bottom:1px solid var(--line);background:#ffffff04;
+  font-size:11.5px;color:var(--fg2);display:flex;flex-direction:column;gap:5px}
+.jobWarn{color:var(--warn)}
