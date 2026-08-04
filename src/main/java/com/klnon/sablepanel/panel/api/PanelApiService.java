@@ -36,6 +36,7 @@ public final class PanelApiService {
     private final BodyIndex index;
     private final OpsService ops;
     private final String selfId;
+    private final Object tokenLock = new Object();
     private final LinkedHashMap<String, byte[]> meshCache = new LinkedHashMap<>(16, 0.75f, true);
     private long meshCacheBytes;
     private volatile long lastActivityMs = System.currentTimeMillis();
@@ -162,7 +163,8 @@ public final class PanelApiService {
     }
 
     public boolean authorized(String candidate) {
-        return MessageDigest.isEqual(this.config.token.getBytes(StandardCharsets.UTF_8),
+        String current = token();
+        return MessageDigest.isEqual(current.getBytes(StandardCharsets.UTF_8),
                 (candidate == null ? "" : candidate).getBytes(StandardCharsets.UTF_8));
     }
 
@@ -171,22 +173,26 @@ public final class PanelApiService {
         if (next.isEmpty() || next.length() > 64 || !next.matches("[A-Za-z0-9._~-]+")) {
             throw new IllegalArgumentException("token 只能用字母、数字和 . - _ ~,长度 1~64");
         }
-        String previous = this.config.token;
-        this.config.token = next;
-        try {
-            this.config.save();
-        } catch (java.io.IOException error) {
-            this.config.token = previous;
-            throw error;
+        synchronized (this.tokenLock) {
+            String previous = this.config.token;
+            this.config.token = next;
+            try {
+                this.config.save();
+            } catch (java.io.IOException error) {
+                this.config.token = previous;
+                throw error;
+            }
+            JsonObject out = new JsonObject();
+            out.addProperty("ok", true);
+            out.addProperty("token", next);
+            return out;
         }
-        JsonObject out = new JsonObject();
-        out.addProperty("ok", true);
-        out.addProperty("token", next);
-        return out;
     }
 
     public String token() {
-        return this.config.token;
+        synchronized (this.tokenLock) {
+            return this.config.token;
+        }
     }
 
     public String selfId() {
@@ -194,7 +200,7 @@ public final class PanelApiService {
     }
 
     public boolean usingDefaultToken() {
-        return PanelConfig.DEFAULT_TOKEN.equals(this.config.token);
+        return PanelConfig.DEFAULT_TOKEN.equals(token());
     }
 
     public boolean isActive() {

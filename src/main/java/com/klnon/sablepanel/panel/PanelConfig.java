@@ -11,9 +11,9 @@ import java.nio.file.Path;
 /** 面板配置:config/sablepanel-server.json,首次启动自动生成 */
 public final class PanelConfig {
     /**
-     * 默认访问 token。故意是**固定值**:同机多个服务端开箱即用地落进同一个面板集群
-     * (同 port + 同 token = 同集群),不需要手工对齐配置。
-     * 服主可在面板"维护"卡片里直接改,改动会同步给集群内所有成员。
+     * 默认访问 token。HOST 会在 PEER 通过回环数据端口注册时下发当前值，
+     * 因此同机实例无需预先手工对齐。服主可在面板"维护"卡片里修改，
+     * 改动会串行落盘并同步给当前集群成员。
      */
     public static final String DEFAULT_TOKEN = "sablepanel";
 
@@ -29,7 +29,7 @@ public final class PanelConfig {
     public int webPort = 25580;
     public String apiBind = "0.0.0.0";
     public int apiPort = 25581;
-    public String token = DEFAULT_TOKEN;
+    public volatile String token = DEFAULT_TOKEN;
     /** 回收站中实际 NBT 备份文件的硬上限；超出时按删除日期清理最早的完整依赖组。 */
     public int recycleMaxFiles = 500;
     /** 每秒性能历史保留天数；历史文件位于 config/sablepanel/stats。 */
@@ -37,8 +37,8 @@ public final class PanelConfig {
 
     /**
      * 本服在面板里的显示名,留空则取服务端目录名。
-     * 同一台机器上多个服务端装本 mod 时:端口与 token 相同者视为同一集群,
-     * 先启动的抢到端口当 HOST 开网页,后启动的自动挂进去,在页面顶栏切换。
+     * 同一台机器上多个服务端使用相同 apiPort 时，先绑定数据端口的实例成为 HOST，
+     * 后启动的实例从 127.0.0.1 注册为 PEER；HOST 按 webPort 托管可选网页。
      */
     public String serverName = "";
 
