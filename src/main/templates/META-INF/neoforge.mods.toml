@@ -7,11 +7,11 @@ modId="${mod_id}"
 version="${mod_version}"
 displayName="${mod_name}"
 authors="KlNon"
-# 仅服务端安装,客户端无需存在
+# 服务端提供数据；客户端安装后可在 localhost:25580 打开本地管理页
 displayTest="IGNORE_ALL_VERSION"
 description='''
-Web admin panel for Sable sub-levels: full-save disk index, cleanup suggestions, teleport/delete/adopt with a recycle bin, 3D voxel preview, per-body cost profiling, multi-server clustering on one port. Server-side only.
-Sable 物理体网页管理面板:全量存档索引 / 清理建议 / 传送・删除・孤儿收养(带回收站)/ 3D 体素预览 / 逐体耗时分析 / 同机多服共用一个端口。另含生命周期 JSONL 日志与 /sablepanel dump 快照。仅服务端安装。
+Web admin panel for Sable sub-levels with a TLS data endpoint and an optional localhost client gateway.
+Sable 物理体网页管理面板:全量存档索引 / 清理建议 / 传送・删除・孤儿收养(带回收站)/ 3D 体素预览 / 逐体耗时分析 / 同机多服集群。服务端提供 TLS 数据接口,客户端可在 localhost 打开管理页。
 '''
 
 [[mixins]]

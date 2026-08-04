@@ -53,8 +53,10 @@ initChartInteractions();
 if (typeof THREE !== 'undefined') initGL();
 else document.getElementById('pvInfo').textContent = 'three.js missing';
 setView(VIEW);
-if (token) authenticate(token, true);
-else showLogin('');
+loadGatewayState().then(() => {
+  if (token) authenticate(token, true);
+  else showLogin('');
+}).catch(() => showLogin(t('loginBad')));
 // 成员表会变(有服启动/停服/接管),定期重拉。
 // 后台标签页一律停止轮询:页面没人看就别打请求,服务端才能进入空闲态(扫描全停)
 setInterval(() => { if (authenticated && !document.hidden) loadServers(); }, 20000);

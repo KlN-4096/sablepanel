@@ -12,6 +12,10 @@
       <svg width="23" height="23" viewBox="0 0 24 24" fill="none"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5z" stroke="#5aa9ff" stroke-width="1.6"/><path d="M12 22V12M3 7l9 5 9-5" stroke="#5aa9ff" stroke-width="1.6" opacity=".5"/></svg>
       SablePanel
     </div>
+    <div id="loginAddressWrap" style="display:none">
+      <label for="loginAddress" data-i18n="loginAddress">服务器地址</label>
+      <input type="text" id="loginAddress" autocomplete="off" placeholder="example.com:25581">
+    </div>
     <label for="loginToken" data-i18n="loginToken">访问口令</label>
     <div id="loginRow">
       <input type="password" id="loginToken" autocomplete="current-password" autofocus>
@@ -44,6 +48,7 @@
   </div>
   <div id="scanMeta"></div>
   <button class="hbtn" onclick="toggleLang()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/><path d="M3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9z" stroke="currentColor" stroke-width="1.4"/></svg><span id="langLabel">EN</span></button>
+  <button class="hbtn" id="gatewayDisconnect" onclick="disconnectGateway()" style="display:none" title="Disconnect">⏻</button>
   <button class="hbtn primary" onclick="loadAll(true)"><span data-i18n="refresh">刷新</span> <span id="countdown" class="mono" style="font-size:11px;opacity:.75"></span></button>
 </header>
 

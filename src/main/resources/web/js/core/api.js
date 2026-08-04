@@ -5,6 +5,7 @@ const TOKEN_STORAGE_KEY = 'spToken';
 const DEFAULT_TOKEN_WARNING_KEY = 'spDefaultTokenWarningDisabled';
 let token = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
 let authenticated = false, defaultTokenWarningShown = false;
+let gatewayMode = 'server', gatewayConnected = false;
 const initialUrl = new URL(location.href);
 if (initialUrl.searchParams.has('token')) {
   initialUrl.searchParams.delete('token');
@@ -45,6 +46,7 @@ async function authenticate(candidate, remembered){
   const value = String(candidate || '').trim();
   if (!value) { showLogin(''); return false; }
   try {
+    if (gatewayMode === 'client') await connectGateway();
     const r = await fetch('/api/servers', {headers:{'X-Token':value}});
     if (!r.ok) throw new Error('unauthorized');
     const data = await r.json();
@@ -61,6 +63,55 @@ async function authenticate(candidate, remembered){
     showLogin(remembered ? t('loginChanged') : t('loginBad'));
     return false;
   }
+}
+
+async function loadGatewayState(){
+  const response = await fetch('/gateway/state');
+  if (!response.ok) throw new Error('gateway unavailable');
+  const state = await response.json();
+  gatewayMode = state.mode || 'server';
+  gatewayConnected = !!state.connected;
+  const clientMode = gatewayMode === 'client';
+  document.getElementById('loginAddressWrap').style.display = clientMode ? 'block' : 'none';
+  document.getElementById('gatewayDisconnect').style.display = clientMode && gatewayConnected ? 'inline-flex' : 'none';
+  if (clientMode && !document.getElementById('loginAddress').value)
+    document.getElementById('loginAddress').value = state.address || localStorage.getItem('spAddress') || '';
+  return state;
+}
+
+async function connectGateway(){
+  const address = document.getElementById('loginAddress').value.trim();
+  if (!address) throw new Error(t('loginBad'));
+  let response = await fetch('/gateway/connect', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({address})
+  });
+  let result = await response.json().catch(()=>({}));
+  if (response.status === 409 && result.fingerprint) {
+    if (!window.confirm(t('certConfirm')(result.fingerprint))) throw new Error(t('loginBad'));
+    response = await fetch('/gateway/connect', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+        address, accept_fingerprint:result.fingerprint
+      })
+    });
+    result = await response.json().catch(()=>({}));
+  }
+  if (!response.ok) throw new Error(result.error || response.status);
+  gatewayConnected = true;
+  localStorage.setItem('spAddress', address);
+  document.getElementById('gatewayDisconnect').style.display = 'inline-flex';
+}
+
+async function disconnectGateway(){
+  if (gatewayMode !== 'client') return;
+  await fetch('/gateway/disconnect', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'
+  }).catch(()=>{});
+  gatewayConnected = false;
+  DATA = STATS = RECYCLE = null;
+  SERVERS = []; CURSRV = '';
+  localStorage.removeItem('spServer');
+  document.getElementById('gatewayDisconnect').style.display = 'none';
+  showLogin('');
 }
 
 function loginSubmit(e){

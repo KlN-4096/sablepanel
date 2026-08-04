@@ -17,7 +17,8 @@ const I18N = {
     srvHost:'主', srvSwitched:(n)=>`已切换到 ${n}`,
     adoptHint:'重建加载指针,数据不动盘', delBody:'删除该物理体', delHint:'删除严格验收成功后才会进入回收站',
     close:'关闭', cancel:'取消', confirm:'确认', composition:'方块构成', reload:'重载',
-    loginToken:'访问口令', loginEnter:'进入', loginBad:'访问口令无效', loginChanged:'访问口令已更改,请重新输入',
+    loginAddress:'服务器地址', loginToken:'访问口令', loginEnter:'进入', loginBad:'地址或访问口令无效', loginChanged:'连接或访问口令已失效,请重新输入',
+    certConfirm:(f)=>`首次连接或服务器证书已变化。\n确认 TLS 证书指纹:\n${f}`,
     defaultTokenT:'建议修改访问口令', defaultTokenMsg:'当前正在使用默认访问口令,建议在维护卡片中修改。',
     neverRemind:'永不提醒', later:'暂不修改', changeNow:'立即修改',
     compMore:(n)=>`展开剩余 ${n} 种方块`, compLess:'收起',
@@ -139,7 +140,8 @@ const I18N = {
     srvHost:'host', srvSwitched:(n)=>`Switched to ${n}`,
     adoptHint:'Rebuilds load pointer, disk untouched', delBody:'Delete this body', delHint:'Only strictly verified deletions enter the recycle bin',
     close:'Close', cancel:'Cancel', confirm:'Confirm', composition:'Block composition', reload:'Reload',
-    loginToken:'Access token', loginEnter:'Enter', loginBad:'Invalid access token', loginChanged:'The access token changed. Enter it again.',
+    loginAddress:'Server address', loginToken:'Access token', loginEnter:'Enter', loginBad:'Invalid address or access token', loginChanged:'Connection or token expired. Enter it again.',
+    certConfirm:(f)=>`First connection or changed server certificate.\nConfirm TLS fingerprint:\n${f}`,
     defaultTokenT:'Change the access token', defaultTokenMsg:'The default access token is still in use. Changing it from the Maintenance card is recommended.',
     neverRemind:'Never remind me', later:'Not now', changeNow:'Change now',
     compMore:(n)=>`Show ${n} more block types`, compLess:'Collapse',
@@ -272,7 +274,7 @@ const MANUAL = {
       {h:'保留时间',body:'<p>默认保留 30 天，由 <code>statsRetentionDays</code> 控制。跨日文件会压缩，损坏行或未写完整的末行会跳过，不影响实时面板。</p>'}
     ]},
     {k:'maintenance',label:'manualMaintenance',sections:[
-      {h:'口令与监听',body:'<p>访问口令作为页面密码保存在浏览器当前设备中；维护卡片修改后会同步到当前集群。<code>bind</code>、<code>port</code>、<code>statsRetentionDays</code> 位于 <code>config/sablepanel-server.json</code>，修改后重启服务端生效。</p>'},
+      {h:'口令与监听',body:'<p>访问口令作为页面密码保存在浏览器当前设备中；维护卡片修改后会同步到当前集群。网页默认使用 <code>webPort=25580</code>，TLS 数据接口默认使用 <code>apiPort=25581</code>；配置位于 <code>config/sablepanel-server.json</code>。</p>'},
       {h:'集群',body:'<p>同机、同端口且同口令的实例组成面板集群。先占用端口的实例托管页面，其它实例注册为成员；顶部服务器选择器只切换查看目标，不迁移物理体数据。</p>'}
     ]}
   ],
@@ -300,7 +302,7 @@ const MANUAL = {
       {h:'Retention',body:'<p>The default is 30 days via <code>statsRetentionDays</code>. Completed days are compressed. Corrupt records and incomplete tail lines are skipped without breaking live data.</p>'}
     ]},
     {k:'maintenance',label:'manualMaintenance',sections:[
-      {h:'Token and listener',body:'<p>The access token acts as the page password and is remembered on this device. Changing it updates the current cluster. <code>bind</code>, <code>port</code>, and <code>statsRetentionDays</code> live in <code>config/sablepanel-server.json</code> and require a server restart.</p>'},
+      {h:'Token and listener',body:'<p>The access token acts as the page password and is remembered on this device. The web page defaults to <code>webPort=25580</code> and the TLS data endpoint to <code>apiPort=25581</code>; settings live in <code>config/sablepanel-server.json</code>.</p>'},
       {h:'Cluster',body:'<p>Instances on the same machine with the same port and token form a panel cluster. The first instance owns the page; others register as members. The header selector changes only the viewed server and never migrates body data.</p>'}
     ]}
   ]
