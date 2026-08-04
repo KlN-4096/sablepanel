@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -214,5 +215,51 @@ class DiskScannerCorruptionTest {
         assertEquals(1, counts.get(firstKey));
         assertEquals(1, counts.get(secondKey));
         assertEquals(List.of(), pointerWarnings);
+    }
+
+    // ---- readEntryTag 改成按头部偏移直读单槽后的回归:必须仍然只取到目标那一条 ----
+
+    @Test
+    void readEntryTagSeeksTheRequestedSlotOnly() throws Exception {
+        Path dir = dimDir();
+        UUID a = UUID.randomUUID(), b = UUID.randomUUID(), c = UUID.randomUUID();
+        writeStorageFile(dir.resolve("r.0.0.0.slvls"), 4096, Map.of(
+                0, gzipNbt(bodyTag(a, 1, 1)),
+                7, gzipNbt(bodyTag(b, 2, 2)),
+                900, gzipNbt(bodyTag(c, 3, 3))));
+
+        assertEquals(a, DiskScanner.readEntryTag(dir, new DiskScanner.EntryKey(DIM, 0, 0, 0, 0)).getUUID("uuid"));
+        assertEquals(b, DiskScanner.readEntryTag(dir, new DiskScanner.EntryKey(DIM, 0, 0, 0, 7)).getUUID("uuid"));
+        assertEquals(c, DiskScanner.readEntryTag(dir, new DiskScanner.EntryKey(DIM, 0, 0, 0, 900)).getUUID("uuid"));
+        assertNull(DiskScanner.readEntryTag(dir, new DiskScanner.EntryKey(DIM, 0, 0, 0, 5)),
+                "空槽位必须返回 null,不能串到邻近条目");
+        assertNull(DiskScanner.readEntryTag(dir, new DiskScanner.EntryKey(DIM, 0, 0, 0, 5000)),
+                "越界索引必须返回 null 而不是越过头部读脏数据");
+        assertNull(DiskScanner.readEntryTag(dir, new DiskScanner.EntryKey(DIM, 9, 9, 0, 0)),
+                "文件不存在必须返回 null");
+    }
+
+    // ---- 批量定位必须与逐个定位等价(这是把 N 趟全盘扫描压成 1 趟的前提) ----
+
+    @Test
+    void batchLocateMatchesSingleLocate() throws Exception {
+        Path dir = dimDir();
+        UUID a = UUID.randomUUID(), b = UUID.randomUUID(), missing = UUID.randomUUID();
+        writeStorageFile(dir.resolve("r.0.0.0.slvls"), 4096,
+                Map.of(0, gzipNbt(bodyTag(a, 1, 1)), 3, gzipNbt(bodyTag(b, 2, 2))));
+        // 指针:chunk 索引 1 引用 storage 0 的 index 0 与 3
+        writeStorageFile(dir.resolve("r.0.0.slvlr"), 128, Map.of(1, gzipNbt(pointerTag(0, 3))));
+
+        Map<UUID, DiskScanner.LocatedEntry> batch =
+                DiskScanner.locateEntries(DIM, dir, Set.of(a, b, missing));
+        assertEquals(DiskScanner.locateEntry(DIM, dir, a).key(), batch.get(a).key());
+        assertEquals(DiskScanner.locateEntry(DIM, dir, b).key(), batch.get(b).key());
+        assertNull(batch.get(missing), "不存在的 uuid 不得出现在批量结果里");
+
+        Map<UUID, DiskScanner.LiveLocation> live =
+                DiskScanner.locateLiveAll(DIM, dir, Set.of(a, b, missing));
+        assertEquals(DiskScanner.locateLive(DIM, dir, a), live.get(a));
+        assertEquals(DiskScanner.locateLive(DIM, dir, b), live.get(b));
+        assertNull(live.get(missing));
     }
 }

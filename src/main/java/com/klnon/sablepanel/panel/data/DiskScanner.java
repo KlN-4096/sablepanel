@@ -455,38 +455,47 @@ public final class DiskScanner {
                 if (ch.read(header, header.position()) <= 0) break;
             }
             for (int idx = 0; idx < 1024; idx++) {
-                int span = header.getInt(idx * 4);
-                if (span == 0) continue;
-                int start = (span >> 8) & 0xFFFFFF, length = span & 0xFF;
-                if (start <= 0 || length <= 0) continue;
-                long off = (long) start * sectorSize;
-                int cap = length * sectorSize;
-                if (off + 5 > fileSize) continue;
-                try {
-                    ByteBuffer buf = ByteBuffer.allocate(cap);
-                    ch.read(buf, off);
-                    buf.flip();
-                    int size = buf.getInt();
-                    byte dtype = buf.get();
-                    byte[] payload;
-                    if ((dtype & 0x10) != 0) {
-                        Path ext = dir.resolve("r." + rx + "." + rz + ".r").resolve(idx + ".slvl");
-                        if (!Files.isRegularFile(ext)) continue;
-                        payload = Files.readAllBytes(ext);
-                    } else {
-                        if (size <= 0 || size - 1 > buf.remaining()) continue;
-                        payload = new byte[size - 1];
-                        buf.get(payload);
-                    }
-                    CompoundTag tag = NbtIo.readCompressed(
-                            new DataInputStream(new ByteArrayInputStream(payload)), NbtAccounter.unlimitedHeap());
-                    consumer.accept(idx, tag);
-                } catch (Exception ignored) {
-                    // 写入中的瞬态条目,跳过
-                }
+                CompoundTag tag = readSlot(ch, fileSize, header, dir, rx, rz, sectorSize, idx);
+                if (tag != null) consumer.accept(idx, tag);
             }
         } catch (Exception e) {
             SablePanel.LOGGER.debug("sablepanel: cannot read {}", file, e);
+        }
+    }
+
+    /**
+     * 按头部索引读单个槽位。头部 1024 个 int 记的就是 {@code (起始扇区 << 8) | 扇区数},
+     * 想要哪个条目直接算偏移即可 —— 不必把整个文件解压一遍。
+     */
+    private static CompoundTag readSlot(FileChannel ch, long fileSize, ByteBuffer header, Path dir,
+                                        int rx, int rz, int sectorSize, int idx) {
+        int span = header.getInt(idx * 4);
+        if (span == 0) return null;
+        int start = (span >> 8) & 0xFFFFFF, length = span & 0xFF;
+        if (start <= 0 || length <= 0) return null;
+        long off = (long) start * sectorSize;
+        int cap = length * sectorSize;
+        if (off + 5 > fileSize) return null;
+        try {
+            ByteBuffer buf = ByteBuffer.allocate(cap);
+            ch.read(buf, off);
+            buf.flip();
+            int size = buf.getInt();
+            byte dtype = buf.get();
+            byte[] payload;
+            if ((dtype & 0x10) != 0) {
+                Path ext = dir.resolve("r." + rx + "." + rz + ".r").resolve(idx + ".slvl");
+                if (!Files.isRegularFile(ext)) return null;
+                payload = Files.readAllBytes(ext);
+            } else {
+                if (size <= 0 || size - 1 > buf.remaining()) return null;
+                payload = new byte[size - 1];
+                buf.get(payload);
+            }
+            return NbtIo.readCompressed(
+                    new DataInputStream(new ByteArrayInputStream(payload)), NbtAccounter.unlimitedHeap());
+        } catch (Exception ignored) {
+            return null; // 写入中的瞬态条目,跳过
         }
     }
 
@@ -581,14 +590,120 @@ public final class DiskScanner {
         }
     }
 
-    /** 读单个条目的完整 NBT(mesh 预览用) */
+    /**
+     * 批量版 {@link #locateEntry}:一趟扫描解出整批 uuid。
+     * <p>
+     * 逐个调用时每个 uuid 都要把该维度所有 .slvls 解压一遍,依赖链有几十个成员就是几十遍
+     * 同样的解压 —— 生产事故的主要成本之一。同 uuid 多条目仍取方块数最大的一份。
+     */
+    public static Map<UUID, LocatedEntry> locateEntries(String dim, Path dir, Set<UUID> uuids) {
+        Map<UUID, LocatedEntry> best = new HashMap<>();
+        if (uuids.isEmpty()) return best;
+        try {
+            List<Path> slvlsFiles = new ArrayList<>();
+            try (var stream = Files.list(dir)) {
+                for (Path p : stream.toList()) {
+                    if (SLVLS.matcher(p.getFileName().toString()).matches()) slvlsFiles.add(p);
+                }
+            }
+            for (Path p : slvlsFiles) {
+                Matcher m = SLVLS.matcher(p.getFileName().toString());
+                if (!m.matches()) continue;
+                int rx = Integer.parseInt(m.group(1)), rz = Integer.parseInt(m.group(2)), si = Integer.parseInt(m.group(3));
+                forEachEntry(p, dir, rx, rz, 4096, (idx, tag) -> {
+                    try {
+                        UUID uuid = tag.getUUID("uuid");
+                        if (!uuids.contains(uuid)) return;
+                        LocatedEntry candidate = new LocatedEntry(new EntryKey(dim, rx, rz, si, idx), tag);
+                        LocatedEntry current = best.get(uuid);
+                        if (current == null || countBlocks(tag.getCompound("plot"), null)
+                                > countBlocks(current.tag().getCompound("plot"), null)) {
+                            best.put(uuid, candidate);
+                        }
+                    } catch (Exception ignored) {
+                    }
+                });
+            }
+        } catch (Exception e) {
+            SablePanel.LOGGER.warn("sablepanel: batch locate entries failed", e);
+        }
+        return best;
+    }
+
+    /**
+     * 批量版 {@link #locateLive}:一趟建指针表 + 一趟扫条目,解出整批 uuid 的存活位置。
+     * <p>
+     * 逐个调用时这两趟对每个 uuid 各做一次,而它无条件跑在依赖链的<b>每个</b>成员上
+     * (不像 locateEntry 只在快照失配时才走),是生产上那 16 分钟的主要来源。
+     */
+    public static Map<UUID, LiveLocation> locateLiveAll(String dim, Path dir, Set<UUID> uuids) {
+        Map<UUID, LiveLocation> found = new HashMap<>();
+        if (uuids.isEmpty()) return found;
+        try {
+            Map<String, int[]> refChunk = new HashMap<>();
+            List<Path> slvlsFiles = new ArrayList<>();
+            try (var stream = Files.list(dir)) {
+                for (Path p : stream.toList()) {
+                    String fn = p.getFileName().toString();
+                    Matcher mr = SLVLR.matcher(fn);
+                    if (mr.matches()) {
+                        int rx = Integer.parseInt(mr.group(1)), rz = Integer.parseInt(mr.group(2));
+                        forEachEntry(p, dir, rx, rz, 128, (idx, tag) -> {
+                            int cx = rx * 32 + (idx & 31), cz = rz * 32 + (idx >> 5);
+                            for (int pk : tag.getIntArray("pointers")) {
+                                refChunk.put(rx + "." + rz + "." + ((pk >> 16) & 0xFFFF) + ":" + (pk & 0xFFFF),
+                                        new int[]{cx, cz});
+                            }
+                        });
+                    } else if (SLVLS.matcher(fn).matches()) {
+                        slvlsFiles.add(p);
+                    }
+                }
+            }
+            for (Path p : slvlsFiles) {
+                Matcher m = SLVLS.matcher(p.getFileName().toString());
+                if (!m.matches()) continue;
+                int rx = Integer.parseInt(m.group(1)), rz = Integer.parseInt(m.group(2)), si = Integer.parseInt(m.group(3));
+                forEachEntry(p, dir, rx, rz, 4096, (idx, tag) -> {
+                    try {
+                        UUID uuid = tag.getUUID("uuid");
+                        if (!uuids.contains(uuid) || found.containsKey(uuid)) return;
+                        int[] rc = refChunk.get(rx + "." + rz + "." + si + ":" + idx);
+                        if (rc == null) return; // 无指针引用的条目 snatch 不到,跳过
+                        found.put(uuid, new LiveLocation(new EntryKey(dim, rx, rz, si, idx), rc[0], rc[1]));
+                    } catch (Exception ignored) {
+                    }
+                });
+            }
+        } catch (Exception e) {
+            SablePanel.LOGGER.warn("sablepanel: batch live locate failed", e);
+        }
+        return found;
+    }
+
+    /**
+     * 读单个条目的完整 NBT。
+     * <p>
+     * 只解压目标槽位。旧实现走 {@code forEachEntry} 把整个存储文件(最多 1024 个条目)
+     * 全解压一遍才挑出一条 —— 依赖链定位对每个成员都要调它一次,生产上一条 64 成员的链
+     * 因此跑了十几分钟,而存档头部本来就记着每个条目的确切偏移。
+     */
     public static CompoundTag readEntryTag(Path dimDir, EntryKey key) {
-        CompoundTag[] holder = new CompoundTag[1];
+        if (key.index() < 0 || key.index() >= 1024) return null;
         Path file = dimDir.resolve("r." + key.rx() + "." + key.rz() + "." + key.storage() + ".slvls");
-        forEachEntry(file, dimDir, key.rx(), key.rz(), 4096, (idx, tag) -> {
-            if (idx == key.index()) holder[0] = tag;
-        });
-        return holder[0];
+        // 条目常因 autosave 搬迁而不在原文件,缺文件是正常情况,不值得记日志
+        if (!Files.isRegularFile(file)) return null;
+        try (FileChannel ch = FileChannel.open(file, StandardOpenOption.READ)) {
+            long fileSize = ch.size();
+            ByteBuffer header = ByteBuffer.allocate(4096);
+            while (header.hasRemaining()) {
+                if (ch.read(header, header.position()) <= 0) break;
+            }
+            return readSlot(ch, fileSize, header, dimDir, key.rx(), key.rz(), 4096, key.index());
+        } catch (Exception e) {
+            SablePanel.LOGGER.debug("sablepanel: cannot read {}", file, e);
+            return null;
+        }
     }
 
     private static DiskEntry toEntry(EntryKey key, CompoundTag tag, boolean reachable) {

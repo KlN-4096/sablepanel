@@ -29,6 +29,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
@@ -214,15 +215,16 @@ public final class OpsService {
      * 加载可能触发区块同步生成,故走不设超时的 {@link #onMainUntilComplete}。
      */
     public JsonObject setForced(List<UUID> uuids, boolean forced) throws Exception {
-        Map<UUID, Map<UUID, MemberPlan>> chains = new LinkedHashMap<>();
+        // 整批一次建链:多选往往是同一个依赖组的成员,分层 BFS 会把它们一趟解完。
+        // 逐个建链会把同一批 .slvls 解压 N 遍 —— 全选 178 体的绳链时就是 178 遍。
+        Map<UUID, MemberPlan> chain = Map.of();
         if (forced) {
-            for (UUID uuid : uuids) {
-                // 已加载的体直接跳过建链:ensureLoaded 第一行 resolveLoaded 就会返回,
-                // 那条链一次都用不上。生产上曾为一个已加载的 178 依赖体白扫 16 分钟磁盘。
-                if (this.index.isLoaded(uuid)) continue;
-                chains.put(uuid, prepareChain(uuid)); // 作业线程做磁盘定位,不占主线程
-            }
+            // 已加载的体不用进链:ensureLoaded 第一行 resolveLoaded 就会返回。
+            // 生产上曾为一个已加载的 178 依赖体白扫 16 分钟磁盘。
+            List<UUID> cold = uuids.stream().filter(u -> !this.index.isLoaded(u)).toList();
+            if (!cold.isEmpty()) chain = prepareChain(cold); // 作业线程做磁盘定位,不占主线程
         }
+        Map<UUID, MemberPlan> plans = chain;
         // ThreadLocal 到不了主线程,先在作业线程上取出来捕获进 lambda
         JobService.Job job = JobService.current();
         JsonObject out = onMainUntilComplete(() -> {
@@ -236,7 +238,7 @@ public final class OpsService {
                     continue;
                 }
                 try {
-                    ForceLoadService.addOnMain(ensureLoaded(uuid, chains.getOrDefault(uuid, Map.of())));
+                    ForceLoadService.addOnMain(ensureLoaded(uuid, plans));
                     done++;
                 } catch (Throwable t) {
                     JsonObject f = new JsonObject();
@@ -1440,8 +1442,12 @@ public final class OpsService {
      * 只会互相抢 IO 和 CPU 并把主线程饿着。生产上 4 个并行作业曾让服务端持续落后 10 秒。
      */
     private Map<UUID, MemberPlan> prepareChain(UUID root) {
+        return prepareChain(List.of(root));
+    }
+
+    private Map<UUID, MemberPlan> prepareChain(Collection<UUID> roots) {
         try {
-            return JobService.underLocate(() -> prepareChainSerial(root));
+            return JobService.underLocate(() -> prepareChainSerial(roots));
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("磁盘定位被中断");
@@ -1452,66 +1458,102 @@ public final class OpsService {
         }
     }
 
-    private Map<UUID, MemberPlan> prepareChainSerial(UUID root) {
+    /**
+     * 逐层 BFS:每层的成员一趟磁盘解完,而不是一个一个来。
+     * <p>
+     * 绳链依赖很密(一个体动辄依赖上百个),按层走通常两三趟就到底,而旧的逐个定位
+     * 要对每个成员各做一遍全盘扫描 —— 64 个成员就是 64 遍同样的解压。
+     */
+    private Map<UUID, MemberPlan> prepareChainSerial(Collection<UUID> roots) {
         Map<UUID, MemberPlan> chain = new LinkedHashMap<>();
         Map<String, Path> dims = DiskScanner.sublevelDirs(this.server);
-        Deque<UUID> queue = new ArrayDeque<>();
-        queue.add(root);
+        // 显式点名的体一律要进链;MAX_CHAIN 只约束依赖闭包的外延
+        int budget = Math.max(MAX_CHAIN, roots.size());
+        Set<UUID> frontier = new LinkedHashSet<>(roots);
         JobService.phase("定位磁盘条目");
-        while (!queue.isEmpty() && chain.size() < MAX_CHAIN) {
-            UUID u = queue.poll();
-            if (chain.containsKey(u)) continue;
-            JobService.detail(chain.size() + "/" + Math.min(MAX_CHAIN, chain.size() + queue.size() + 1));
-            MemberPlan plan = locateMember(u, dims);
-            if (plan == null) continue;
-            chain.put(u, plan);
-            try {
-                if (plan.tag().contains("loading_dependencies")) {
-                    var list = plan.tag().getList("loading_dependencies", net.minecraft.nbt.Tag.TAG_INT_ARRAY);
-                    for (net.minecraft.nbt.Tag t : list) queue.add(net.minecraft.nbt.NbtUtils.loadUUID(t));
+        while (!frontier.isEmpty() && chain.size() < budget) {
+            frontier.removeAll(chain.keySet());
+            if (frontier.isEmpty()) break;
+            if (chain.size() + frontier.size() > budget) {
+                Set<UUID> capped = new LinkedHashSet<>();
+                for (UUID u : frontier) {
+                    if (chain.size() + capped.size() >= budget) break;
+                    capped.add(u);
                 }
-            } catch (Throwable ignored) {
+                frontier = capped;
             }
-        }
-        return chain;
-    }
-
-    /** 快路径:索引快照定位 + 重读校验;失败退化为全盘实时定位 */
-    private MemberPlan locateMember(UUID u, Map<String, Path> dims) {
-        DiskScanner.EntryKey key = null;
-        CompoundTag tag = null;
-        DiskScanner.DiskEntry cached = this.index.findEntry(u);
-        if (cached != null) {
-            Path dir = dims.get(cached.key().dim());
-            if (dir != null) {
-                CompoundTag t = DiskScanner.readEntryTag(dir, cached.key());
+            JobService.detail(chain.size() + "/" + budget);
+            Map<UUID, MemberPlan> layer = locateMembers(frontier, dims);
+            if (layer.isEmpty()) break;
+            chain.putAll(layer);
+            Set<UUID> next = new LinkedHashSet<>();
+            for (MemberPlan plan : layer.values()) {
                 try {
-                    if (t != null && u.equals(t.getUUID("uuid"))) {
-                        key = cached.key();
-                        tag = t;
+                    if (!plan.tag().contains("loading_dependencies")) continue;
+                    var list = plan.tag().getList("loading_dependencies", net.minecraft.nbt.Tag.TAG_INT_ARRAY);
+                    for (net.minecraft.nbt.Tag t : list) {
+                        UUID dep = net.minecraft.nbt.NbtUtils.loadUUID(t);
+                        if (!chain.containsKey(dep)) next.add(dep);
                     }
                 } catch (Throwable ignored) {
                 }
             }
+            frontier = next;
         }
-        if (tag == null) {
-            for (var en : dims.entrySet()) {
-                DiskScanner.LocatedEntry le = DiskScanner.locateEntry(en.getKey(), en.getValue(), u);
-                if (le != null) {
-                    key = le.key();
-                    tag = le.tag();
-                    break;
+        return chain;
+    }
+
+    /**
+     * 批量定位一层成员。快路径按快照指针直读(读单条,不再解压整个存储文件),
+     * 失配的走按维度批量全盘定位;引用 chunk 也按维度一趟解出。
+     */
+    private Map<UUID, MemberPlan> locateMembers(Set<UUID> uuids, Map<String, Path> dims) {
+        Map<UUID, DiskScanner.EntryKey> keys = new LinkedHashMap<>();
+        Map<UUID, CompoundTag> tags = new LinkedHashMap<>();
+        Set<UUID> missing = new LinkedHashSet<>();
+        for (UUID u : uuids) {
+            DiskScanner.DiskEntry cached = this.index.findEntry(u);
+            Path dir = cached != null ? dims.get(cached.key().dim()) : null;
+            CompoundTag t = dir != null ? DiskScanner.readEntryTag(dir, cached.key()) : null;
+            try {
+                // 快照可能陈旧(autosave 会搬迁条目),读回来必须验 uuid —— 0.6.0 定下的铁律
+                if (t != null && u.equals(t.getUUID("uuid"))) {
+                    keys.put(u, cached.key());
+                    tags.put(u, t);
+                    continue;
                 }
+            } catch (Throwable ignored) {
             }
+            missing.add(u);
         }
-        if (tag == null) return null;
-        DiskScanner.LiveLocation cold = null;
-        Path dir = dims.get(key.dim());
-        if (dir != null) {
-            cold = DiskScanner.locateLive(key.dim(), dir, u);
-            if (cold != null && !cold.key().equals(key)) cold = null;
+        for (var en : dims.entrySet()) {
+            if (missing.isEmpty()) break;
+            for (var hit : DiskScanner.locateEntries(en.getKey(), en.getValue(), missing).entrySet()) {
+                keys.put(hit.getKey(), hit.getValue().key());
+                tags.put(hit.getKey(), hit.getValue().tag());
+            }
+            missing.removeAll(keys.keySet());
         }
-        return new MemberPlan(key, tag, cold);
+        // 引用 chunk 按维度分组批量解,一个维度只扫一趟
+        Map<String, Set<UUID>> byDim = new LinkedHashMap<>();
+        for (var en : keys.entrySet()) {
+            byDim.computeIfAbsent(en.getValue().dim(), d -> new LinkedHashSet<>()).add(en.getKey());
+        }
+        Map<UUID, DiskScanner.LiveLocation> cold = new LinkedHashMap<>();
+        for (var en : byDim.entrySet()) {
+            Path dir = dims.get(en.getKey());
+            if (dir == null) continue;
+            cold.putAll(DiskScanner.locateLiveAll(en.getKey(), dir, en.getValue()));
+        }
+        Map<UUID, MemberPlan> out = new LinkedHashMap<>();
+        for (var en : keys.entrySet()) {
+            UUID u = en.getKey();
+            DiskScanner.LiveLocation live = cold.get(u);
+            // 指向别的条目说明盘上已经搬过位置,这份 cold 不能用于 snatch
+            if (live != null && !live.key().equals(en.getValue())) live = null;
+            out.put(u, new MemberPlan(en.getValue(), tags.get(u), live));
+        }
+        return out;
     }
 
     /** 主线程:确保 uuid 已加载(否则依链加载),返回加载后的体;失败抛异常 */
