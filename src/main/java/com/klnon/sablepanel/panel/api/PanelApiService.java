@@ -12,7 +12,6 @@ import com.klnon.sablepanel.panel.service.JobService;
 import com.klnon.sablepanel.panel.service.OpsService;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.level.ServerLevel;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -72,9 +71,11 @@ public final class PanelApiService {
                 JsonObject view = this.index.view();
                 // 正在排队/执行的作业:前端据此显示转圈并禁用按钮
                 view.add("busy", this.jobs.busyView());
-                // 各维度真实建筑高度,给"虚空中/极高空"筛选用。
-                // 不能在前端写死 -64/320:FTB 那边有 16 个子维度,高度限制各不相同
-                view.add("dims", buildHeights());
+                // "虚空中/极高空"的高度阈值(服主可在配置里调),前端据此筛选
+                JsonObject reach = new JsonObject();
+                reach.addProperty("void_below", this.config.voidBelowY);
+                reach.addProperty("sky_above", this.config.skyAboveY);
+                view.add("reach", reach);
                 return PanelResponse.json(200, view, true);
             }
             case "/api/jobs" -> {
@@ -231,17 +232,6 @@ public final class PanelApiService {
         return uuids.size() > 1 ? label + " 等 " + uuids.size() + " 个" : label;
     }
 
-    /** 各维度建筑高度上下限,给"虚空中/极高空"筛选做判据 */
-    private JsonObject buildHeights() {
-        JsonObject dims = new JsonObject();
-        for (ServerLevel level : this.server.getAllLevels()) {
-            JsonObject range = new JsonObject();
-            range.addProperty("min", level.getMinBuildHeight());
-            range.addProperty("max", level.getMaxBuildHeight());
-            dims.add(level.dimension().location().toString(), range);
-        }
-        return dims;
-    }
 
     public boolean authorized(String candidate) {
         String current = token();

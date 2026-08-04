@@ -52,6 +52,17 @@ public final class PanelConfig {
     /** 方块实体数 ≥ 此值 → 保护(残骸最多带 1 个,机械/家具成组出现) */
     public int protectBlockEntities = 3;
 
+    /**
+     * "虚空中/极高空"筛选的高度阈值,判据是**整个包围盒**都越过了阈值。
+     * <p>
+     * 用绝对高度而不是维度建筑上限:航空服的飞艇本来就飞得高,按建筑上限(实测有存档
+     * 被模组改到 480)筛会把正常游玩的飞艇也捞进来。1000 以上基本只有 bug 甩出去的体。
+     * 各服情况不同,所以放出来给服主调。
+     */
+    public int voidBelowY = -64;
+    /** 体底高于此值 → 极高空(玩家正常手段到不了) */
+    public int skyAboveY = 1000;
+
     /** 集群内的唯一标识 = 显示名;留空时退回服务端目录名(通常就是实例名) */
     public String serverId() {
         if (this.serverName != null && !this.serverName.isBlank()) {
@@ -96,6 +107,11 @@ public final class PanelConfig {
                     if (cfg.apiPort < 1 || cfg.apiPort > 65535) cfg.apiPort = 25581;
                     if (cfg.recycleMaxFiles < 1) cfg.recycleMaxFiles = 500;
                     if (cfg.statsRetentionDays < 1) cfg.statsRetentionDays = 30;
+                    // 上下阈值反了会让两个筛选同时命中所有体,直接退回默认
+                    if (cfg.voidBelowY >= cfg.skyAboveY) {
+                        cfg.voidBelowY = -64;
+                        cfg.skyAboveY = 1000;
+                    }
                     // 旧版本的配置文件缺新字段(会取默认值),补写回去,服主才看得见能调什么
                     String full = gson.toJson(cfg);
                     if (!full.equals(raw)) Files.writeString(file, full);

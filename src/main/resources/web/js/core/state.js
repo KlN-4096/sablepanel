@@ -32,9 +32,8 @@ let JOB_WATCH = new Map();
 /* 有作业在跑时的加速轮询句柄(2 秒),跑完自动停 */
 let busyTimer = null;
 
-/* 各维度建筑高度上下限,来自 /api/bodies 的 dims。
-   绝不能在前端写死 -64/320:模组会改,实测本地存档主世界上限就是 480 */
-let DIMS = {};
+/* "虚空中/极高空"的高度阈值,来自 /api/bodies 的 reach(服主可在配置文件里调) */
+let REACH = {void_below:-64, sky_above:1000};
 
 /* 多选:跨页签/筛选保留,切服清空;BODY_BY_UUID 随 DATA 重建 */
 let SELECTED = new Set(), BODY_BY_UUID = new Map();

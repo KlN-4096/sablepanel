@@ -18,7 +18,7 @@ async function loadBodies() {
     PAUSED = new Set(DATA.paused || []);
     FORCED = new Set(DATA.forced || []);
     BUSY = new Map((DATA.busy || []).map(job => [job.uuid, job]));
-    DIMS = DATA.dims || {};
+    REACH = DATA.reach || REACH;
     syncBusyPolling();
     reapFinishedJobs();
     DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));

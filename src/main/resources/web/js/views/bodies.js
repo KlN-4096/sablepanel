@@ -85,11 +85,10 @@ function cmpGroups(a, b){
 }
 
 /* ===================== 页签 ===================== */
-/* 人力不可达判定:体整个落在该维度建筑高度范围之外(bug 飞出去的结构)。
-   高度上下限用服务端给的真实值——模组会改,本地存档主世界上限实测就是 480 而非 320 */
-function dimRange(dim){ return DIMS[dim] || {min:-64, max:320}; }
-function isVoid(b){ return (b.pos[1] + b.size[1]) < dimRange(b.dim).min; }
-function isSky(b){ return b.pos[1] > dimRange(b.dim).max; }
+/* 人力不可达判定:整个包围盒都越过阈值(bug 飞出去的结构)。
+   阈值来自服务端配置(voidBelowY/skyAboveY),不按建筑上限——航空服的飞艇本来就飞得高 */
+function isVoid(b){ return (b.pos[1] + b.size[1]) < REACH.void_below; }
+function isSky(b){ return b.pos[1] > REACH.sky_above; }
 
 const TABS = [
   {k:'all',    label:'tabAll',     test:()=>true},
@@ -210,8 +209,8 @@ function render() {
       if (SEL && SEL.uuid === b.uuid) m.classList.add('sel');
       const extra = [];
       if (BUSY.has(b.uuid)) { m.classList.add('is-busy'); extra.push(busyTag(b.uuid)); }
-      if (isVoid(b)) extra.push(`<span class="tag bad" title="${t('voidTag')}">${t('voidBadge')}</span>`);
-      if (isSky(b)) extra.push(`<span class="tag warn" title="${t('skyTag')}">${t('skyBadge')}</span>`);
+      if (isVoid(b)) extra.push(`<span class="tag bad" title="${t('voidTag')(REACH.void_below)}">${t('voidBadge')}</span>`);
+      if (isSky(b)) extra.push(`<span class="tag warn" title="${t('skyTag')(REACH.sky_above)}">${t('skyBadge')}</span>`);
       if (FORCED.has(b.uuid)) extra.push(`<span class="tag forced" title="${t('forcedTag')}">${t('forcedBadge')}</span>`);
       if (PAUSED.has(b.uuid)) extra.push(`<span class="tag warn" title="${t('pausedTag')}">⏸</span>`);
       if (b.copies) extra.push(`<span class="tag warn">${b.copies} ${t('copiesX')}</span>`);
