@@ -180,9 +180,14 @@ public final class OpsService {
             // 暂停(约束锁定)中的体传送后在新位置重挂约束
             com.klnon.sablepanel.panel.service.PauseService.reanchor(sl);
             audit("teleport", uuid, sl.getName(), x + "," + y + "," + z);
+            String dim = level.dimension().location().toString();
+            this.index.updateRuntimePosition(uuid, dim, new double[]{x, y, z});
             JsonObject r = new JsonObject();
             r.addProperty("ok", true);
-            r.addProperty("dim", level.dimension().location().toString());
+            r.addProperty("dim", dim);
+            r.addProperty("x", x);
+            r.addProperty("y", y);
+            r.addProperty("z", z);
             return r;
         });
         this.rescan.run();

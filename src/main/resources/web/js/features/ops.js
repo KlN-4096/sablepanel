@@ -131,8 +131,14 @@ async function doTeleport() {
   const nm = SEL.name || SEL.uuid.slice(0,8);
   if (!await askModal(t('tpConfirmT'), t('tpConfirm')(nm,x,y,z), false)) return;
   busy(t('loading'));
-  try { await api(`/api/body/${SEL.uuid}/teleport?x=${x}&y=${y}&z=${z}`, {method:'POST'});
-    toast(t('tpOk'), 'ok'); setTimeout(loadBodies, 1200);
+  try {
+    const result = await api(`/api/body/${SEL.uuid}/teleport?x=${x}&y=${y}&z=${z}`, {method:'POST'});
+    toast(t('tpOk'), 'ok');
+    const pos = [result.x, result.y, result.z].map(Number);
+    SEL.pos = pos;
+    SEL.runtime = {...(SEL.runtime || {}), dim:result.dim, x:pos[0], y:pos[1], z:pos[2]};
+    render(); renderDetail();
+    loadBodies();
   } catch(e){ toast(t('tpFail') + e.message, 'bad'); }
   busy(null);
 }

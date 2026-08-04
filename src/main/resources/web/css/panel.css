@@ -247,18 +247,20 @@ button.favStar{border:none;background:none;padding:0 6px;font-size:16px;vertical
 #selSeg,#rSelSeg{display:inline-flex;gap:8px;align-items:center;margin-left:auto}
 #selSeg .selInfo,#rSelSeg .selInfo{color:var(--acc);font-weight:600;white-space:nowrap}
 .ops{padding:12px;border-top:1px solid var(--line);background:#131824;display:flex;flex-direction:column;gap:9px}
-.ops .row{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.ops .row{display:flex;gap:7px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
 .ops .row:last-child{margin-bottom:0}
-.ops input.coord{width:74px;font-family:var(--mono)}
+.ops .row button{padding:6px 11px}
+.ops input.coord{width:60px;font-family:var(--mono);padding:6px 7px;text-align:center}
 .ops select{flex:1;min-width:110px;font-size:12.5px}
-/* 操作分组:传送 / 物理与恢复 / 危险操作 */
+/* 操作分组:传送 / 物理与恢复 / 危险操作;提示语放标题行右侧,按钮行保持紧凑 */
 .opGroup{padding:10px 12px;background:#10151f;border:1px solid var(--line);border-radius:9px}
 .opGroup.danger{border-color:#3d2528;background:#141015}
-.opTitle{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;font-weight:600;
-  margin-bottom:8px;line-height:1.2}
-.opGroup.danger .opTitle{color:var(--bad);opacity:.85}
+.opTitle{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;line-height:1.3;
+  font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;font-weight:600}
+.opGroup.danger .opTitle>span:first-child{color:var(--bad);opacity:.85}
+.opTitle .opHint{margin-left:auto;text-align:right;text-transform:none;letter-spacing:0;font-weight:400}
 .opLabel{font-size:11.5px;color:var(--dim);min-width:56px;flex:none}
-.opHint{font-size:11px;color:var(--dim);line-height:1.4;flex-basis:100%;padding-left:2px}
+.opHint{font-size:11px;color:var(--dim);line-height:1.4;min-width:0}
 #pauseBtn{min-width:110px}
 #detailEmpty,#rDetailEmpty{padding:50px 22px;text-align:center;color:var(--dim)}
 #detailEmpty .big,#rDetailEmpty .big{font-size:30px;opacity:.3;display:block;margin-bottom:12px}

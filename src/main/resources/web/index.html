@@ -134,24 +134,23 @@
       <div id="dbody"><div id="detailEmpty"><span class="big">⬢</span><span data-i18n="pickBody">选择一个物理体查看详情</span></div></div>
       <div class="ops" id="ops" style="display:none">
         <div class="opGroup">
-          <div class="opTitle" data-i18n="opMove">传送</div>
+          <div class="opTitle"><span data-i18n="opMove">传送</span></div>
           <div class="row">
             <span class="opLabel" data-i18n="tpDest">目的坐标</span>
             <input class="coord" id="tx" placeholder="x"><input class="coord" id="ty" placeholder="y"><input class="coord" id="tz" placeholder="z">
-            <button class="ghost" onclick="fillCurrentPos()" data-i18n="tpUseCur">取当前</button>
-            <button class="primary" onclick="doTeleport()" data-i18n="teleportTo">传送到</button>
+            <button onclick="fillCurrentPos()" data-i18n="tpUseCur">取当前</button>
+            <button class="primary" onclick="doTeleport()" data-i18n="teleportTo">传送结构</button>
           </div>
           <div class="row">
             <span class="opLabel" data-i18n="opPlayer">玩家</span>
             <select id="tpPlayer"></select>
-            <button onclick="doTeleportPlayer()" id="tpPlayerBtn" data-i18n="tpPlayerBtn">传送玩家到此</button>
+            <button class="primary" onclick="doTeleportPlayer()" id="tpPlayerBtn" data-i18n="tpPlayerBtn">传送玩家</button>
           </div>
         </div>
         <div class="opGroup">
-          <div class="opTitle" data-i18n="opPhysics">物理与恢复</div>
+          <div class="opTitle"><span data-i18n="opPhysics">物理与恢复</span><span class="opHint" data-i18n="pauseHint">引擎约束锁定(同物理手杖),重启后仍保持</span></div>
           <div class="row">
             <button id="pauseBtn" class="warnb" onclick="doPauseCurrent()">⏸</button>
-            <span class="opHint" data-i18n="pauseHint">引擎约束锁定(同物理手杖),重启后仍保持</span>
           </div>
           <div class="row" id="adoptRow" style="display:none">
             <button onclick="doAdopt()" data-i18n="adopt">收养找回(含依赖)</button>
@@ -159,11 +158,10 @@
           </div>
         </div>
         <div class="opGroup danger">
-          <div class="opTitle" data-i18n="opDanger">危险操作</div>
+          <div class="opTitle"><span data-i18n="opDanger">危险操作</span><span class="opHint" data-i18n="delHint">删除前自动备份到回收站</span></div>
           <div class="row">
             <button class="danger" id="delBodyBtn" onclick="doDelete()" data-i18n="delBody">删除该物理体</button>
             <button id="dedupeBtn" onclick="openDedupe()" style="display:none" data-i18n="dedupe">去重副本</button>
-            <span class="opHint" data-i18n="delHint">删除前自动备份到回收站</span>
           </div>
         </div>
       </div>

@@ -45,6 +45,23 @@ public final class BodyIndex {
         this.diskScanTime = System.currentTimeMillis();
     }
 
+    /** 运行时操作完成后立即修正坐标缓存,避免面板等到下一次周期刷新。 */
+    public void updateRuntimePosition(UUID uuid, String dim, double[] position) {
+        if (position == null || position.length != 3) {
+            throw new IllegalArgumentException("position 必须包含 x/y/z");
+        }
+        Map<UUID, JsonObject> updated = new HashMap<>(this.runtime);
+        JsonObject state = updated.containsKey(uuid)
+                ? updated.get(uuid).deepCopy()
+                : new JsonObject();
+        state.addProperty("dim", dim);
+        state.addProperty("x", position[0]);
+        state.addProperty("y", position[1]);
+        state.addProperty("z", position[2]);
+        updated.put(uuid, state);
+        this.runtime = Map.copyOf(updated);
+    }
+
     /** 主线程调用:刷新运行时加载态 + holding 态 + 逐体耗时 + 孤儿告警 */
     public void refreshRuntime(MinecraftServer server, int ticksSinceLast) {
         Map<UUID, JsonObject> map = new HashMap<>();

@@ -55,6 +55,9 @@ final class HttpIo {
             }
             if (cacheable) {
                 ex.getResponseHeaders().set("Cache-Control", "public, max-age=86400");
+            } else {
+                // 面板自身页面与 js/css:禁止启发式缓存,否则 mod 更新后浏览器可能继续用旧前端
+                ex.getResponseHeaders().set("Cache-Control", "no-cache");
             }
             send(ex, 200, type, in.readAllBytes(), true);
         }
