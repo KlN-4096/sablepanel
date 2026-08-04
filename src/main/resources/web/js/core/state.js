@@ -24,6 +24,18 @@ let PAUSED = new Set();
    含未加载体的意图。命中的组在列表里变色并恒置顶 */
 let FORCED = new Set();
 
+/* 处理中的作业:uuid → {seq,op,state,phase,since},来自 /api/bodies 的 busy。
+   命中的行显示转圈+阶段+已耗时,操作按钮禁用 */
+let BUSY = new Map();
+/* 本页提交过、还没弹过结果的作业:seq → 操作名。从 BUSY 消失时去 /api/jobs 取终态 */
+let JOB_WATCH = new Map();
+/* 有作业在跑时的加速轮询句柄(2 秒),跑完自动停 */
+let busyTimer = null;
+
+/* 各维度建筑高度上下限,来自 /api/bodies 的 dims。
+   绝不能在前端写死 -64/320:模组会改,实测本地存档主世界上限就是 480 */
+let DIMS = {};
+
 /* 多选:跨页签/筛选保留,切服清空;BODY_BY_UUID 随 DATA 重建 */
 let SELECTED = new Set(), BODY_BY_UUID = new Map();
 let R_SELECTED = new Set(), RECYCLE_BY_ID = new Map();

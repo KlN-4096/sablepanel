@@ -17,6 +17,10 @@ async function loadBodies() {
     CLONE_SETS = new Map((DATA.clone_sets || []).map(set=>[Number(set.id), set]));
     PAUSED = new Set(DATA.paused || []);
     FORCED = new Set(DATA.forced || []);
+    BUSY = new Map((DATA.busy || []).map(job => [job.uuid, job]));
+    DIMS = DATA.dims || {};
+    syncBusyPolling();
+    reapFinishedJobs();
     DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));
     SELECTED = new Set([...SELECTED].filter(u => BODY_BY_UUID.has(u)));
     const dims = new Set();
@@ -32,6 +36,31 @@ async function loadBodies() {
     refreshTimer = 60;
     if (keepUuid) reselect(keepUuid);
   } catch (e) { toast(t('loadFail') + e.message, 'bad'); }
+}
+/* 有作业在跑时把列表刷新加速到 2 秒,跑完自动停。
+   取代从前散落在各操作里的 setTimeout(loadBodies, 1200/1500/4000) —— 那些是对
+   "多久能好"的猜测,猜短了看不到结果,猜长了白等,巨型体两头都不对 */
+function syncBusyPolling(){
+  const active = BUSY.size > 0;
+  if (active && !busyTimer) busyTimer = setInterval(loadBodies, 2000);
+  else if (!active && busyTimer) { clearInterval(busyTimer); busyTimer = null; }
+}
+/* 作业结束回报:本页提交过的作业一旦从 busy 里消失,去日志取终态弹一次 toast */
+async function reapFinishedJobs(){
+  if (!JOB_WATCH.size) return;
+  const running = new Set([...BUSY.values()].map(job => job.seq));
+  const finished = [...JOB_WATCH.keys()].filter(seq => !running.has(seq));
+  if (!finished.length) return;
+  let log;
+  try { log = (await api('/api/jobs')).log || []; } catch(e){ return; }
+  for (const seq of finished) {
+    JOB_WATCH.delete(seq);
+    const job = log.find(entry => entry.seq === seq);
+    if (!job) continue;
+    const failed = job.state === 'failed' || /failed=[1-9]/.test(job.message || '');
+    const parts = [job.op, job.name, failed ? t('jobFailed') : t('jobDone'), job.message];
+    toast(parts.filter(Boolean).join(' · '), failed ? 'bad' : 'ok');
+  }
 }
 function reselect(uuid){
   for (const g of DATA.groups) for (const b of g.bodies) if (b.uuid === uuid) {

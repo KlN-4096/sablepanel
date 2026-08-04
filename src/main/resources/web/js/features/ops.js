@@ -1,5 +1,22 @@
 'use strict';
-/* 操作层:传送/删除/收养/恢复/口令/重扫 —— 全部经确认后调 api,完成后刷新数据 */
+/* 操作层:传送/删除/收养/恢复/口令/重扫。
+   除"改口令""改回收站上限"这两个纯配置写入外,所有会改变物理体状态的操作都走后台作业:
+   请求只负责入队并立刻返回,进度和结果由 /api/bodies 的 busy 与 /api/jobs 的日志回报。
+   —— 从前是同步等待,巨型体能让一次请求跑十几分钟,浏览器 30 秒就超时,
+   用户看不到任何进展就会重复点击,最终把传输层的在飞槽位占满、整个面板 503。 */
+
+/* 提交一个后台作业。目标体已有作业在跑时后端返回 409,这里当普通失败提示。 */
+async function submitJob(path, opts, label){
+  try {
+    const r = await api(path, opts);
+    if (r && r.job) JOB_WATCH.set(r.job, r.op || label || '');
+    await loadBodies();   // 立刻把"处理中"画出来,不再靠写死的 setTimeout 等
+    return r;
+  } catch(e){
+    toast((label ? label + ' · ' : '') + e.message, 'bad');
+    return null;
+  }
+}
 /* 改访问口令:后端会同步给集群所有成员,改完本地也要跟着换,否则下一个请求就 401 */
 async function doChangeToken(){
   if (!await askModal(t('tokenChangeT'), t('tokenChangeMsg'), true)) return;
@@ -20,8 +37,7 @@ async function doChangeToken(){
   busy(null);
 }
 async function doRescan(){
-  try { await api('/api/rescan', {method:'POST'}); toast(t('rescanOk'), 'ok'); setTimeout(loadBodies, 4000); }
-  catch(e){ toast(t('loadFail') + e.message, 'bad'); }
+  await submitJob('/api/rescan', {method:'POST'}, t('rescanOp'));
 }
 async function doDeleteSelected(){
   const groups=[];
@@ -43,16 +59,9 @@ async function doAdoptSelected(){
     .filter(e => e && e.b.state === 'orphan').map(e => e.b.uuid);
   if (!orphans.length) return;
   if (!await askModal(t('selAdoptT'), t('selAdoptMsg')(orphans.length), false)) return;
-  busy(t('loading'));
-  let ok = 0;
-  for (const u of orphans) {   // 串行:收养走服务端主线程,别并发轰
-    try { const r = await api(`/api/body/${u}/adopt`, {method:'POST'}); if (r.ok) ok++; }
-    catch(e){}
-  }
-  busy(null);
-  toast(t('selAdoptDone')(ok, orphans.length), ok === orphans.length ? 'ok' : 'bad');
+  // 逐个入队;后端按体去重,同一个体的重复提交会被 409 挡掉
+  for (const u of orphans) await submitJob(`/api/body/${u}/adopt`, {method:'POST'}, t('adoptOp'));
   clearSel();
-  setTimeout(loadBodies, 1200);
 }
 async function saveRecycleLimit(){
   const limit=Number(document.getElementById('rLimit').value);
@@ -82,27 +91,19 @@ async function confirmRestore(groups){
   const recovery=groups.filter(group=>group.state==='recovery_required').length;
   const message=t('restoreSelectedMsg')(groups.length,bodies,blocks)+(recovery?t('restoreRecoveryWarn')(recovery):'');
   if (!await askModal(t('restoreSelectedT'),message,false)) return;
-  busy(t('loading'));
-  try {
-    const result=await api('/api/recycle/restore',{method:'POST',body:JSON.stringify({ids:groups.map(g=>g.id)})});
-    const failures=(result.results||[]).filter(item=>!item.ok);
-    const detail=failures.slice(0,3).map(item=>`${item.id}: ${item.error}`).join('; ');
-    toast(t('restoreDone')(result.ok,result.total)+(detail?` · ${detail}`:'')+warnText(result),result.ok===result.total?'ok':'bad');
-    R_SELECTED.clear();
-    setTimeout(()=>{loadBodies();loadRecycle();},1200);
-  } catch(e){ toast(t('restoreFail')+e.message,'bad'); }
-  busy(null);
+  const r = await submitJob('/api/recycle/restore',
+    {method:'POST',body:JSON.stringify({ids:groups.map(g=>g.id)})}, t('restoreOp'));
+  if (r) { R_SELECTED.clear(); loadRecycle(); }
 }
 /* 单体物理暂停:无确认直接执行;内存态,重启服务端自动恢复运行 */
 async function setPausedBodies(uuids, paused){
   if (!uuids.length) return;
-  try {
-    await api('/api/ops/pause', {method:'POST', body: JSON.stringify({uuids, paused})});
-    for (const u of uuids) paused ? PAUSED.add(u) : PAUSED.delete(u);
-    toast(t(paused ? 'pauseOk' : 'resumeOk')(uuids.length), 'ok');
-    renderAll();
-    if (SEL) renderDetail();
-  } catch(e){ toast(t('pauseFail') + e.message, 'bad'); }
+  const r = await submitJob('/api/ops/pause', {method:'POST', body: JSON.stringify({uuids, paused})},
+    t(paused ? 'pauseOp' : 'resumeOp'));
+  if (!r) return;
+  for (const u of uuids) paused ? PAUSED.add(u) : PAUSED.delete(u);
+  renderAll();
+  if (SEL) renderDetail();
 }
 function doPauseCurrent(){
   if (SEL) setPausedBodies([SEL.uuid], !PAUSED.has(SEL.uuid));
@@ -110,21 +111,17 @@ function doPauseCurrent(){
 function doPauseSelected(paused){
   setPausedBodies([...SELECTED].filter(u => paused !== PAUSED.has(u)), paused);
 }
-/* 常驻加载(sable force-load ticket):开启时后端会先把体加载出来,大体可能耗时数秒;
+/* 常驻加载(sable force-load ticket):开启时后端会先把体加载出来,大体可能耗时数分钟;
    票由 sable 持久化,重启后仍然生效 */
 async function setForcedBodies(uuids, forced){
   if (!uuids.length) return;
-  try {
-    const r = await api('/api/ops/force_load', {method:'POST', body: JSON.stringify({uuids, forced})});
-    for (const u of uuids) forced ? FORCED.add(u) : FORCED.delete(u);
-    const failed = (r && r.failed) || [];
-    for (const f of failed) FORCED.delete(f.uuid);
-    if (failed.length) toast(t('forcePartial')(r.count, failed.length), 'warn');
-    else toast(t(forced ? 'forceOk' : 'unforceOk')(uuids.length), 'ok');
-    renderAll();
-    if (SEL) renderDetail();
-    loadBodies();   // 状态会从 stored 变 loaded,拉一次服务端真值
-  } catch(e){ toast(t('forceFail') + e.message, 'bad'); }
+  const r = await submitJob('/api/ops/force_load', {method:'POST', body: JSON.stringify({uuids, forced})},
+    t(forced ? 'forceOp' : 'unforceOp'));
+  if (!r) return;
+  // 乐观更新;作业失败时下一次 loadBodies 会用服务端真值纠正回来
+  for (const u of uuids) forced ? FORCED.add(u) : FORCED.delete(u);
+  renderAll();
+  if (SEL) renderDetail();
 }
 function doForceCurrent(){
   if (SEL) setForcedBodies([SEL.uuid], !FORCED.has(SEL.uuid));
@@ -132,7 +129,8 @@ function doForceCurrent(){
 function doForceSelected(forced){
   setForcedBodies([...SELECTED].filter(u => forced !== FORCED.has(u)), forced);
 }
-/* 传送玩家到选中结构上方(包围盒顶面中心 +1);体未加载后端会先强制加载 */
+/* 传送玩家到选中结构顶面中心(必须落进包围盒,否则体在人到达前就被卸载);
+   体未加载后端会先按依赖链强制加载 */
 async function doTeleportPlayer(){
   if (!SEL) return;
   const pu = document.getElementById('tpPlayer').value;
@@ -140,29 +138,14 @@ async function doTeleportPlayer(){
   const p = PLAYERS.find(x=>x.uuid===pu);
   const nm = SEL.name || SEL.uuid.slice(0,8);
   if (!await askModal(t('tpPlayerT'), t('tpPlayerMsg')(p ? p.name : pu, nm), false)) return;
-  busy(t('loading'));
-  try {
-    const r = await api(`/api/body/${SEL.uuid}/teleport_player?player=${pu}`, {method:'POST'});
-    toast(t('tpPlayerOk')(r.player || ''), 'ok');
-  } catch(e){ toast(t('tpFail') + e.message, 'bad'); }
-  busy(null);
+  await submitJob(`/api/body/${SEL.uuid}/teleport_player?player=${pu}`, {method:'POST'}, t('tpPlayerOp'));
 }
 async function doTeleport() {
   if (!SEL) return;
   const x = document.getElementById('tx').value, y = document.getElementById('ty').value, z = document.getElementById('tz').value;
   const nm = SEL.name || SEL.uuid.slice(0,8);
   if (!await askModal(t('tpConfirmT'), t('tpConfirm')(nm,x,y,z), false)) return;
-  busy(t('loading'));
-  try {
-    const result = await api(`/api/body/${SEL.uuid}/teleport?x=${x}&y=${y}&z=${z}`, {method:'POST'});
-    toast(t('tpOk'), 'ok');
-    const pos = [result.x, result.y, result.z].map(Number);
-    SEL.pos = pos;
-    SEL.runtime = {...(SEL.runtime || {}), dim:result.dim, x:pos[0], y:pos[1], z:pos[2]};
-    render(); renderDetail();
-    loadBodies();
-  } catch(e){ toast(t('tpFail') + e.message, 'bad'); }
-  busy(null);
+  await submitJob(`/api/body/${SEL.uuid}/teleport?x=${x}&y=${y}&z=${z}`, {method:'POST'}, t('tpOp'));
 }
 async function doDelete() {
   if (!SEL || !SELG) return;
@@ -183,30 +166,14 @@ async function doDeleteRecommended(){
   await batchDelete(uuids);
 }
 async function batchDelete(uuids){
-  busy(t('loading'));
-  try {
-    const r = await api('/api/ops/batch_delete', {method:'POST', body: JSON.stringify({uuids})});
-    const failed = (r.results || []).filter(x => !x.ok);
-    const detail = failed.slice(0, 3)
-      .map(x => `${x.uuid.slice(0,8)}: ${x.error || t('delUnknownFail')}`).join('; ');
-    toast(t('delGroupDone')(r.ok, r.total) + (detail ? ` · ${detail}` : '') + warnText(r),
-      r.ok === r.total ? 'ok' : 'bad');
-    SEL = null; SELG = null;
-    setTimeout(()=>{loadBodies();loadRecycle();}, 1500);
-  } catch(e){ toast(t('delFail') + e.message, 'bad'); }
-  busy(null);
+  const r = await submitJob('/api/ops/batch_delete', {method:'POST', body: JSON.stringify({uuids})}, t('delOp'));
+  if (!r) return;
+  SEL = null; SELG = null;
+  loadRecycle();
 }
 async function doAdopt() {
   if (!SEL) return;
   const nm = SEL.name || SEL.uuid.slice(0,8);
   if (!await askModal(t('adoptT'), t('adoptMsg')(nm), false)) return;
-  busy(t('loading'));
-  try {
-    const r = await api(`/api/body/${SEL.uuid}/adopt`, {method:'POST'});
-    const bad = Object.values(r.chain||{}).filter(v => v!=='adopted' && v!=='already_loaded').length;
-    toast(r.ok ? (bad ? t('adoptPart') : t('adoptOk')) : t('adoptFail'), r.ok ? 'ok' : 'bad');
-    if (r.truncated) toast(t('adoptTrunc')(r.truncated), 'bad');
-    setTimeout(loadBodies, 1200);
-  } catch(e){ toast(t('adoptFail') + e.message, 'bad'); }
-  busy(null);
+  await submitJob(`/api/body/${SEL.uuid}/adopt`, {method:'POST'}, t('adoptOp'));
 }
