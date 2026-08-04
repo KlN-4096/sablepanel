@@ -256,7 +256,9 @@ button.favStar{border:none;background:none;padding:0 6px;font-size:16px;vertical
 .ops .row button{padding:6px 11px}
 /* 并列的一对操作按钮等宽,否则中西文/符号宽度差会让两颗按钮参差 */
 .ops .row.dual button{flex:1}
-.ops input.coord{width:60px;font-family:var(--mono);padding:6px 7px;text-align:center}
+/* 坐标框可增长:定宽会让第一行排不满,末尾的「传送结构」右边缘对不上
+   下一行被 flex:1 的玩家下拉顶到最右的「传送玩家」 */
+.ops input.coord{flex:1 1 60px;min-width:0;font-family:var(--mono);padding:6px 7px;text-align:center}
 .ops select{flex:1;min-width:110px;font-size:12.5px}
 /* 操作分组:传送 / 物理与恢复 / 危险操作;提示语放标题行右侧,按钮行保持紧凑 */
 .opGroup{padding:10px 12px;background:#10151f;border:1px solid var(--line);border-radius:9px}

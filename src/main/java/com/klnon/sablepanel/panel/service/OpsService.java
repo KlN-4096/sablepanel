@@ -265,7 +265,16 @@ public final class OpsService {
         });
     }
 
-    /** 把在线玩家传到目标物理结构上方(包围盒顶面中心 +1,跨维度可用);体未加载先按链强制加载 */
+    /**
+     * 把在线玩家传到目标物理结构上(包围盒顶面中心,跨维度可用);体未加载先按链强制加载。
+     * <p>
+     * <b>落点必须在结构内</b>:sable 的 {@code PhysicsChunkTicketManager} 只在
+     * "玩家碰撞箱中心落进包围盒扩 1.0 的保护盒"时才豁免卸载
+     * ({@code sub_levels_with_players_cannot_unload})。玩家中心比脚高 0.9,
+     * 落在顶面(y=maxY)时中心为 maxY+0.9,仍在 maxY+1.0 的保护盒内;
+     * 旧实现落在 maxY+1 则中心 maxY+1.9 已出界 —— 人还没到,体就被卸载了。
+     * 不取包围盒正中心是因为那里通常是结构实心处,会把玩家闷在方块里。
+     */
     public JsonObject teleportPlayer(UUID uuid, UUID playerUuid) throws Exception {
         Map<UUID, MemberPlan> chain = prepareChain(uuid);
         return onMain(() -> {
@@ -277,7 +286,7 @@ public final class OpsService {
             var bb = sl.boundingBox();
             if (bb.maxX() >= bb.minX() && Double.isFinite(bb.minX()) && Double.isFinite(bb.maxY())) {
                 x = (bb.minX() + bb.maxX()) / 2;
-                y = bb.maxY() + 1;
+                y = bb.maxY();
                 z = (bb.minZ() + bb.maxZ()) / 2;
             } else {
                 var p = sl.logicalPose().position();
