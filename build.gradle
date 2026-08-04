@@ -36,6 +36,10 @@ neoForge {
             programArgument '--nogui'
             gameDirectory = file('run2')
         }
+        client {
+            client()
+            gameDirectory = file('run-client')
+        }
     }
 
     mods {
@@ -51,6 +55,20 @@ dependencies {
     compileOnly files("libs/sable-companion-common-1.21.1-1.6.0.jar")
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    jarJar(implementation('org.bouncycastle:bcprov-jdk18on:1.84')) {
+        version { strictly '[1.84,1.85)'; prefer '1.84' }
+    }
+    jarJar(implementation('org.bouncycastle:bcutil-jdk18on:1.84')) {
+        version { strictly '[1.84,1.85)'; prefer '1.84' }
+    }
+    jarJar(implementation('org.bouncycastle:bcpkix-jdk18on:1.84')) {
+        version { strictly '[1.84,1.85)'; prefer '1.84' }
+    }
+    // 1.21.1 的开发运行不会自动展开普通 Jar-in-Jar 依赖。
+    additionalRuntimeClasspath 'org.bouncycastle:bcprov-jdk18on:1.84'
+    additionalRuntimeClasspath 'org.bouncycastle:bcutil-jdk18on:1.84'
+    additionalRuntimeClasspath 'org.bouncycastle:bcpkix-jdk18on:1.84'
 }
 
 // 单元测试直接使用 MC 的 NBT 类(无需 Bootstrap),由 MDG 提供测试类路径

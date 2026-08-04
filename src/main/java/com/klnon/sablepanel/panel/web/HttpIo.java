@@ -15,6 +15,7 @@ import java.util.zip.GZIPOutputStream;
 
 /** web 层公共 IO:请求解析与响应发送(无业务状态,纯静态工具) */
 final class HttpIo {
+    private static final int MAX_REQUEST_BODY = 1024 * 1024;
     /** 面板自身的 js/css:仅放行受限字符集的固定前缀路径,杜绝 ".." 与编码穿越 */
     static final java.util.regex.Pattern STATIC_ASSET =
             java.util.regex.Pattern.compile("/(?:css|js)(?:/[A-Za-z0-9_-]+)*/[A-Za-z0-9_-]+\\.(?:css|js)");
@@ -29,8 +30,15 @@ final class HttpIo {
     }
 
     static JsonObject readJsonBody(HttpExchange ex) throws IOException {
-        return JsonParser.parseString(
-                new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)).getAsJsonObject();
+        return JsonParser.parseString(new String(readBody(ex), StandardCharsets.UTF_8)).getAsJsonObject();
+    }
+
+    static byte[] readBody(HttpExchange ex) throws IOException {
+        try (InputStream input = ex.getRequestBody()) {
+            byte[] body = input.readNBytes(MAX_REQUEST_BODY + 1);
+            if (body.length > MAX_REQUEST_BODY) throw new IOException("请求体超过 1 MiB");
+            return body;
+        }
     }
 
     static Map<String, String> query(URI uri) {

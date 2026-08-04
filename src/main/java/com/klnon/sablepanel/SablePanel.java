@@ -2,11 +2,14 @@ package com.klnon.sablepanel;
 
 import com.klnon.sablepanel.panel.service.PauseService;
 import com.google.gson.JsonObject;
+import com.klnon.sablepanel.panel.api.PanelApiService;
+import com.klnon.sablepanel.panel.client.ClientPanelBootstrap;
 import com.klnon.sablepanel.panel.data.BodyIndex;
 import com.klnon.sablepanel.panel.data.DiskScanner;
 import com.klnon.sablepanel.panel.service.OpsService;
 import com.klnon.sablepanel.panel.PanelConfig;
-import com.klnon.sablepanel.panel.web.PanelHttpServer;
+import com.klnon.sablepanel.panel.transport.PanelClusterNode;
+import com.klnon.sablepanel.panel.web.PanelWebGateway;
 import com.klnon.sablepanel.panel.data.StatsCollector;
 import com.mojang.logging.LogUtils;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
@@ -16,6 +19,8 @@ import dev.ryanhcode.sable.neoforge.event.ForgeSablePrePhysicsTickEvent;
 import dev.ryanhcode.sable.neoforge.event.ForgeSableSubLevelContainerReadyEvent;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.loading.FMLEnvironment;
+import net.neoforged.api.distmarker.Dist;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
@@ -43,13 +48,15 @@ public class SablePanel {
     private int ticksSinceRefresh;
 
     private final BodyIndex bodyIndex = new BodyIndex();
-    private volatile PanelHttpServer panelServer;
+    private volatile PanelClusterNode panelNode;
+    private volatile PanelWebGateway panelWeb;
     private volatile boolean scanPauseLogged;
     private ScheduledExecutorService scanExecutor;
 
     private long tickStartNanos;
 
     public SablePanel() {
+        if (FMLEnvironment.dist == Dist.CLIENT) ClientPanelBootstrap.start();
         NeoForge.EVENT_BUS.addListener(this::onContainerReady);
         NeoForge.EVENT_BUS.addListener(this::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(this::onPostPhysics);
@@ -62,7 +69,7 @@ public class SablePanel {
     }
 
     private void onServerTickPre(ServerTickEvent.Pre event) {
-        if (this.panelServer != null) {
+        if (this.panelNode != null) {
             this.tickStartNanos = System.nanoTime();
         }
     }
@@ -86,7 +93,7 @@ public class SablePanel {
             Runnable scanOnce = () -> {
                 try {
                     // 面板空闲 → 扫描暂停(唤醒时 markActivity 会立即补一轮,数据几秒内追平)
-                    PanelHttpServer p = this.panelServer;
+                    PanelClusterNode p = this.panelNode;
                     if (p != null && !p.isActive()) {
                         if (!this.scanPauseLogged) {
                             this.scanPauseLogged = true;
@@ -105,16 +112,18 @@ public class SablePanel {
             var scanExec = this.scanExecutor;
             OpsService ops = new OpsService(server, this.bodyIndex, () -> scanExec.execute(scanOnce), config);
             StatsCollector.INSTANCE.start(config);
-            this.panelServer = new PanelHttpServer(config, server, this.bodyIndex, ops);
-            this.panelServer.start();
-            var panel = this.panelServer;
+            PanelApiService api = new PanelApiService(config, server, this.bodyIndex, ops);
+            this.panelNode = new PanelClusterNode(config, api);
+            this.panelNode.start();
+            if (this.panelNode.isHost()) startServerWeb(config);
+            var panel = this.panelNode;
             this.scanExecutor.scheduleWithFixedDelay(() -> {
                 try {
-                    panel.clusterTick();
+                    if (panel.clusterTick()) startServerWeb(config);
                 } catch (Throwable t) {
                     LOGGER.warn("sablepanel: cluster tick failed", t);
                 }
-            }, PanelHttpServer.HEARTBEAT_SECONDS, PanelHttpServer.HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+            }, PanelClusterNode.HEARTBEAT_SECONDS, PanelClusterNode.HEARTBEAT_SECONDS, TimeUnit.SECONDS);
         } catch (Throwable t) {
             StatsCollector.INSTANCE.stop();
             LOGGER.error("sablepanel: panel startup failed", t);
@@ -151,12 +160,12 @@ public class SablePanel {
     private void onServerTick(ServerTickEvent.Post event) {
         this.tickCounter++;
         // 面板未启用(enabled=false 或启动失败)→ 每 tick 只剩这一个 null 判断
-        if (this.panelServer != null) {
+        if (this.panelNode != null) {
             if (this.tickStartNanos != 0) {
                 StatsCollector.INSTANCE.tick(System.nanoTime() - this.tickStartNanos);
             }
             this.ticksSinceRefresh++;
-            int interval = this.panelServer.isActive() ? RUNTIME_REFRESH_TICKS : RUNTIME_REFRESH_IDLE_TICKS;
+            int interval = this.panelNode.isActive() ? RUNTIME_REFRESH_TICKS : RUNTIME_REFRESH_IDLE_TICKS;
             if (this.ticksSinceRefresh >= interval) {
                 try {
                     // 传真实 tick 数:空闲降频后 drain 的 ms/tick 折算才是对的
@@ -214,10 +223,9 @@ public class SablePanel {
     // ServerStopped(而非 Stopping):sable 在停服晚期才逐体 UNLOADED,writer 必须活到那之后
     private void onServerStopped(ServerStoppedEvent event) {
         BodyCostTracker.ENABLED = false;
-        if (this.panelServer != null) {
-            this.panelServer.stop();
-            this.panelServer = null;
-        }
+        closeServerWeb();
+        if (this.panelNode != null) this.panelNode.close();
+        this.panelNode = null;
         if (this.scanExecutor != null) {
             this.scanExecutor.shutdownNow();
             this.scanExecutor = null;
@@ -225,5 +233,22 @@ public class SablePanel {
         StatsCollector.INSTANCE.stop();
         PauseService.reset();
         EventLog.close();
+    }
+
+    private synchronized void startServerWeb(PanelConfig config) {
+        if (!config.webEnabled || this.panelWeb != null || this.panelNode == null || !this.panelNode.isHost()) return;
+        PanelWebGateway gateway = PanelWebGateway.server(config, this.panelNode.identity().fingerprint());
+        try {
+            gateway.start();
+            this.panelWeb = gateway;
+        } catch (Exception error) {
+            gateway.close();
+            LOGGER.warn("sablepanel: web gateway {}:{} unavailable", config.webBind, config.webPort, error);
+        }
+    }
+
+    private synchronized void closeServerWeb() {
+        if (this.panelWeb != null) this.panelWeb.close();
+        this.panelWeb = null;
     }
 }

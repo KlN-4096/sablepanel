@@ -18,8 +18,17 @@ public final class PanelConfig {
     public static final String DEFAULT_TOKEN = "sablepanel";
 
     public boolean enabled = true;
-    public String bind = "0.0.0.0";
-    public int port = 25580;
+    /** 旧字段，仅用于读取 0.11.0 及更早配置。 */
+    @Deprecated
+    public transient String bind = "0.0.0.0";
+    /** 旧字段，仅用于读取 0.11.0 及更早配置。 */
+    @Deprecated
+    public transient int port = 25580;
+    public boolean webEnabled = true;
+    public String webBind = "0.0.0.0";
+    public int webPort = 25580;
+    public String apiBind = "0.0.0.0";
+    public int apiPort = 25581;
     public String token = DEFAULT_TOKEN;
     /** 回收站中实际 NBT 备份文件的硬上限；超出时按删除日期清理最早的完整依赖组。 */
     public int recycleMaxFiles = 500;
@@ -75,9 +84,16 @@ public final class PanelConfig {
             PanelConfig cfg = null;
             if (Files.isRegularFile(file)) {
                 String raw = Files.readString(file);
-                cfg = gson.fromJson(raw, PanelConfig.class);
+                var source = com.google.gson.JsonParser.parseString(raw).getAsJsonObject();
+                cfg = gson.fromJson(source, PanelConfig.class);
                 if (cfg != null) {
+                    if (!source.has("webBind") && source.has("bind")) cfg.webBind = source.get("bind").getAsString();
+                    if (!source.has("webPort") && source.has("port")) cfg.webPort = source.get("port").getAsInt();
                     if (cfg.token == null || cfg.token.isBlank()) cfg.token = DEFAULT_TOKEN;
+                    if (cfg.webBind == null || cfg.webBind.isBlank()) cfg.webBind = "0.0.0.0";
+                    if (cfg.apiBind == null || cfg.apiBind.isBlank()) cfg.apiBind = "0.0.0.0";
+                    if (cfg.webPort < 1 || cfg.webPort > 65535) cfg.webPort = 25580;
+                    if (cfg.apiPort < 1 || cfg.apiPort > 65535) cfg.apiPort = 25581;
                     if (cfg.recycleMaxFiles < 1) cfg.recycleMaxFiles = 500;
                     if (cfg.statsRetentionDays < 1) cfg.statsRetentionDays = 30;
                     // 旧版本的配置文件缺新字段(会取默认值),补写回去,服主才看得见能调什么
