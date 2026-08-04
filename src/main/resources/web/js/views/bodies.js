@@ -160,7 +160,7 @@ function render() {
     div.className = 'group' + (forcedN ? ' is-forced' : g.orphans ? ' is-orphan' : g.rec ? ' is-rec' : '');
     div.dataset.gid = g.gid;
     const tags = [];
-    if (forcedN) tags.push(`<span class="tag forced" title="${t('forcedTag')}">📌${forcedN>1?'×'+forcedN:''}</span>`);
+    if (forcedN) tags.push(`<span class="tag forced" title="${t('forcedTag')}">${t('forcedBadge')}${forcedN>1?' ×'+forcedN:''}</span>`);
     const pausedN = g.bodies.filter(b=>PAUSED.has(b.uuid)).length;
     if (pausedN) tags.push(`<span class="tag warn">⏸${pausedN>1?'×'+pausedN:''}</span>`);
     if (g.rec) tags.push(`<span class="tag warn">${t('recTag')}</span>`);
@@ -189,7 +189,7 @@ function render() {
       const m = document.createElement('div'); m.className = 'member'; m.dataset.uuid = b.uuid;
       if (SEL && SEL.uuid === b.uuid) m.classList.add('sel');
       const extra = [];
-      if (FORCED.has(b.uuid)) extra.push(`<span class="tag forced" title="${t('forcedTag')}">📌</span>`);
+      if (FORCED.has(b.uuid)) extra.push(`<span class="tag forced" title="${t('forcedTag')}">${t('forcedBadge')}</span>`);
       if (PAUSED.has(b.uuid)) extra.push(`<span class="tag warn" title="${t('pausedTag')}">⏸</span>`);
       if (b.copies) extra.push(`<span class="tag warn">${b.copies} ${t('copiesX')}</span>`);
       if (b.clone) extra.push(`<span class="tag clone">${t('cloneWith')(clonePeerCount(b))}</span>`);

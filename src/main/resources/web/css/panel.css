@@ -254,6 +254,8 @@ button.favStar{border:none;background:none;padding:0 6px;font-size:16px;vertical
 .ops .row{display:flex;gap:7px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
 .ops .row:last-child{margin-bottom:0}
 .ops .row button{padding:6px 11px}
+/* 并列的一对操作按钮等宽,否则中西文/符号宽度差会让两颗按钮参差 */
+.ops .row.dual button{flex:1}
 .ops input.coord{width:60px;font-family:var(--mono);padding:6px 7px;text-align:center}
 .ops select{flex:1;min-width:110px;font-size:12.5px}
 /* 操作分组:传送 / 物理与恢复 / 危险操作;提示语放标题行右侧,按钮行保持紧凑 */
