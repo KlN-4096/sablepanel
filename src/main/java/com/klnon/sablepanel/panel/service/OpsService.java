@@ -1,5 +1,11 @@
-package com.klnon.sablepanel.panel;
+package com.klnon.sablepanel.panel.service;
 
+import com.klnon.sablepanel.panel.PanelConfig;
+import com.klnon.sablepanel.panel.data.BodyIndex;
+import com.klnon.sablepanel.panel.data.DiskScanner;
+import com.klnon.sablepanel.panel.data.RecycleStore;
+import com.klnon.sablepanel.panel.data.BlockNames;
+import com.klnon.sablepanel.panel.data.MeshExtractor;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.EventLog;
@@ -156,9 +162,23 @@ public final class OpsService {
             ServerSubLevel sl = ensureLoaded(uuid, chain);
             ServerLevel level = sl.getLevel();
             SubLevelPhysicsSystem phys = SubLevelPhysicsSystem.get(level);
-            sl.logicalPose().position().set(x, y, z);
-            phys.getPipeline().teleport(sl, new Vector3d(x, y, z), sl.logicalPose().orientation());
+            // 面板坐标语义 = 包围盒底面中心。pose 原点与几何差一个 plot 偏移,
+            // 直接设 pose 会让结构落点偏移十几格;按当前锚点差换算回 pose 再传送。
+            Vector3d target = new Vector3d(x, y, z);
+            try {
+                var bb = sl.boundingBox();
+                double ax = (bb.minX() + bb.maxX()) / 2, ay = bb.minY(), az = (bb.minZ() + bb.maxZ()) / 2;
+                var p = sl.logicalPose().position();
+                if (Double.isFinite(ax) && Double.isFinite(ay) && Double.isFinite(az) && bb.maxX() >= bb.minX()) {
+                    target.set(x + (p.x() - ax), y + (p.y() - ay), z + (p.z() - az));
+                }
+            } catch (Throwable ignored) {
+            }
+            sl.logicalPose().position().set(target.x, target.y, target.z);
+            phys.getPipeline().teleport(sl, target, sl.logicalPose().orientation());
             sl.updateLastPose();
+            // 暂停(约束锁定)中的体传送后在新位置重挂约束
+            com.klnon.sablepanel.panel.service.PauseService.reanchor(sl);
             audit("teleport", uuid, sl.getName(), x + "," + y + "," + z);
             JsonObject r = new JsonObject();
             r.addProperty("ok", true);
@@ -167,6 +187,68 @@ public final class OpsService {
         });
         this.rescan.run();
         return result;
+    }
+
+    /** 单体物理暂停/恢复 = 挂/拆引擎固定约束(同物理手杖锁定),持久化,重启后保持 */
+    public JsonObject setPaused(List<UUID> uuids, boolean paused) throws Exception {
+        onMain(() -> {
+            com.klnon.sablepanel.panel.service.PauseService.applyOnMain(this.server, uuids, paused);
+            return null;
+        });
+        for (UUID uuid : uuids) audit(paused ? "pause" : "resume", uuid, null, null);
+        JsonObject out = new JsonObject();
+        out.addProperty("ok", true);
+        out.addProperty("paused", paused);
+        out.addProperty("count", uuids.size());
+        return out;
+    }
+
+    /** 在线玩家列表(主线程读取,给"传送玩家"下拉用) */
+    public JsonObject listPlayers() throws Exception {
+        return onMain(() -> {
+            JsonArray arr = new JsonArray();
+            for (var player : this.server.getPlayerList().getPlayers()) {
+                JsonObject o = new JsonObject();
+                o.addProperty("uuid", player.getUUID().toString());
+                o.addProperty("name", player.getGameProfile().getName());
+                o.addProperty("dim", player.serverLevel().dimension().location().toString());
+                arr.add(o);
+            }
+            JsonObject out = new JsonObject();
+            out.add("players", arr);
+            return out;
+        });
+    }
+
+    /** 把在线玩家传到目标物理结构上方(包围盒顶面中心 +1,跨维度可用);体未加载先按链强制加载 */
+    public JsonObject teleportPlayer(UUID uuid, UUID playerUuid) throws Exception {
+        Map<UUID, MemberPlan> chain = prepareChain(uuid);
+        return onMain(() -> {
+            var player = this.server.getPlayerList().getPlayer(playerUuid);
+            if (player == null) throw new IllegalStateException("玩家不在线");
+            ServerSubLevel sl = ensureLoaded(uuid, chain);
+            ServerLevel level = sl.getLevel();
+            double x, y, z;
+            var bb = sl.boundingBox();
+            if (bb.maxX() >= bb.minX() && Double.isFinite(bb.minX()) && Double.isFinite(bb.maxY())) {
+                x = (bb.minX() + bb.maxX()) / 2;
+                y = bb.maxY() + 1;
+                z = (bb.minZ() + bb.maxZ()) / 2;
+            } else {
+                var p = sl.logicalPose().position();
+                x = p.x();
+                y = p.y() + 2;
+                z = p.z();
+            }
+            player.teleportTo(level, x, y, z, player.getYRot(), player.getXRot());
+            audit("teleport_player", uuid, sl.getName(),
+                    player.getGameProfile().getName() + " -> " + x + "," + y + "," + z);
+            JsonObject r = new JsonObject();
+            r.addProperty("ok", true);
+            r.addProperty("player", player.getGameProfile().getName());
+            r.addProperty("dim", level.dimension().location().toString());
+            return r;
+        });
     }
 
     public JsonObject delete(UUID uuid) throws Exception {

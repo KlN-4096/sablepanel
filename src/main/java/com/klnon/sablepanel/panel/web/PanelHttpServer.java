@@ -1,5 +1,14 @@
-package com.klnon.sablepanel.panel;
+package com.klnon.sablepanel.panel.web;
 
+import com.klnon.sablepanel.panel.data.StatsCollector;
+import com.klnon.sablepanel.panel.PanelConfig;
+import com.klnon.sablepanel.panel.data.BodyIndex;
+import com.klnon.sablepanel.panel.data.DiskScanner;
+import com.klnon.sablepanel.panel.data.RecycleStore;
+import com.klnon.sablepanel.panel.data.BlockNames;
+import com.klnon.sablepanel.panel.data.MeshExtractor;
+import com.klnon.sablepanel.panel.data.StatsHistoryStore;
+import com.klnon.sablepanel.panel.service.OpsService;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -31,6 +40,7 @@ import java.util.zip.GZIPOutputStream;
  *   GET  /                        面板页面
  *   GET  /vendor/three.min.js     内置 three.js(无需外网)
  *   GET  /api/servers             集群成员列表
+ *   GET  /api/players             在线玩家列表(传送玩家用)
  *   GET  /api/bodies              全量索引(组聚合,纯内存缓存)
  *   GET  /api/stats?from=&to=&max_points= TPS/MSPT/物理耗时与持久化历史
  *   GET  /api/recycle             回收站依赖组、属性与上限
@@ -41,10 +51,12 @@ import java.util.zip.GZIPOutputStream;
  *   GET  /api/body/{uuid}/copies 实时副本审查
  *   POST /api/rescan              立即触发磁盘重扫
  *   POST /api/body/{uuid}/teleport?x=&y=&z=
+ *   POST /api/body/{uuid}/teleport_player?player=
  *   POST /api/body/{uuid}/delete
  *   POST /api/body/{uuid}/adopt   孤儿收养(含依赖闭包)
  *   POST /api/body/{uuid}/deduplicate 仅清理内容完全一致的副本
  *   POST /api/ops/batch_delete    {"uuids":[...]}
+ *   POST /api/ops/pause           {"uuids":[...],"paused":true|false} 单体物理暂停(内存态)
  *   POST /api/cluster/register    集群成员注册/心跳(仅本机回环)
  *   POST /api/cluster/token       修改访问口令(HOST 收到会推给全体成员)
  * 鉴权:?token= 或 X-Token 头。
@@ -222,48 +234,58 @@ public final class PanelHttpServer {
             String path = ex.getRequestURI().getPath();
             // 静态资源不鉴权(不含数据)
             if (path.equals("/vendor/three.min.js")) {
-                sendResource(ex, "/web/vendor/three.min.js", "text/javascript; charset=utf-8", true);
+                HttpIo.sendResource(ex, "/web/vendor/three.min.js", "text/javascript; charset=utf-8", true);
+                return;
+            }
+            if (HttpIo.STATIC_ASSET.matcher(path).matches()) {
+                HttpIo.sendResource(ex, "/web" + path,
+                        path.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8", false);
                 return;
             }
             // 登录外壳不含面板数据,必须先加载它才能让用户输入访问口令。
             if (path.equals("/") || path.equals("/index.html")) {
-                sendResource(ex, "/web/index.html", "text/html; charset=utf-8", false);
+                HttpIo.sendResource(ex, "/web/index.html", "text/html; charset=utf-8", false);
                 return;
             }
             // 集群注册不看 token:同机只该有一个面板,回环来源即可信,
             // 后启动的服务端无论 token 一不一样都要能挂上来(口令由 HOST 统一下发)
             if (path.equals("/api/cluster/register")) {
-                requirePost(ex);
+                HttpIo.requirePost(ex);
                 handleRegister(ex);
                 return;
             }
             if (!authed(ex)) {
-                send(ex, 401, "application/json", "{\"error\":\"token 无效\"}".getBytes(StandardCharsets.UTF_8), false);
+                HttpIo.send(ex, 401, "application/json", "{\"error\":\"token 无效\"}".getBytes(StandardCharsets.UTF_8), false);
                 return;
             }
             markActivity();
             if (path.equals("/api/cluster/token")) {
-                requirePost(ex);
+                HttpIo.requirePost(ex);
                 handleSetToken(ex);
                 return;
             }
             if (path.equals("/api/servers")) {
-                send(ex, 200, "application/json", serversJson().toString().getBytes(StandardCharsets.UTF_8), false);
+                HttpIo.send(ex, 200, "application/json", serversJson().toString().getBytes(StandardCharsets.UTF_8), false);
                 return;
             }
             // 请求的是集群里别的服务端 -> 反代到它的回环端口
-            String target = query(ex.getRequestURI()).get("server");
+            String target = HttpIo.query(ex.getRequestURI()).get("server");
             if (target != null && !target.isEmpty() && !target.equals(this.selfId)) {
                 proxy(ex, target);
                 return;
             }
             switch (path) {
                 case "/api/bodies" -> {
-                    send(ex, 200, "application/json", this.index.view().toString().getBytes(StandardCharsets.UTF_8), true);
+                    HttpIo.send(ex, 200, "application/json", this.index.view().toString().getBytes(StandardCharsets.UTF_8), true);
+                    return;
+                }
+                case "/api/players" -> {
+                    HttpIo.send(ex, 200, "application/json",
+                            this.ops.listPlayers().toString().getBytes(StandardCharsets.UTF_8), false);
                     return;
                 }
                 case "/api/stats" -> {
-                    Map<String, String> values = query(ex.getRequestURI());
+                    Map<String, String> values = HttpIo.query(ex.getRequestURI());
                     JsonObject stats;
                     if (values.containsKey("from") || values.containsKey("to")) {
                         if (!values.containsKey("from") || !values.containsKey("to")) {
@@ -277,49 +299,62 @@ public final class PanelHttpServer {
                     } else {
                         stats = StatsCollector.INSTANCE.toJson(300);
                     }
-                    send(ex, 200, "application/json",
+                    HttpIo.send(ex, 200, "application/json",
                             stats.toString().getBytes(StandardCharsets.UTF_8), true);
                     return;
                 }
                 case "/api/recycle" -> {
                     JsonObject view = this.ops.recycleView();
-                    send(ex, 200, "application/json", view.toString().getBytes(StandardCharsets.UTF_8), true);
+                    HttpIo.send(ex, 200, "application/json", view.toString().getBytes(StandardCharsets.UTF_8), true);
                     return;
                 }
                 case "/api/recycle/config" -> {
-                    requirePost(ex);
-                    JsonObject body = readJsonBody(ex);
+                    HttpIo.requirePost(ex);
+                    JsonObject body = HttpIo.readJsonBody(ex);
                     if (!body.has("max_files")) throw new IllegalArgumentException("max_files 缺失");
                     JsonObject result = this.ops.setRecycleLimit(body.get("max_files").getAsInt());
-                    send(ex, 200, "application/json", result.toString().getBytes(StandardCharsets.UTF_8), false);
+                    HttpIo.send(ex, 200, "application/json", result.toString().getBytes(StandardCharsets.UTF_8), false);
                     return;
                 }
                 case "/api/recycle/restore" -> {
-                    requirePost(ex);
-                    JsonArray ids = readJsonBody(ex).getAsJsonArray("ids");
+                    HttpIo.requirePost(ex);
+                    JsonArray ids = HttpIo.readJsonBody(ex).getAsJsonArray("ids");
                     if (ids == null || ids.isEmpty()) throw new IllegalArgumentException("ids 为空");
                     if (ids.size() > 500) throw new IllegalArgumentException("单次最多恢复 500 个依赖组");
                     List<String> groupIds = new ArrayList<>();
                     for (var id : ids) groupIds.add(id.getAsString());
                     JsonObject result = this.ops.restoreRecycleGroups(groupIds);
-                    send(ex, 200, "application/json", result.toString().getBytes(StandardCharsets.UTF_8), true);
+                    HttpIo.send(ex, 200, "application/json", result.toString().getBytes(StandardCharsets.UTF_8), true);
                     return;
                 }
                 case "/api/rescan" -> {
-                    requirePost(ex);
+                    HttpIo.requirePost(ex);
                     this.ops.rescanNow();
-                    send(ex, 200, "application/json", "{\"ok\":true}".getBytes(StandardCharsets.UTF_8), false);
+                    HttpIo.send(ex, 200, "application/json", "{\"ok\":true}".getBytes(StandardCharsets.UTF_8), false);
                     return;
                 }
                 case "/api/ops/batch_delete" -> {
-                    requirePost(ex);
-                    JsonArray arr = readJsonBody(ex).getAsJsonArray("uuids");
+                    HttpIo.requirePost(ex);
+                    JsonArray arr = HttpIo.readJsonBody(ex).getAsJsonArray("uuids");
                     if (arr == null || arr.isEmpty()) throw new IllegalArgumentException("uuids 为空");
                     if (arr.size() > 500) throw new IllegalArgumentException("单次最多 500 个");
                     List<UUID> uuids = new ArrayList<>();
                     for (var e : arr) uuids.add(UUID.fromString(e.getAsString()));
                     JsonObject r = this.ops.deleteBatch(uuids);
-                    send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), true);
+                    HttpIo.send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), true);
+                    return;
+                }
+                case "/api/ops/pause" -> {
+                    HttpIo.requirePost(ex);
+                    JsonObject body = HttpIo.readJsonBody(ex);
+                    JsonArray arr = body.getAsJsonArray("uuids");
+                    if (arr == null || arr.isEmpty()) throw new IllegalArgumentException("uuids 为空");
+                    if (arr.size() > 500) throw new IllegalArgumentException("单次最多 500 个");
+                    boolean paused = body.has("paused") && body.get("paused").getAsBoolean();
+                    List<UUID> uuids = new ArrayList<>();
+                    for (var e : arr) uuids.add(UUID.fromString(e.getAsString()));
+                    JsonObject r = this.ops.setPaused(uuids, paused);
+                    HttpIo.send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
                     return;
                 }
             }
@@ -327,11 +362,11 @@ public final class PanelHttpServer {
                     "/api/recycle/([0-9A-Za-z_-]{8,96})/body/([0-9a-fA-F-]{36})/mesh").matcher(path);
             if (recycleMesh.matches()) {
                 JsonObject mesh = this.ops.recycleMesh(recycleMesh.group(1), UUID.fromString(recycleMesh.group(2)));
-                send(ex, 200, "application/json", mesh.toString().getBytes(StandardCharsets.UTF_8), true);
+                HttpIo.send(ex, 200, "application/json", mesh.toString().getBytes(StandardCharsets.UTF_8), true);
                 return;
             }
             var m = java.util.regex.Pattern.compile(
-                    "/api/body/([0-9a-fA-F-]{36})/(mesh|copies|teleport|delete|adopt|deduplicate)").matcher(path);
+                    "/api/body/([0-9a-fA-F-]{36})/(mesh|copies|teleport_player|teleport|delete|adopt|deduplicate)").matcher(path);
             if (m.matches()) {
                 UUID uuid = UUID.fromString(m.group(1));
                 switch (m.group(2)) {
@@ -341,43 +376,51 @@ public final class PanelHttpServer {
                     }
                     case "copies" -> {
                         JsonObject r = this.ops.inspectCopies(uuid);
-                        send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), true);
+                        HttpIo.send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), true);
                         return;
                     }
                     case "teleport" -> {
-                        requirePost(ex);
-                        Map<String, String> q = query(ex.getRequestURI());
+                        HttpIo.requirePost(ex);
+                        Map<String, String> q = HttpIo.query(ex.getRequestURI());
                         JsonObject r = this.ops.teleport(uuid,
                                 Double.parseDouble(q.get("x")), Double.parseDouble(q.get("y")), Double.parseDouble(q.get("z")));
-                        send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
+                        HttpIo.send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
+                        return;
+                    }
+                    case "teleport_player" -> {
+                        HttpIo.requirePost(ex);
+                        String player = HttpIo.query(ex.getRequestURI()).get("player");
+                        if (player == null || player.isBlank()) throw new IllegalArgumentException("player 缺失");
+                        JsonObject r = this.ops.teleportPlayer(uuid, UUID.fromString(player));
+                        HttpIo.send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
                         return;
                     }
                     case "delete" -> {
-                        requirePost(ex);
+                        HttpIo.requirePost(ex);
                         JsonObject r = this.ops.delete(uuid);
-                        send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
+                        HttpIo.send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
                         return;
                     }
                     case "adopt" -> {
-                        requirePost(ex);
+                        HttpIo.requirePost(ex);
                         JsonObject r = this.ops.adopt(uuid);
-                        send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
+                        HttpIo.send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
                         return;
                     }
                     case "deduplicate" -> {
-                        requirePost(ex);
+                        HttpIo.requirePost(ex);
                         JsonObject r = this.ops.deduplicate(uuid);
-                        send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
+                        HttpIo.send(ex, 200, "application/json", r.toString().getBytes(StandardCharsets.UTF_8), false);
                         return;
                     }
                 }
             }
-            send(ex, 404, "application/json", "{\"error\":\"not found\"}".getBytes(StandardCharsets.UTF_8), false);
+            HttpIo.send(ex, 404, "application/json", "{\"error\":\"not found\"}".getBytes(StandardCharsets.UTF_8), false);
         } catch (Exception e) {
             SablePanel.LOGGER.warn("sablepanel: http error {}", ex.getRequestURI(), e);
             JsonObject err = new JsonObject();
             err.addProperty("error", String.valueOf(e.getMessage() != null ? e.getMessage() : e));
-            send(ex, 500, "application/json", err.toString().getBytes(StandardCharsets.UTF_8), false);
+            HttpIo.send(ex, 500, "application/json", err.toString().getBytes(StandardCharsets.UTF_8), false);
         } finally {
             ex.close();
         }
@@ -391,22 +434,22 @@ public final class PanelHttpServer {
      */
     private void handleRegister(HttpExchange ex) throws IOException {
         if (!ex.getRemoteAddress().getAddress().isLoopbackAddress()) {
-            send(ex, 403, "application/json",
+            HttpIo.send(ex, 403, "application/json",
                     "{\"error\":\"仅接受本机注册\"}".getBytes(StandardCharsets.UTF_8), false);
             return;
         }
         if (!this.isHost) {
             // 自己也是 PEER,没资格收编;对方会继续尝试抢端口
-            send(ex, 409, "application/json",
+            HttpIo.send(ex, 409, "application/json",
                     "{\"error\":\"本节点不是 HOST\"}".getBytes(StandardCharsets.UTF_8), false);
             return;
         }
-        JsonObject body = readJsonBody(ex);
+        JsonObject body = HttpIo.readJsonBody(ex);
         String id = body.get("id").getAsString();
         int port = body.get("port").getAsInt();
         String peerToken = body.has("token") ? body.get("token").getAsString() : this.config.token;
         if (id.equals(this.selfId)) {
-            send(ex, 409, "application/json",
+            HttpIo.send(ex, 409, "application/json",
                     "{\"error\":\"serverName 与 HOST 重名,请改一个\"}".getBytes(StandardCharsets.UTF_8), false);
             return;
         }
@@ -417,7 +460,7 @@ public final class PanelHttpServer {
         JsonObject out = new JsonObject();
         out.addProperty("ok", true);
         out.addProperty("token", this.config.token);
-        send(ex, 200, "application/json", out.toString().getBytes(StandardCharsets.UTF_8), false);
+        HttpIo.send(ex, 200, "application/json", out.toString().getBytes(StandardCharsets.UTF_8), false);
     }
 
     /**
@@ -426,10 +469,10 @@ public final class PanelHttpServer {
      * PEER 收到(来自 HOST 的转发)只改自己。各自立即回写自己的 config 文件。
      */
     private void handleSetToken(HttpExchange ex) throws IOException {
-        JsonObject body = readJsonBody(ex);
+        JsonObject body = HttpIo.readJsonBody(ex);
         String next = body.has("token") ? body.get("token").getAsString().trim() : "";
         if (next.isEmpty() || next.length() > 64 || !next.matches("[A-Za-z0-9._~-]+")) {
-            send(ex, 400, "application/json",
+            HttpIo.send(ex, 400, "application/json",
                     "{\"error\":\"token 只能用字母、数字和 . - _ ~,长度 1~64\"}".getBytes(StandardCharsets.UTF_8), false);
             return;
         }
@@ -459,7 +502,7 @@ public final class PanelHttpServer {
         out.addProperty("ok", true);
         out.addProperty("token", next);
         if (!failed.isEmpty()) out.add("failed", failed);
-        send(ex, 200, "application/json", out.toString().getBytes(StandardCharsets.UTF_8), false);
+        HttpIo.send(ex, 200, "application/json", out.toString().getBytes(StandardCharsets.UTF_8), false);
     }
 
     /** HOST → PEER 转发新 token,用改之前的旧 token 鉴权 */
@@ -528,7 +571,7 @@ public final class PanelHttpServer {
     private void proxy(HttpExchange ex, String target) throws IOException {
         Peer peer = this.peers.get(target);
         if (peer == null) {
-            send(ex, 404, "application/json",
+            HttpIo.send(ex, 404, "application/json",
                     "{\"error\":\"服务器不在线\"}".getBytes(StandardCharsets.UTF_8), false);
             return;
         }
@@ -552,12 +595,12 @@ public final class PanelHttpServer {
             InputStream in = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
             byte[] body = in != null ? in.readAllBytes() : new byte[0];
             String type = conn.getContentType();
-            send(ex, code, type != null ? type : "application/json", body, true);
+            HttpIo.send(ex, code, type != null ? type : "application/json", body, true);
         } catch (Exception e) {
             SablePanel.LOGGER.warn("sablepanel: proxy to {} failed", target, e);
             JsonObject err = new JsonObject();
             err.addProperty("error", "转发到 " + target + " 失败:" + e.getMessage());
-            send(ex, 502, "application/json", err.toString().getBytes(StandardCharsets.UTF_8), false);
+            HttpIo.send(ex, 502, "application/json", err.toString().getBytes(StandardCharsets.UTF_8), false);
         }
     }
 
@@ -593,7 +636,7 @@ public final class PanelHttpServer {
                 }
             }
             if (tag == null) {
-                send(ex, 404, "application/json", "{\"error\":\"条目读取失败(该体可能刚被移动或删除)\"}"
+                HttpIo.send(ex, 404, "application/json", "{\"error\":\"条目读取失败(该体可能刚被移动或删除)\"}"
                         .getBytes(StandardCharsets.UTF_8), false);
                 return;
             }
@@ -610,7 +653,7 @@ public final class PanelHttpServer {
                 }
             }
         }
-        send(ex, 200, "application/json", cached, true);
+        HttpIo.send(ex, 200, "application/json", cached, true);
     }
 
     private static UUID safeUuid(CompoundTag tag) {
@@ -641,63 +684,13 @@ public final class PanelHttpServer {
     }
 
     private boolean authed(HttpExchange ex) {
-        String t = query(ex.getRequestURI()).get("token");
+        String t = HttpIo.query(ex.getRequestURI()).get("token");
         if (t == null) t = ex.getRequestHeaders().getFirst("X-Token");
         return this.config.token.equals(t);
     }
 
-    private static void requirePost(HttpExchange ex) {
-        if (!ex.getRequestMethod().equalsIgnoreCase("POST")) {
-            throw new IllegalArgumentException("需要 POST");
-        }
-    }
 
-    private static JsonObject readJsonBody(HttpExchange ex) throws IOException {
-        return JsonParser.parseString(
-                new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)).getAsJsonObject();
-    }
 
-    private static Map<String, String> query(URI uri) {
-        Map<String, String> map = new HashMap<>();
-        String q = uri.getRawQuery();
-        if (q == null) return map;
-        for (String kv : q.split("&")) {
-            int i = kv.indexOf('=');
-            if (i > 0) {
-                map.put(java.net.URLDecoder.decode(kv.substring(0, i), StandardCharsets.UTF_8),
-                        java.net.URLDecoder.decode(kv.substring(i + 1), StandardCharsets.UTF_8));
-            }
-        }
-        return map;
-    }
 
-    private void sendResource(HttpExchange ex, String res, String type, boolean cacheable) throws IOException {
-        try (InputStream in = PanelHttpServer.class.getResourceAsStream(res)) {
-            if (in == null) {
-                send(ex, 404, "text/plain", "resource missing".getBytes(StandardCharsets.UTF_8), false);
-                return;
-            }
-            if (cacheable) {
-                ex.getResponseHeaders().set("Cache-Control", "public, max-age=86400");
-            }
-            send(ex, 200, type, in.readAllBytes(), true);
-        }
-    }
 
-    private static void send(HttpExchange ex, int code, String type, byte[] body, boolean tryGzip) throws IOException {
-        ex.getResponseHeaders().set("Content-Type", type);
-        String ae = ex.getRequestHeaders().getFirst("Accept-Encoding");
-        if (tryGzip && ae != null && ae.contains("gzip") && body.length > 1024) {
-            ex.getResponseHeaders().set("Content-Encoding", "gzip");
-            var buf = new java.io.ByteArrayOutputStream();
-            try (GZIPOutputStream gz = new GZIPOutputStream(buf)) {
-                gz.write(body);
-            }
-            body = buf.toByteArray();
-        }
-        ex.sendResponseHeaders(code, body.length);
-        try (OutputStream os = ex.getResponseBody()) {
-            os.write(body);
-        }
-    }
 }
