@@ -83,7 +83,7 @@ function cmpGroups(a, b){
 /* ===================== 页签 ===================== */
 const TABS = [
   {k:'all',    label:'tabAll',     test:()=>true},
-  {k:'fav',    label:'tabFav',     test:g=>g.bodies.some(b=>FAV.has(b.uuid))},
+  {k:'fav',    label:'tabFav',     test:g=>FAV.has(g.gid)},
   {k:'named',  label:'tabNamed',   test:g=>!!g.name},
   {k:'unnamed',label:'tabUnnamed', test:g=>!g.name},
   {k:'rec',    label:'tabRec',     test:g=>!!g.rec},
@@ -108,11 +108,12 @@ let lastVisibleGroups = [];
 /* 目的坐标输入框已预填过的体:同一个体的周期刷新不再覆盖用户输入 */
 let tpFilledFor = null;
 
-function toggleFav(uuid){
-  FAV.has(uuid) ? FAV.delete(uuid) : FAV.add(uuid);
+/* 收藏以依赖组为单位(按组根 uuid 存),避免组内个别成员收藏造成状态歧义 */
+function toggleFav(gid){
+  FAV.has(gid) ? FAV.delete(gid) : FAV.add(gid);
   saveFav();
   renderTabs(); render();
-  if (SEL && SEL.uuid === uuid) renderDetail();
+  if (SELG && SELG.gid === gid) renderDetail();
 }
 
 function cloneSetOf(body){ return body && body.clone_set !== undefined ? CLONE_SETS.get(Number(body.clone_set)) : null; }
@@ -144,8 +145,7 @@ function render() {
   for (const g of groups) {
     if (!inTab(g)) continue;
     if (groupOnly && g.members < 2) continue;
-    // 收藏页签只看收藏的成员本身;其他页签正常显示整组
-    const vis = g.bodies.filter(b => bodyPass(b, g) && (TAB !== 'fav' || FAV.has(b.uuid)));
+    const vis = g.bodies.filter(b => bodyPass(b, g));
     if (!vis.length) continue;
     matchedGroups++;
     lastVisibleGroups.push(g);
@@ -155,7 +155,6 @@ function render() {
     div.className = 'group' + (g.orphans ? ' is-orphan' : g.rec ? ' is-rec' : '');
     div.dataset.gid = g.gid;
     const tags = [];
-    if (g.bodies.some(b=>FAV.has(b.uuid))) tags.push(`<span class="tag warn">★</span>`);
     const pausedN = g.bodies.filter(b=>PAUSED.has(b.uuid)).length;
     if (pausedN) tags.push(`<span class="tag warn">⏸${pausedN>1?'×'+pausedN:''}</span>`);
     if (g.rec) tags.push(`<span class="tag warn">${t('recTag')}</span>`);
@@ -172,12 +171,14 @@ function render() {
     div.innerHTML = `<div class="ghead">
         <input type="checkbox" class="gsel">
         <span class="caret">▶</span>
+        <span class="favStar ${FAV.has(g.gid)?'on':''}" title="${t('favTip')}">${FAV.has(g.gid)?'★':'☆'}</span>
         <span class="gname">${esc(g.name) || '<span class="muted">'+t('unnamed')+'</span>'}</span>
         ${tags.join('')}
       </div><div class="members"></div>`;
     const mem = div.querySelector('.members');
     const caret = div.querySelector('.caret');
     div.querySelector('.gsel').onclick = e => { e.stopPropagation(); toggleSelGroup(g.bodies); };
+    div.querySelector('.favStar').onclick = e => { e.stopPropagation(); toggleFav(g.gid); };
     for (const b of vis) {
       const m = document.createElement('div'); m.className = 'member'; m.dataset.uuid = b.uuid;
       if (SEL && SEL.uuid === b.uuid) m.classList.add('sel');
@@ -189,7 +190,6 @@ function render() {
       if (b.runtime && b.runtime.cost_ms !== undefined)
         extra.push(`<span class="tag acc mono">${b.runtime.cost_ms.toFixed(2)} ms/t</span>`);
       m.innerHTML = `<input type="checkbox" class="msel">
-        <span class="favStar ${FAV.has(b.uuid)?'on':''}" title="${t('favTip')}">${FAV.has(b.uuid)?'★':'☆'}</span>
         <i class="dot" style="background:${STATE_DOT[b.state]}" title="${stateLabel(b.state)}"></i>
         <span class="mname">${esc(b.name) || '<span class="muted mono">'+b.uuid.slice(0,8)+'</span>'}</span>
         ${extra.join('')}
@@ -197,7 +197,6 @@ function render() {
         <span class="num">${b.pos.map(v=>v|0).join(', ')}</span>`;
       m.onclick = () => select(b, g);
       m.querySelector('.msel').onclick = e => { e.stopPropagation(); toggleSel(b.uuid); };
-      m.querySelector('.favStar').onclick = e => { e.stopPropagation(); toggleFav(b.uuid); };
       mem.appendChild(m);
     }
     div.querySelector('.ghead').onclick = () => {
@@ -339,7 +338,7 @@ function renderDetail(){
   const live = rt.x !== undefined;
   const pos = live ? [rt.x, rt.y, rt.z] : b.pos;
   const rows = [];
-  const favBtn = `<button class="copyBtn favStar ${FAV.has(b.uuid)?'on':''}" onclick="toggleFav('${b.uuid}')">${FAV.has(b.uuid)?'★':'☆'}</button>`;
+  const favBtn = `<button class="copyBtn favStar ${FAV.has(g.gid)?'on':''}" title="${t('favTip')}" onclick="toggleFav('${g.gid}')">${FAV.has(g.gid)?'★':'☆'}</button>`;
   rows.push([t('name'), (esc(b.name) || `<span class="muted">${t('unnamed')}</span>`) + favBtn]);
   rows.push(['UUID', `<span class="val" style="font-size:10.5px">${b.uuid}</span><button class="copyBtn" onclick="copyText('${b.uuid}')">⧉</button>`]);
   rows.push([t('state'), `<i class="dot" style="background:${STATE_DOT[b.state]};margin-right:6px"></i>${stateLabel(b.state)}`

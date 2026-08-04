@@ -27,8 +27,8 @@ let R_SELECTED = new Set(), RECYCLE_BY_ID = new Map();
 /* 折叠记忆:用户显式展开/折叠过的组(gid → bool),优先于默认展开策略;切服清空 */
 let EXPAND_STATE = new Map();
 
-/* 收藏:按体 uuid 持久化到 localStorage,按当前查看的服务器隔离(不自动清理,
-   holding 期体会短暂从索引消失,自动清理会误删收藏) */
+/* 收藏:以依赖组为单位(存组根 uuid=gid),持久化 localStorage,按当前查看的服务器隔离
+   (不自动清理:holding 期组会短暂从索引消失,自动清理会误删收藏) */
 let FAV = new Set();
 function favKey(){ return 'spFav:' + (CURSRV || 'self'); }
 function loadFav(){
