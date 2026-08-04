@@ -1,5 +1,6 @@
-package com.klnon.sablepanel.panel;
+package com.klnon.sablepanel.panel.data;
 
+import com.klnon.sablepanel.panel.PanelConfig;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.EventLog;
@@ -57,10 +58,23 @@ public final class BodyIndex {
                 for (ServerSubLevel sl : c.getAllSubLevels()) {
                     JsonObject o = new JsonObject();
                     o.addProperty("dim", dim);
+                    // 面板坐标统一为包围盒底面中心(与传送目标语义一致);包围盒异常时退回 pose 原点
                     var p = sl.logicalPose().position();
-                    o.addProperty("x", r1(p.x()));
-                    o.addProperty("y", r1(p.y()));
-                    o.addProperty("z", r1(p.z()));
+                    double ax = p.x(), ay = p.y(), az = p.z();
+                    try {
+                        var bb = sl.boundingBox();
+                        double cx = (bb.minX() + bb.maxX()) / 2, cy = bb.minY(), cz = (bb.minZ() + bb.maxZ()) / 2;
+                        if (Double.isFinite(cx) && Double.isFinite(cy) && Double.isFinite(cz)
+                                && bb.maxX() >= bb.minX()) {
+                            ax = cx;
+                            ay = cy;
+                            az = cz;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    o.addProperty("x", r1(ax));
+                    o.addProperty("y", r1(ay));
+                    o.addProperty("z", r1(az));
                     o.addProperty("lin_vel", r1(sl.latestLinearVelocity.length()));
                     try {
                         o.addProperty("mass", r1(sl.getMassTracker().getMass()));
@@ -69,6 +83,9 @@ public final class BodyIndex {
                     try {
                         o.addProperty("players", sl.getTrackingPlayers().size());
                     } catch (Throwable ignored) {
+                    }
+                    if (com.klnon.sablepanel.panel.service.PauseService.isPaused(sl.getUniqueId())) {
+                        o.addProperty("paused", true);
                     }
                     map.put(sl.getUniqueId(), o);
                     n++;
@@ -416,6 +433,10 @@ public final class BodyIndex {
         out.addProperty("scan_time", this.diskScanTime);
         out.addProperty("total_bodies", byUuid.size() + freshArr.size());
         out.addProperty("total_entries", disk.size());
+        // 暂停集合(含未加载体的暂停意图):前端以此为单一事实源渲染 ⏸ 标记
+        JsonArray pausedArr = new JsonArray();
+        for (UUID u : com.klnon.sablepanel.panel.service.PauseService.snapshot()) pausedArr.add(u.toString());
+        out.add("paused", pausedArr);
         JsonObject policy = new JsonObject();
         policy.addProperty("blocks", this.config.protectBlocks);
         policy.addProperty("types", this.config.protectBlockTypes);
