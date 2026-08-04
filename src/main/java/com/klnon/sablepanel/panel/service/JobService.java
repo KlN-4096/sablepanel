@@ -246,21 +246,28 @@ public final class JobService implements AutoCloseable {
 
     // ---------- 读取 ----------
 
-    /** 给 /api/bodies 用:正在排队/执行的作业,按体索引 */
+    /**
+     * 给 /api/bodies 用:正在排队/执行的作业,<b>每个作业一条</b>,受影响的体放在 targets 里。
+     * <p>
+     * 早先是按体展开的,于是"回收站恢复""重扫磁盘"这类没有目标体的作业一条都不输出 ——
+     * 界面上既看不到进度、也判不出它结束了(前端靠"从 busy 消失"认完成,它压根没进去过)。
+     * 体已经被删掉时本来就没有行可以挂徽章,指示器不能依赖体行存在。
+     */
     public JsonArray busyView() {
         JsonArray arr = new JsonArray();
         synchronized (this.lock) {
             for (Job job : this.active.values()) {
-                for (UUID target : job.targets) {
-                    JsonObject o = new JsonObject();
-                    o.addProperty("uuid", target.toString());
-                    o.addProperty("seq", job.seq);
-                    o.addProperty("op", job.op);
-                    o.addProperty("state", job.state.name().toLowerCase());
-                    o.addProperty("phase", job.display());
-                    o.addProperty("since", job.startedAt > 0 ? job.startedAt : job.queuedAt);
-                    arr.add(o);
-                }
+                JsonObject o = new JsonObject();
+                o.addProperty("seq", job.seq);
+                o.addProperty("op", job.op);
+                o.addProperty("state", job.state.name().toLowerCase());
+                o.addProperty("phase", job.display());
+                o.addProperty("since", job.startedAt > 0 ? job.startedAt : job.queuedAt);
+                if (!job.targetName.isEmpty()) o.addProperty("name", job.targetName);
+                JsonArray targets = new JsonArray();
+                for (UUID target : job.targets) targets.add(target.toString());
+                o.add("targets", targets);
+                arr.add(o);
             }
         }
         return arr;
@@ -395,9 +402,18 @@ public final class JobService implements AutoCloseable {
                 text.append(key).append('=').append(result.get(key).getAsString());
             }
         }
+        // 删除/恢复返回的是 ok(成功数)+total 这一对,与上面那批单值键不同,单独处理
+        if (text.length() == 0 && result.has("total") && result.has("ok")
+                && result.get("ok").isJsonPrimitive() && result.getAsJsonPrimitive("ok").isNumber()) {
+            text.append(result.get("ok").getAsString()).append('/').append(result.get("total").getAsString());
+        }
         if (result.has("failed") && result.get("failed").isJsonArray()) {
             int failed = result.getAsJsonArray("failed").size();
             if (failed > 0) text.append(text.length() > 0 ? " " : "").append("failed=").append(failed);
+        }
+        if (result.has("warnings") && result.get("warnings").isJsonArray()) {
+            int warns = result.getAsJsonArray("warnings").size();
+            if (warns > 0) text.append(text.length() > 0 ? " " : "").append("warnings=").append(warns);
         }
         if (result.has("error") && result.get("error").isJsonPrimitive()) {
             text.append(text.length() > 0 ? " " : "").append(result.get("error").getAsString());

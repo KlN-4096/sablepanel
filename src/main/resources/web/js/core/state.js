@@ -24,8 +24,10 @@ let PAUSED = new Set();
    含未加载体的意图。命中的组在列表里变色并恒置顶 */
 let FORCED = new Set();
 
-/* 处理中的作业:uuid → {seq,op,state,phase,since},来自 /api/bodies 的 busy。
-   命中的行显示转圈+阶段+已耗时,操作按钮禁用 */
+/* 正在排队/执行的作业(每个作业一条,含 targets),来自 /api/bodies 的 busy */
+let ACTIVE_JOBS = [];
+/* 由 ACTIVE_JOBS 按 targets 展开:uuid → 作业。命中的行显示转圈+阶段+已耗时,按钮禁用。
+   注意"回收站恢复""重扫磁盘"没有目标体(体已被删,列表里没有行),只出现在顶栏指示器里 */
 let BUSY = new Map();
 /* 本页提交过、还没弹过结果的作业:seq → 操作名。从 BUSY 消失时去 /api/jobs 取终态 */
 let JOB_WATCH = new Map();

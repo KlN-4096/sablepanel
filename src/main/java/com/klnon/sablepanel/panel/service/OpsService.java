@@ -936,7 +936,12 @@ public final class OpsService {
         JsonArray results = new JsonArray();
         List<String> warnings = new ArrayList<>();
         int restored = 0;
-        for (String groupId : new LinkedHashSet<>(groupIds)) {
+        Set<String> ids = new LinkedHashSet<>(groupIds);
+        int index = 0;
+        for (String groupId : ids) {
+            // 恢复的体已经从列表里消失,行徽章挂不上,进度只能靠顶栏指示器 —— 阶段文本是它唯一的内容
+            JobService.phase("恢复依赖组");
+            JobService.detail(++index + "/" + ids.size());
             JsonObject result = new JsonObject();
             result.addProperty("id", groupId);
             try {

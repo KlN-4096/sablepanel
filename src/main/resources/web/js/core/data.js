@@ -21,8 +21,13 @@ async function loadBodies() {
     CLONE_SETS = new Map((DATA.clone_sets || []).map(set=>[Number(set.id), set]));
     PAUSED = new Set(DATA.paused || []);
     FORCED = new Set(DATA.forced || []);
-    BUSY = new Map((DATA.busy || []).map(job => [job.uuid, job]));
+    // 每个作业一条,按 targets 展开成"体 → 作业"给行徽章用;
+    // 没有目标体的作业(回收站恢复/重扫磁盘)只进 ACTIVE_JOBS,靠顶栏指示器显示
+    ACTIVE_JOBS = DATA.busy || [];
+    BUSY = new Map();
+    for (const job of ACTIVE_JOBS) for (const u of (job.targets || [])) BUSY.set(u, job);
     REACH = DATA.reach || REACH;
+    renderJobPill();
     syncBusyPolling();
     reapFinishedJobs();
     DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));
@@ -45,14 +50,27 @@ async function loadBodies() {
    取代从前散落在各操作里的 setTimeout(loadBodies, 1200/1500/4000) —— 那些是对
    "多久能好"的猜测,猜短了看不到结果,猜长了白等,巨型体两头都不对 */
 function syncBusyPolling(){
-  const active = BUSY.size > 0;
+  const active = ACTIVE_JOBS.length > 0;
   if (active && !busyTimer) busyTimer = setInterval(loadBodies, 2000);
   else if (!active && busyTimer) { clearInterval(busyTimer); busyTimer = null; }
 }
-/* 作业结束回报:本页提交过的作业一旦从 busy 里消失,去日志取终态弹一次 toast */
+/* 顶栏"处理中"指示:唯一能显示无目标体作业(回收站恢复/重扫磁盘)进度的地方 */
+function renderJobPill(){
+  const host = document.getElementById('jobPill');
+  if (!host) return;
+  if (!ACTIVE_JOBS.length) { host.style.display = 'none'; return; }
+  const job = ACTIVE_JOBS[0];
+  const secs = Math.max(0, Math.round((Date.now() - job.since) / 1000));
+  const label = job.state === 'queued' ? t('jobQueued') : (job.phase || '');
+  host.style.display = 'flex';
+  host.innerHTML = `<i class="spin"></i><b>${esc(job.op)}</b>${job.name ? ' · ' + esc(job.name) : ''}`
+    + `<span class="muted">${esc(label)} ${secs}s</span>`
+    + (ACTIVE_JOBS.length > 1 ? `<span class="tag">+${ACTIVE_JOBS.length - 1}</span>` : '');
+}
+/* 作业结束回报:本页提交过的作业一旦从活动列表消失,去日志取终态弹一次 toast */
 async function reapFinishedJobs(){
   if (!JOB_WATCH.size) return;
-  const running = new Set([...BUSY.values()].map(job => job.seq));
+  const running = new Set(ACTIVE_JOBS.map(job => job.seq));
   const finished = [...JOB_WATCH.keys()].filter(seq => !running.has(seq));
   if (!finished.length) return;
   let log;
