@@ -16,14 +16,26 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public final class PanelWebGateway implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(PanelWebGateway.class);
+    private static final int HTTP_THREADS = 4;
+    private static final int HTTP_QUEUE_CAPACITY = 64;
+    private static final int RECONNECT_SECONDS = 2;
+    private static final int SHUTDOWN_TIMEOUT_SECONDS = 2;
+    private static final long RECONNECT_LOG_INTERVAL_MS = 60_000L;
+    private static final AtomicLong HTTP_THREAD_IDS = new AtomicLong();
     private final boolean clientMode;
     private final String bind;
     private final int port;
@@ -32,10 +44,14 @@ public final class PanelWebGateway implements AutoCloseable {
     private final String fixedFingerprint;
     private volatile HttpServer http;
     private volatile ExecutorService httpPool;
+    private volatile ScheduledExecutorService reconnectExecutor;
     private volatile PanelTcpClient upstream;
     private volatile PanelEndpoint endpoint;
     private volatile PanelEndpoint pendingEndpoint;
     private volatile String pendingFingerprint;
+    private volatile boolean closed = true;
+    private volatile long lastReconnectLogMs;
+    private final AtomicBoolean reconnectPending = new AtomicBoolean();
 
     private PanelWebGateway(boolean clientMode, String bind, int port, ClientPanelConfig clientConfig,
                             PanelEndpoint fixedEndpoint, String fixedFingerprint) {
@@ -57,18 +73,39 @@ public final class PanelWebGateway implements AutoCloseable {
     }
 
     public void start() throws Exception {
-        this.httpPool = Executors.newFixedThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "sablepanel-web");
-            thread.setDaemon(true);
-            return thread;
-        });
-        if (!this.clientMode) connect(this.fixedEndpoint, this.fixedFingerprint);
-        this.http = HttpServer.create(new InetSocketAddress(this.bind, this.port), 0);
-        this.http.setExecutor(this.httpPool);
-        this.http.createContext("/", this::handle);
-        this.http.start();
-        LOGGER.info("sablepanel: {} web gateway at http://{}:{}/",
-                this.clientMode ? "client" : "server", this.bind, this.port);
+        synchronized (this) {
+            if (!this.closed || this.http != null) throw new IllegalStateException("网页网关已启动");
+            this.closed = false;
+            this.reconnectPending.set(false);
+            this.httpPool = new ThreadPoolExecutor(
+                    HTTP_THREADS, HTTP_THREADS, 0L, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<>(HTTP_QUEUE_CAPACITY), runnable -> {
+                        Thread thread = new Thread(runnable,
+                                "sablepanel-web-" + HTTP_THREAD_IDS.incrementAndGet());
+                        thread.setDaemon(true);
+                        return thread;
+                    }, new ThreadPoolExecutor.CallerRunsPolicy());
+        }
+        try {
+            if (!this.clientMode) {
+                try {
+                    connect(this.fixedEndpoint, this.fixedFingerprint);
+                } catch (Exception error) {
+                    logReconnectFailure(error);
+                }
+            }
+            HttpServer created = HttpServer.create(new InetSocketAddress(this.bind, this.port), 0);
+            created.setExecutor(this.httpPool);
+            created.createContext("/", this::handle);
+            created.start();
+            this.http = created;
+            if (!this.clientMode) startReconnectLoop();
+            LOGGER.info("sablepanel: {} web gateway at http://{}:{}/",
+                    this.clientMode ? "client" : "server", this.bind, this.port);
+        } catch (Exception error) {
+            close();
+            throw error;
+        }
     }
 
     private void handle(HttpExchange exchange) throws IOException {
@@ -119,6 +156,7 @@ public final class PanelWebGateway implements AutoCloseable {
     private void proxyApi(HttpExchange exchange) throws Exception {
         PanelTcpClient client = this.upstream;
         if (client == null || !client.isActive()) {
+            requestReconnect();
             HttpIo.send(exchange, 503, "application/json", errorJson("尚未连接服务器"), false);
             return;
         }
@@ -197,8 +235,18 @@ public final class PanelWebGateway implements AutoCloseable {
         if (fingerprint == null || fingerprint.isBlank()) {
             throw connectForFingerprint(endpoint);
         }
-        this.upstream = PanelTcpClient.connectManager(endpoint, fingerprint);
-        this.endpoint = endpoint;
+        PanelTcpClient connected = PanelTcpClient.connectManager(endpoint, fingerprint);
+        PanelTcpClient previous;
+        synchronized (this) {
+            if (this.closed) {
+                connected.close();
+                throw new IllegalStateException("网页网关已关闭");
+            }
+            previous = this.upstream;
+            this.upstream = connected;
+            this.endpoint = endpoint;
+        }
+        if (previous != null && previous != connected) previous.close();
     }
 
     private CertificatePinException connectForFingerprint(PanelEndpoint endpoint) throws Exception {
@@ -211,19 +259,123 @@ public final class PanelWebGateway implements AutoCloseable {
     }
 
     @Override
-    public synchronized void close() {
-        if (this.http != null) this.http.stop(0);
-        this.http = null;
-        closeUpstream();
-        if (this.httpPool != null) this.httpPool.shutdownNow();
-        this.httpPool = null;
+    public void close() {
+        HttpServer currentHttp;
+        PanelTcpClient currentUpstream;
+        ExecutorService currentHttpPool;
+        ScheduledExecutorService currentReconnect;
+        synchronized (this) {
+            if (this.closed && this.http == null && this.httpPool == null && this.reconnectExecutor == null) return;
+            this.closed = true;
+            currentHttp = this.http;
+            currentUpstream = this.upstream;
+            currentHttpPool = this.httpPool;
+            currentReconnect = this.reconnectExecutor;
+            this.http = null;
+            this.upstream = null;
+            this.endpoint = null;
+            this.httpPool = null;
+            this.reconnectExecutor = null;
+        }
+        if (currentHttp != null) currentHttp.stop(0);
+        shutdownExecutor(currentReconnect);
+        if (currentUpstream != null) currentUpstream.close();
+        shutdownExecutor(currentHttpPool);
     }
 
     private void closeUpstream() {
-        PanelTcpClient current = this.upstream;
-        this.upstream = null;
-        this.endpoint = null;
+        PanelTcpClient current;
+        synchronized (this) {
+            current = this.upstream;
+            this.upstream = null;
+            this.endpoint = null;
+        }
         if (current != null) current.close();
+    }
+
+    private void startReconnectLoop() {
+        ScheduledExecutorService reconnect = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "sablepanel-web-reconnect");
+            thread.setDaemon(true);
+            return thread;
+        });
+        synchronized (this) {
+            if (this.closed) {
+                reconnect.shutdownNow();
+                return;
+            }
+            this.reconnectExecutor = reconnect;
+        }
+        reconnect.scheduleWithFixedDelay(this::ensureServerUpstream,
+                RECONNECT_SECONDS, RECONNECT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    private void requestReconnect() {
+        if (this.clientMode || this.closed) return;
+        ScheduledExecutorService reconnect = this.reconnectExecutor;
+        if (reconnect == null || reconnect.isShutdown()) return;
+        if (!this.reconnectPending.compareAndSet(false, true)) return;
+        try {
+            reconnect.execute(() -> {
+                try {
+                    ensureServerUpstream();
+                } finally {
+                    this.reconnectPending.set(false);
+                }
+            });
+        } catch (RejectedExecutionException rejected) {
+            this.reconnectPending.set(false);
+        }
+    }
+
+    private void ensureServerUpstream() {
+        if (this.clientMode || this.closed) return;
+        PanelTcpClient current = this.upstream;
+        if (current != null && current.isActive()) return;
+
+        PanelTcpClient connected;
+        try {
+            connected = PanelTcpClient.connectManager(this.fixedEndpoint, this.fixedFingerprint);
+        } catch (Exception error) {
+            logReconnectFailure(error);
+            return;
+        }
+
+        PanelTcpClient stale = null;
+        boolean keep;
+        synchronized (this) {
+            keep = !this.closed && !this.clientMode
+                    && (this.upstream == null || !this.upstream.isActive());
+            if (keep) {
+                stale = this.upstream;
+                this.upstream = connected;
+                this.endpoint = this.fixedEndpoint;
+                this.lastReconnectLogMs = 0;
+            }
+        }
+        if (!keep) {
+            connected.close();
+            return;
+        }
+        if (stale != null) stale.close();
+        LOGGER.info("sablepanel: server web gateway reconnected to {}", this.fixedEndpoint);
+    }
+
+    private void logReconnectFailure(Throwable error) {
+        long now = System.currentTimeMillis();
+        if (now - this.lastReconnectLogMs < RECONNECT_LOG_INTERVAL_MS) return;
+        this.lastReconnectLogMs = now;
+        LOGGER.warn("sablepanel: server web gateway upstream unavailable: {}", messageOf(error));
+    }
+
+    private static void shutdownExecutor(ExecutorService executor) {
+        if (executor == null) return;
+        executor.shutdownNow();
+        try {
+            executor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private boolean allowLocalControlRequest(HttpExchange exchange) throws IOException {

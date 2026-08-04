@@ -76,11 +76,13 @@ final class HttpIo {
         String ae = ex.getRequestHeaders().getFirst("Accept-Encoding");
         if (tryGzip && ae != null && ae.contains("gzip") && body.length > 1024) {
             ex.getResponseHeaders().set("Content-Encoding", "gzip");
-            var buf = new java.io.ByteArrayOutputStream();
-            try (GZIPOutputStream gz = new GZIPOutputStream(buf)) {
+            ex.getResponseHeaders().set("Vary", "Accept-Encoding");
+            ex.sendResponseHeaders(code, 0);
+            try (OutputStream output = ex.getResponseBody();
+                 GZIPOutputStream gz = new GZIPOutputStream(output)) {
                 gz.write(body);
             }
-            body = buf.toByteArray();
+            return;
         }
         ex.sendResponseHeaders(code, body.length);
         try (OutputStream os = ex.getResponseBody()) {
