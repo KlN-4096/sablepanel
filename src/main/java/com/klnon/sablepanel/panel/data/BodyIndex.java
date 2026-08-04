@@ -12,11 +12,13 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
@@ -40,9 +42,40 @@ public final class BodyIndex {
     /** 推荐删除的保护阈值,来自面板配置(服主可调) */
     private volatile PanelConfig config = new PanelConfig();
 
-    public void updateDisk(List<DiskScanner.DiskEntry> entries) {
+    /** 替换扫描快照；返回可见内容是否变化，避免无变化扫描触发 SSE 全量重拉。 */
+    public boolean updateDisk(List<DiskScanner.DiskEntry> entries) {
+        boolean changed = this.diskScanTime == 0 || !sameDiskEntries(this.diskSnapshot, entries);
         this.diskSnapshot = entries;
         this.diskScanTime = System.currentTimeMillis();
+        return changed;
+    }
+
+    private static boolean sameDiskEntries(List<DiskScanner.DiskEntry> previous,
+                                           List<DiskScanner.DiskEntry> current) {
+        if (previous.size() != current.size()) return false;
+        Map<DiskScanner.EntryKey, DiskScanner.DiskEntry> byKey = new HashMap<>();
+        for (DiskScanner.DiskEntry entry : previous) byKey.put(entry.key(), entry);
+        for (DiskScanner.DiskEntry entry : current) {
+            if (!sameDiskEntry(byKey.remove(entry.key()), entry)) return false;
+        }
+        return byKey.isEmpty();
+    }
+
+    private static boolean sameDiskEntry(DiskScanner.DiskEntry left, DiskScanner.DiskEntry right) {
+        return left != null
+                && Objects.equals(left.uuid(), right.uuid())
+                && Objects.equals(left.name(), right.name())
+                && Arrays.equals(left.pos(), right.pos())
+                && Arrays.equals(left.size(), right.size())
+                && left.blocks() == right.blocks()
+                && left.deps().equals(right.deps())
+                && left.reachable() == right.reachable()
+                && left.plotX() == right.plotX()
+                && left.plotZ() == right.plotZ()
+                && left.blockIds().equals(right.blockIds())
+                && left.userData() == right.userData()
+                && left.blockEntities() == right.blockEntities()
+                && left.contents() == right.contents();
     }
 
     /**

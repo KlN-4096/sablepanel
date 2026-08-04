@@ -22,11 +22,13 @@ public final class PanelObserver implements SubLevelObserver {
     private static final int STORM_THRESHOLD = 30;
 
     private final String dim;
+    private final Runnable bodyChanged;
     private final ArrayDeque<Long> splitTimes = new ArrayDeque<>();
     private long lastStormAlert;
 
-    public PanelObserver(String dim) {
+    public PanelObserver(String dim, Runnable bodyChanged) {
         this.dim = dim;
+        this.bodyChanged = bodyChanged;
     }
 
     @Override
@@ -46,6 +48,8 @@ public final class PanelObserver implements SubLevelObserver {
             EventLog.write(o);
         } catch (Throwable t) {
             SablePanel.LOGGER.warn("sablepanel: observer add failed", t);
+        } finally {
+            markBodyChanged();
         }
     }
 
@@ -78,6 +82,16 @@ public final class PanelObserver implements SubLevelObserver {
             EventLog.write(o);
         } catch (Throwable t) {
             SablePanel.LOGGER.warn("sablepanel: observer remove failed", t);
+        } finally {
+            markBodyChanged();
+        }
+    }
+
+    private void markBodyChanged() {
+        try {
+            this.bodyChanged.run();
+        } catch (Throwable t) {
+            SablePanel.LOGGER.warn("sablepanel: observer refresh signal failed", t);
         }
     }
 

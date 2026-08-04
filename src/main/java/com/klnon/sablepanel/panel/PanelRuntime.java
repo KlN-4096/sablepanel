@@ -26,19 +26,20 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class PanelRuntime implements AutoCloseable {
     private static final int RUNTIME_REFRESH_TICKS = 100;
     private static final int RUNTIME_REFRESH_IDLE_TICKS = 1200;
+    private static final int EVENT_REFRESH_TICKS = 5;
     private static final int EXECUTOR_SHUTDOWN_SECONDS = 3;
 
     private final BodyIndex bodyIndex = new BodyIndex();
     private final Object lifecycleLock = new Object();
     private final AtomicLong lifecycleGeneration = new AtomicLong();
     private final AtomicBoolean scanPending = new AtomicBoolean();
+    private final AtomicBoolean refreshRequested = new AtomicBoolean();
+    private final AtomicLong bodiesRevision = new AtomicLong();
     private volatile PanelClusterNode panelNode;
     private volatile PanelWebGateway panelWeb;
     private volatile JobService jobService;
     private volatile boolean stopping = true;
     private volatile boolean scanPauseLogged;
-    /** 作业结束后由 worker 线程置位,让下一 tick 立刻刷新运行时快照(见 onServerTick) */
-    private volatile boolean refreshRequested;
     private ScheduledExecutorService scanExecutor;
     private ScheduledFuture<?> heartbeatTask;
     private int ticksSinceRefresh;
@@ -50,6 +51,7 @@ public final class PanelRuntime implements AutoCloseable {
             generation = this.lifecycleGeneration.incrementAndGet();
             this.stopping = false;
             this.scanPending.set(false);
+            this.refreshRequested.set(true);
             BodyCostTracker.ENABLED = false;
         }
         ScheduledExecutorService createdExecutor = null;
@@ -89,7 +91,7 @@ public final class PanelRuntime implements AutoCloseable {
             };
             OpsService ops = new OpsService(server, this.bodyIndex, requestScan, config);
             StatsCollector.INSTANCE.start(config);
-            JobService jobs = new JobService(() -> this.refreshRequested = true);
+            JobService jobs = new JobService(this::requestRuntimeRefresh);
             this.jobService = jobs;
             SablePanel.LOGGER.info("sablepanel: operation workers <= {} ({} cores)",
                     jobs.maxWorkers(), Runtime.getRuntime().availableProcessors());
@@ -123,21 +125,30 @@ public final class PanelRuntime implements AutoCloseable {
         return this.panelNode != null;
     }
 
+    /** Sable/作业线程只置脏标记；真正读取容器统一延迟到服务器 Tick 末尾。 */
+    public void requestRuntimeRefresh() {
+        this.refreshRequested.set(true);
+    }
+
     public void onServerTick(MinecraftServer server, long durationNanos) {
         PanelClusterNode panel = this.panelNode;
         if (panel == null) return;
         if (durationNanos > 0) StatsCollector.INSTANCE.tick(durationNanos);
         this.ticksSinceRefresh++;
         int interval = panel.isActive() ? RUNTIME_REFRESH_TICKS : RUNTIME_REFRESH_IDLE_TICKS;
-        // 作业刚结束时插队刷新:否则前端要等最多 5 秒(空闲时 60 秒)才看得到状态变化,
-        // 这正是从前要在前端写死 setTimeout(loadBodies, 1200) 的原因
-        if (!this.refreshRequested && this.ticksSinceRefresh < interval) return;
-        this.refreshRequested = false;
+        boolean dirty = this.refreshRequested.get();
+        // 事件刷新最多每 5 tick 一次：正常变化约 250ms 内可见，碎片风暴不会每 tick 全量扫描。
+        int nextRefresh = dirty ? Math.min(EVENT_REFRESH_TICKS, interval) : interval;
+        if (this.ticksSinceRefresh < nextRefresh) return;
+        boolean requested = this.refreshRequested.getAndSet(false);
         try {
             this.bodyIndex.refreshRuntime(server, Math.max(1, this.ticksSinceRefresh));
         } catch (Throwable ignored) {
+            if (requested) this.refreshRequested.set(true);
+            return;
         }
         this.ticksSinceRefresh = 0;
+        if (requested) publishBodiesChanged(panel);
     }
 
     @Override
@@ -168,6 +179,7 @@ public final class PanelRuntime implements AutoCloseable {
         PauseService.reset();
         this.scanPauseLogged = false;
         this.scanPending.set(false);
+        this.refreshRequested.set(false);
         this.ticksSinceRefresh = 0;
     }
 
@@ -186,7 +198,9 @@ public final class PanelRuntime implements AutoCloseable {
                 }
                 this.scanPauseLogged = false;
                 Map<String, java.nio.file.Path> dimensions = DiskScanner.sublevelDirs(server);
-                this.bodyIndex.updateDisk(DiskScanner.scan(dimensions));
+                var entries = DiskScanner.scan(dimensions);
+                if (!isLifecycleCurrent(generation)) return;
+                if (this.bodyIndex.updateDisk(entries)) publishBodiesChanged(panel);
             } catch (Throwable error) {
                 SablePanel.LOGGER.warn("sablepanel: disk scan cycle failed", error);
             }
@@ -249,6 +263,15 @@ public final class PanelRuntime implements AutoCloseable {
         PauseService.reset();
         this.scanPauseLogged = false;
         this.scanPending.set(false);
+        this.refreshRequested.set(false);
+    }
+
+    private void publishBodiesChanged(PanelClusterNode panel) {
+        try {
+            panel.publishBodiesChanged(this.bodiesRevision.incrementAndGet());
+        } catch (Throwable error) {
+            SablePanel.LOGGER.warn("sablepanel: body change event publish failed", error);
+        }
     }
 
     private boolean isLifecycleCurrent(long generation) {

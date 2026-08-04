@@ -69,7 +69,7 @@ public class SablePanel {
                 return;
             }
             String dim = container.getLevel().dimension().location().toString();
-            container.addObserver(new PanelObserver(dim));
+            container.addObserver(new PanelObserver(dim, this.panelRuntime::requestRuntimeRefresh));
 
             JsonObject o = new JsonObject();
             o.addProperty("ev", "container_ready");
