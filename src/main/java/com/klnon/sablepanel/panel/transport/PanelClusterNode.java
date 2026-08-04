@@ -10,6 +10,7 @@ import com.klnon.sablepanel.panel.api.PanelResponse;
 import net.neoforged.fml.loading.FMLPaths;
 
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class PanelClusterNode implements AutoCloseable {
     public static final int HEARTBEAT_SECONDS = 15;
@@ -21,6 +22,7 @@ public final class PanelClusterNode implements AutoCloseable {
     private final Object tokenLock = new Object();
     private volatile PanelTcpServer host;
     private volatile PanelTcpClient peer;
+    private final AtomicLong bodiesRevision = new AtomicLong();
     private volatile boolean closed;
 
     public PanelClusterNode(PanelConfig config, PanelApiService api) throws Exception {
@@ -94,6 +96,19 @@ public final class PanelClusterNode implements AutoCloseable {
         return this.api.isActive();
     }
 
+    public void publishBodiesChanged(long revision) {
+        if (this.closed) return;
+        long latestRevision = this.bodiesRevision.accumulateAndGet(revision, Math::max);
+        PanelEvent event = new PanelEvent(this.api.selfId(), PanelEvent.BODIES, latestRevision);
+        PanelTcpServer currentHost = this.host;
+        if (currentHost != null && currentHost.isActive()) {
+            currentHost.publishEvent(event);
+            return;
+        }
+        PanelTcpClient currentPeer = this.peer;
+        if (currentPeer != null && currentPeer.isActive()) currentPeer.publishEvent(event);
+    }
+
     public TlsIdentity identity() {
         return this.identity;
     }
@@ -116,6 +131,7 @@ public final class PanelClusterNode implements AutoCloseable {
 
     private boolean tryBecomeHostLocked() {
         PanelTcpServer candidate = new PanelTcpServer(this.api.selfId(), this::handle, this::clusterToken);
+        candidate.setPeerEvents(this::forwardPeerEvent);
         try {
             candidate.start(this.config.apiBind, this.config.apiPort, this.identity.serverContext());
             if (this.closed) {
@@ -154,6 +170,14 @@ public final class PanelClusterNode implements AutoCloseable {
         }
         SablePanel.LOGGER.info("sablepanel: [{}] joined TLS API HOST on 127.0.0.1:{}",
                 this.api.selfId(), this.config.apiPort);
+        connected.publishEvent(new PanelEvent(this.api.selfId(), PanelEvent.BODIES, this.bodiesRevision.get()));
+    }
+
+    private void forwardPeerEvent(String peerId, PanelEvent event) {
+        PanelTcpServer currentHost = this.host;
+        if (currentHost != null && currentHost.isActive()) {
+            currentHost.publishEvent(event.fromServer(peerId));
+        }
     }
 
     private PanelResponse changeToken(PanelRequest request) throws Exception {
@@ -168,6 +192,7 @@ public final class PanelClusterNode implements AutoCloseable {
             JsonArray failed = new JsonArray();
             PanelTcpServer currentHost = this.host;
             if (currentHost != null && currentHost.isActive()) {
+                currentHost.revokeEventSubscriptions();
                 for (String id : currentHost.peerIds()) {
                     try {
                         PanelResponse response = currentHost.updatePeerToken(id, next).get(10, TimeUnit.SECONDS);

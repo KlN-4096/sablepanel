@@ -74,6 +74,23 @@ final class PanelWire {
         return new PanelResponse(meta.get("status").getAsInt(), string(meta, "content_type"), body, false);
     }
 
+    static PanelFrame eventSubscribe(long id, String token) {
+        JsonObject meta = new JsonObject();
+        meta.addProperty("token", token == null ? "" : token);
+        return new PanelFrame(PanelFrame.EVENT_SUBSCRIBE, id, meta, new byte[0]);
+    }
+
+    static PanelFrame event(PanelEvent event) {
+        return new PanelFrame(PanelFrame.EVENT, 0, event.toJson(), new byte[0]);
+    }
+
+    static PanelEvent event(PanelFrame frame) {
+        if (frame.type() != PanelFrame.EVENT || frame.body().length != 0) {
+            throw new IllegalArgumentException("invalid event frame");
+        }
+        return PanelEvent.fromMeta(frame.meta());
+    }
+
     private static String string(JsonObject value, String key) {
         return value.has(key) ? value.get(key).getAsString() : "";
     }

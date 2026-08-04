@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 public final class PanelTcpClient implements AutoCloseable {
@@ -70,22 +71,30 @@ public final class PanelTcpClient implements AutoCloseable {
     private final CompletableFuture<Void> ready = new CompletableFuture<>();
     private final Function<PanelRequest, PanelResponse> incomingRequests;
     private final Function<String, PanelResponse> tokenUpdates;
+    private final Consumer<PanelEvent> events;
     private final String peerId;
     private volatile Channel channel;
 
     private PanelTcpClient(Function<PanelRequest, PanelResponse> incomingRequests,
-                           Function<String, PanelResponse> tokenUpdates, String peerId) {
+                           Function<String, PanelResponse> tokenUpdates, Consumer<PanelEvent> events,
+                           String peerId) {
         this.incomingRequests = incomingRequests;
         this.tokenUpdates = tokenUpdates;
+        this.events = events;
         this.peerId = peerId;
     }
 
     public static PanelTcpClient connectManager(PanelEndpoint endpoint, String expectedFingerprint)
             throws Exception {
+        return connectManager(endpoint, expectedFingerprint, null);
+    }
+
+    public static PanelTcpClient connectManager(PanelEndpoint endpoint, String expectedFingerprint,
+                                                Consumer<PanelEvent> events) throws Exception {
         PinnedTrustManager trust = new PinnedTrustManager(expectedFingerprint);
         SslContext ssl = SslContextBuilder.forClient().trustManager(trust)
                 .protocols("TLSv1.3", "TLSv1.2").build();
-        PanelTcpClient client = new PanelTcpClient(null, null, null);
+        PanelTcpClient client = new PanelTcpClient(null, null, events, null);
         try {
             client.connect(endpoint, ssl);
             return client;
@@ -104,7 +113,7 @@ public final class PanelTcpClient implements AutoCloseable {
                                               Function<String, PanelResponse> tokenUpdates) throws Exception {
         SslContext ssl = SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE)
                 .protocols("TLSv1.3", "TLSv1.2").build();
-        PanelTcpClient client = new PanelTcpClient(requests, tokenUpdates, peerId);
+        PanelTcpClient client = new PanelTcpClient(requests, tokenUpdates, null, peerId);
         try {
             client.connect(endpoint, ssl);
             return client;
@@ -141,6 +150,24 @@ public final class PanelTcpClient implements AutoCloseable {
         } catch (Exception error) {
             return CompletableFuture.failedFuture(error);
         }
+        return sendTracked(frame);
+    }
+
+    public CompletableFuture<PanelResponse> subscribeEvents(String token) {
+        if (this.peerId != null || this.events == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("当前连接不能订阅事件"));
+        }
+        return sendTracked(PanelWire.eventSubscribe(this.requestIds.incrementAndGet(), token));
+    }
+
+    public void publishEvent(PanelEvent event) {
+        if (this.peerId == null) throw new IllegalStateException("只有 PEER 可以上报事件");
+        Channel current = this.channel;
+        if (isActive()) current.writeAndFlush(PanelWire.event(event));
+    }
+
+    private CompletableFuture<PanelResponse> sendTracked(PanelFrame frame) {
+        if (!isActive()) return CompletableFuture.failedFuture(new IllegalStateException("未连接到服务器"));
         if (this.pendingRequests.incrementAndGet() > MAX_PENDING_REQUESTS) {
             this.pendingRequests.decrementAndGet();
             return CompletableFuture.failedFuture(new RejectedExecutionException("待处理请求过多"));
@@ -236,6 +263,7 @@ public final class PanelTcpClient implements AutoCloseable {
                             new PanelFrame(PanelFrame.PONG, frame.requestId(), new JsonObject(), new byte[0]));
                     case PanelFrame.PONG -> acceptPong(frame.requestId());
                     case PanelFrame.PEER_REGISTERED -> handlePeerRegistered(context, frame);
+                    case PanelFrame.EVENT -> handleEvent(context, frame);
                     default -> context.close();
                 }
             } catch (Exception error) {
@@ -243,6 +271,14 @@ public final class PanelTcpClient implements AutoCloseable {
                 if (!ready.isDone()) ready.completeExceptionally(error);
                 context.close();
             }
+        }
+
+        private void handleEvent(ChannelHandlerContext context, PanelFrame frame) {
+            if (events == null || peerId != null) {
+                context.close();
+                return;
+            }
+            events.accept(PanelWire.event(frame));
         }
 
         private void handlePeerRegistered(ChannelHandlerContext context, PanelFrame frame) {

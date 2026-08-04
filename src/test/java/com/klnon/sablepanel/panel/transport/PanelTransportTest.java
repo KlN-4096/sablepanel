@@ -162,6 +162,44 @@ class PanelTransportTest {
     }
 
     @Test
+    void authenticatedManagerReceivesHostAndPeerEvents() throws Exception {
+        TlsIdentity identity = TlsIdentity.loadOrCreate(temp.resolve("events"), "host");
+        AtomicReference<PanelTcpServer> serverRef = new AtomicReference<>();
+        PanelTcpServer server = new PanelTcpServer("host", request ->
+                PanelResponse.json(200, "{}", false), () -> "secret");
+        serverRef.set(server);
+        server.setPeerEvents((peerId, event) -> serverRef.get().publishEvent(event.fromServer(peerId)));
+        CountDownLatch received = new CountDownLatch(2);
+        List<PanelEvent> events = new CopyOnWriteArrayList<>();
+        PanelTcpClient manager = null;
+        PanelTcpClient peer = null;
+        try {
+            server.start("127.0.0.1", 0, identity.serverContext());
+            PanelEndpoint endpoint = new PanelEndpoint("127.0.0.1", server.port());
+            manager = PanelTcpClient.connectManager(endpoint, identity.fingerprint(), event -> {
+                events.add(event);
+                received.countDown();
+            });
+            assertEquals(401, manager.subscribeEvents("wrong").get(5, TimeUnit.SECONDS).status());
+            assertEquals(200, manager.subscribeEvents("secret").get(5, TimeUnit.SECONDS).status());
+
+            server.publishEvent(new PanelEvent("host", PanelEvent.BODIES, 4));
+            peer = PanelTcpClient.connectPeer(endpoint, "peer-a", request ->
+                    PanelResponse.json(200, "{}", false), token -> PanelResponse.json(200, "{}", false));
+            peer.publishEvent(new PanelEvent("forged", PanelEvent.BODIES, 7));
+
+            assertTrue(received.await(5, TimeUnit.SECONDS));
+            assertEquals(List.of(
+                    new PanelEvent("host", PanelEvent.BODIES, 4),
+                    new PanelEvent("peer-a", PanelEvent.BODIES, 7)), events);
+        } finally {
+            if (peer != null) peer.close();
+            if (manager != null) manager.close();
+            server.close();
+        }
+    }
+
+    @Test
     void registrationAndTokenUpdatesPreserveWireOrder() throws Exception {
         TlsIdentity identity = TlsIdentity.loadOrCreate(temp.resolve("token-order"), "host");
         PanelTcpServer server = new PanelTcpServer("host", request ->

@@ -11,4 +11,6 @@ record PanelFrame(byte type, long requestId, JsonObject meta, byte[] body) {
     static final byte PING = 6;
     static final byte PONG = 7;
     static final byte ERROR = 8;
+    static final byte EVENT_SUBSCRIBE = 9;
+    static final byte EVENT = 10;
 }

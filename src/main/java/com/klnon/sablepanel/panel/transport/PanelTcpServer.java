@@ -20,6 +20,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
@@ -33,6 +35,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -65,6 +69,7 @@ public final class PanelTcpServer implements AutoCloseable {
     private final int writerIdleSeconds;
     private final int pongTimeoutSeconds;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private volatile BiConsumer<String, PanelEvent> peerEvents = (id, event) -> { };
     private volatile Channel channel;
 
     public PanelTcpServer(String selfId, Function<PanelRequest, PanelResponse> managerRequests,
@@ -101,6 +106,20 @@ public final class PanelTcpServer implements AutoCloseable {
                 });
         ChannelFuture future = bootstrap.bind(bind, port).sync();
         this.channel = future.channel();
+    }
+
+    public void setPeerEvents(BiConsumer<String, PanelEvent> peerEvents) {
+        if (this.channel != null) throw new IllegalStateException("事件处理器必须在启动前设置");
+        this.peerEvents = peerEvents != null ? peerEvents : (id, event) -> { };
+    }
+
+    public void publishEvent(PanelEvent event) {
+        if (!isActive()) return;
+        this.connections.forEach(connection -> connection.sendEvent(event));
+    }
+
+    public void revokeEventSubscriptions() {
+        this.connections.forEach(ConnectionHandler::revokeEvents);
     }
 
     public Set<String> peerIds() {
@@ -165,8 +184,11 @@ public final class PanelTcpServer implements AutoCloseable {
         private final Map<Long, CompletableFuture<PanelResponse>> pending = new ConcurrentHashMap<>();
         private final AtomicLong ids = new AtomicLong();
         private final AtomicInteger inFlight = new AtomicInteger();
+        private final AtomicReference<PanelEvent> pendingEvent = new AtomicReference<>();
+        private final AtomicBoolean eventWriteScheduled = new AtomicBoolean();
         private volatile ChannelHandlerContext context;
         private volatile String peerId;
+        private volatile String subscribedToken;
         private volatile boolean inactive;
         private long awaitingPongId;
 
@@ -189,11 +211,36 @@ public final class PanelTcpServer implements AutoCloseable {
                     case PanelFrame.PING -> context.writeAndFlush(
                             new PanelFrame(PanelFrame.PONG, frame.requestId(), new JsonObject(), new byte[0]));
                     case PanelFrame.PONG -> acceptPong(frame.requestId());
+                    case PanelFrame.EVENT_SUBSCRIBE -> subscribeEvents(context, frame);
+                    case PanelFrame.EVENT -> receivePeerEvent(context, frame);
                     default -> context.close();
                 }
             } catch (Exception error) {
                 context.close();
             }
+        }
+
+        private void subscribeEvents(ChannelHandlerContext context, PanelFrame frame) {
+            if (this.peerId != null || frame.body().length != 0 || !frame.meta().has("token")) {
+                context.close();
+                return;
+            }
+            String candidate = frame.meta().get("token").getAsString();
+            if (!eventTokenValid(candidate)) {
+                sendResponse(context, frame.requestId(), PanelResponse.error(401, "token 无效"));
+                return;
+            }
+            this.subscribedToken = candidate;
+            sendResponse(context, frame.requestId(), PanelResponse.json(200, "{\"ok\":true}", false));
+        }
+
+        private void receivePeerEvent(ChannelHandlerContext context, PanelFrame frame) {
+            String source = this.peerId;
+            if (source == null) {
+                context.close();
+                return;
+            }
+            peerEvents.accept(source, PanelWire.event(frame).fromServer(source));
         }
 
         private void submitRequest(ChannelHandlerContext context, PanelFrame frame) {
@@ -254,6 +301,7 @@ public final class PanelTcpServer implements AutoCloseable {
                 return;
             }
             this.peerId = id;
+            revokeEvents();
             ConnectionHandler previous = peers.put(id, this);
             if (previous != null && previous != this) previous.close();
             JsonObject meta = new JsonObject();
@@ -319,6 +367,59 @@ public final class PanelTcpServer implements AutoCloseable {
             }
         }
 
+        private void sendEvent(PanelEvent event) {
+            if (this.peerId != null || this.inactive) return;
+            String subscribed = this.subscribedToken;
+            if (!eventTokenValid(subscribed)) {
+                revokeEvents();
+                return;
+            }
+            this.pendingEvent.set(event);
+            scheduleEventWrite();
+        }
+
+        private void scheduleEventWrite() {
+            ChannelHandlerContext current = this.context;
+            if (current == null || !current.channel().isActive() || !current.channel().isWritable()) return;
+            if (this.eventWriteScheduled.compareAndSet(false, true)) {
+                current.executor().execute(this::flushEvent);
+            }
+        }
+
+        private void flushEvent() {
+            ChannelHandlerContext current = this.context;
+            if (current == null || this.inactive || !current.channel().isActive()
+                    || !eventTokenValid(this.subscribedToken)) {
+                revokeEvents();
+                return;
+            }
+            if (!current.channel().isWritable()) {
+                this.eventWriteScheduled.set(false);
+                return;
+            }
+            PanelEvent event = this.pendingEvent.getAndSet(null);
+            if (event != null) {
+                current.writeAndFlush(PanelWire.event(event)).addListener(write -> {
+                    if (!write.isSuccess()) current.close();
+                });
+            }
+            this.eventWriteScheduled.set(false);
+            if (this.pendingEvent.get() != null) scheduleEventWrite();
+        }
+
+        private void revokeEvents() {
+            this.subscribedToken = null;
+            this.pendingEvent.set(null);
+            this.eventWriteScheduled.set(false);
+        }
+
+        private boolean eventTokenValid(String candidate) {
+            if (candidate == null || candidate.length() > 64) return false;
+            String expected = token.get();
+            return expected != null && MessageDigest.isEqual(candidate.getBytes(StandardCharsets.UTF_8),
+                    expected.getBytes(StandardCharsets.UTF_8));
+        }
+
         @Override
         public void userEventTriggered(ChannelHandlerContext context, Object event) throws Exception {
             if (event instanceof IdleStateEvent) {
@@ -326,6 +427,12 @@ public final class PanelTcpServer implements AutoCloseable {
                 return;
             }
             super.userEventTriggered(context, event);
+        }
+
+        @Override
+        public void channelWritabilityChanged(ChannelHandlerContext context) throws Exception {
+            if (context.channel().isWritable() && this.pendingEvent.get() != null) scheduleEventWrite();
+            super.channelWritabilityChanged(context);
         }
 
         private void sendPingOrClose(ChannelHandlerContext context) {
@@ -352,6 +459,7 @@ public final class PanelTcpServer implements AutoCloseable {
         public void channelInactive(ChannelHandlerContext context) {
             this.inactive = true;
             this.awaitingPongId = 0;
+            revokeEvents();
             connections.remove(this);
             if (this.peerId != null) peers.remove(this.peerId, this);
             this.pending.values().forEach(future -> future.completeExceptionally(new IllegalStateException("PEER 已断开")));
