@@ -33,6 +33,7 @@ async function doChangeToken(){
     if (r.warn) toast(r.warn, 'bad');
     await loadServers();
     await loadAll(true);
+    startEventStream();
   } catch(e){ toast(t('tokenFail') + e.message, 'bad'); }
   busy(null);
 }

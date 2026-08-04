@@ -7,6 +7,7 @@ import com.klnon.sablepanel.panel.api.PanelResponse;
 import com.klnon.sablepanel.panel.client.ClientPanelConfig;
 import com.klnon.sablepanel.panel.transport.CertificatePinException;
 import com.klnon.sablepanel.panel.transport.PanelEndpoint;
+import com.klnon.sablepanel.panel.transport.PanelEvent;
 import com.klnon.sablepanel.panel.transport.PanelTcpClient;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -45,12 +46,14 @@ public final class PanelWebGateway implements AutoCloseable {
     private volatile HttpServer http;
     private volatile ExecutorService httpPool;
     private volatile ScheduledExecutorService reconnectExecutor;
+    private volatile PanelEventStreams eventStreams;
     private volatile PanelTcpClient upstream;
     private volatile PanelEndpoint endpoint;
     private volatile PanelEndpoint pendingEndpoint;
     private volatile String pendingFingerprint;
     private volatile boolean closed = true;
     private volatile long lastReconnectLogMs;
+    private volatile String eventToken;
     private final AtomicBoolean reconnectPending = new AtomicBoolean();
 
     private PanelWebGateway(boolean clientMode, String bind, int port, ClientPanelConfig clientConfig,
@@ -85,6 +88,7 @@ public final class PanelWebGateway implements AutoCloseable {
                         thread.setDaemon(true);
                         return thread;
                     }, new ThreadPoolExecutor.CallerRunsPolicy());
+            this.eventStreams = new PanelEventStreams();
         }
         try {
             if (!this.clientMode) {
@@ -109,6 +113,7 @@ public final class PanelWebGateway implements AutoCloseable {
     }
 
     private void handle(HttpExchange exchange) throws IOException {
+        boolean closeExchange = true;
         try {
             String path = exchange.getRequestURI().getPath();
             if (path.equals("/vendor/three.min.js")) {
@@ -140,6 +145,10 @@ public final class PanelWebGateway implements AutoCloseable {
                 disconnectClient(exchange);
                 return;
             }
+            if (path.equals("/api/events")) {
+                closeExchange = !openEventStream(exchange);
+                return;
+            }
             if (path.startsWith("/api/")) {
                 proxyApi(exchange);
                 return;
@@ -149,8 +158,44 @@ public final class PanelWebGateway implements AutoCloseable {
             LOGGER.warn("sablepanel: web gateway error {}", exchange.getRequestURI(), error);
             HttpIo.send(exchange, 500, "application/json", errorJson(messageOf(error)), false);
         } finally {
-            exchange.close();
+            if (closeExchange) exchange.close();
         }
+    }
+
+    private synchronized boolean openEventStream(HttpExchange exchange) throws Exception {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            HttpIo.send(exchange, 405, "application/json", errorJson("需要 GET"), false);
+            return false;
+        }
+        PanelTcpClient client = this.upstream;
+        if (client == null || !client.isActive()) {
+            requestReconnect();
+            HttpIo.send(exchange, 503, "application/json", errorJson("尚未连接服务器"), false);
+            return false;
+        }
+        String token = exchange.getRequestHeaders().getFirst("X-Token");
+        PanelResponse response = client.subscribeEvents(token).get(10, TimeUnit.SECONDS);
+        if (response.status() != 200) {
+            HttpIo.send(exchange, response.status(), response.contentType(), response.body(), false);
+            return false;
+        }
+        if (client != this.upstream || !client.isActive()) {
+            HttpIo.send(exchange, 503, "application/json", errorJson("服务器连接已变化"), false);
+            return false;
+        }
+        PanelEventStreams streams = this.eventStreams;
+        if (streams == null) {
+            HttpIo.send(exchange, 503, "application/json", errorJson("事件服务不可用"), false);
+            return false;
+        }
+        String previousToken = this.eventToken;
+        if (previousToken != null && !previousToken.equals(token)) streams.closeStreams();
+        this.eventToken = token;
+        if (!streams.open(exchange)) {
+            HttpIo.send(exchange, 503, "application/json", errorJson("事件连接数已满"), false);
+            return false;
+        }
+        return true;
     }
 
     private void proxyApi(HttpExchange exchange) throws Exception {
@@ -235,7 +280,7 @@ public final class PanelWebGateway implements AutoCloseable {
         if (fingerprint == null || fingerprint.isBlank()) {
             throw connectForFingerprint(endpoint);
         }
-        PanelTcpClient connected = PanelTcpClient.connectManager(endpoint, fingerprint);
+        PanelTcpClient connected = PanelTcpClient.connectManager(endpoint, fingerprint, this::publishEvent);
         PanelTcpClient previous;
         synchronized (this) {
             if (this.closed) {
@@ -247,6 +292,7 @@ public final class PanelWebGateway implements AutoCloseable {
             this.endpoint = endpoint;
         }
         if (previous != null && previous != connected) previous.close();
+        restoreEventSubscription(connected);
     }
 
     private CertificatePinException connectForFingerprint(PanelEndpoint endpoint) throws Exception {
@@ -264,20 +310,26 @@ public final class PanelWebGateway implements AutoCloseable {
         PanelTcpClient currentUpstream;
         ExecutorService currentHttpPool;
         ScheduledExecutorService currentReconnect;
+        PanelEventStreams currentStreams;
         synchronized (this) {
-            if (this.closed && this.http == null && this.httpPool == null && this.reconnectExecutor == null) return;
+            if (this.closed && this.http == null && this.httpPool == null && this.reconnectExecutor == null
+                    && this.eventStreams == null) return;
             this.closed = true;
             currentHttp = this.http;
             currentUpstream = this.upstream;
             currentHttpPool = this.httpPool;
             currentReconnect = this.reconnectExecutor;
+            currentStreams = this.eventStreams;
             this.http = null;
             this.upstream = null;
             this.endpoint = null;
             this.httpPool = null;
             this.reconnectExecutor = null;
+            this.eventStreams = null;
+            this.eventToken = null;
         }
         if (currentHttp != null) currentHttp.stop(0);
+        if (currentStreams != null) currentStreams.close();
         shutdownExecutor(currentReconnect);
         if (currentUpstream != null) currentUpstream.close();
         shutdownExecutor(currentHttpPool);
@@ -289,8 +341,11 @@ public final class PanelWebGateway implements AutoCloseable {
             current = this.upstream;
             this.upstream = null;
             this.endpoint = null;
+            this.eventToken = null;
         }
         if (current != null) current.close();
+        PanelEventStreams streams = this.eventStreams;
+        if (streams != null) streams.closeStreams();
     }
 
     private void startReconnectLoop() {
@@ -335,7 +390,7 @@ public final class PanelWebGateway implements AutoCloseable {
 
         PanelTcpClient connected;
         try {
-            connected = PanelTcpClient.connectManager(this.fixedEndpoint, this.fixedFingerprint);
+            connected = PanelTcpClient.connectManager(this.fixedEndpoint, this.fixedFingerprint, this::publishEvent);
         } catch (Exception error) {
             logReconnectFailure(error);
             return;
@@ -358,7 +413,27 @@ public final class PanelWebGateway implements AutoCloseable {
             return;
         }
         if (stale != null) stale.close();
+        restoreEventSubscription(connected);
         LOGGER.info("sablepanel: server web gateway reconnected to {}", this.fixedEndpoint);
+    }
+
+    private synchronized void restoreEventSubscription(PanelTcpClient client) {
+        String token = this.eventToken;
+        if (token == null || token.isBlank()) return;
+        try {
+            PanelResponse response = client.subscribeEvents(token).get(10, TimeUnit.SECONDS);
+            if (response.status() == 200) {
+                PanelEventStreams streams = this.eventStreams;
+                if (streams != null) streams.resync();
+            }
+        } catch (Exception error) {
+            LOGGER.warn("sablepanel: event subscription restore failed: {}", messageOf(error));
+        }
+    }
+
+    private void publishEvent(PanelEvent event) {
+        PanelEventStreams streams = this.eventStreams;
+        if (streams != null) streams.publish(event);
     }
 
     private void logReconnectFailure(Throwable error) {

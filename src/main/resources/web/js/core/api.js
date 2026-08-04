@@ -25,6 +25,7 @@ async function api(path, opts) {
 }
 
 function showLogin(message){
+  stopEventStream();
   authenticated = false;
   token = '';
   localStorage.removeItem(TOKEN_STORAGE_KEY);
@@ -58,6 +59,7 @@ async function authenticate(candidate, remembered){
     applyServersResponse(data);
     maybeWarnDefaultToken(data);
     await loadAll(true);
+    startEventStream();
     return true;
   } catch (e) {
     showLogin(remembered ? t('loginChanged') : t('loginBad'));

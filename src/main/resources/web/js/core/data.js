@@ -1,5 +1,6 @@
 'use strict';
 /* 数据编排层:从后端拉取 bodies/stats/recycle/servers 并更新全局状态、触发渲染 */
+let bodiesRequest = 0;
 async function loadServers(){
   try {
     const r = await api('/api/servers');
@@ -10,9 +11,12 @@ async function loadServers(){
 /* ===================== 数据 ===================== */
 async function loadAll(manual){ await loadBodies(); loadStats(); if (manual) loadRecycle(); }
 async function loadBodies() {
+  const request = ++bodiesRequest;
   try {
     const keepUuid = SEL && SEL.uuid;
-    DATA = await api('/api/bodies');
+    const result = await api('/api/bodies');
+    if (request !== bodiesRequest) return;
+    DATA = result;
     BODY_BY_UUID = new Map();
     CLONE_SETS = new Map((DATA.clone_sets || []).map(set=>[Number(set.id), set]));
     PAUSED = new Set(DATA.paused || []);
@@ -35,7 +39,7 @@ async function loadBodies() {
     renderAll();
     refreshTimer = 60;
     if (keepUuid) reselect(keepUuid);
-  } catch (e) { toast(t('loadFail') + e.message, 'bad'); }
+  } catch (e) { if (request === bodiesRequest) toast(t('loadFail') + e.message, 'bad'); }
 }
 /* 有作业在跑时把列表刷新加速到 2 秒,跑完自动停。
    取代从前散落在各操作里的 setTimeout(loadBodies, 1200/1500/4000) —— 那些是对
