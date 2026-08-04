@@ -110,6 +110,28 @@ function doPauseCurrent(){
 function doPauseSelected(paused){
   setPausedBodies([...SELECTED].filter(u => paused !== PAUSED.has(u)), paused);
 }
+/* 常驻加载(sable force-load ticket):开启时后端会先把体加载出来,大体可能耗时数秒;
+   票由 sable 持久化,重启后仍然生效 */
+async function setForcedBodies(uuids, forced){
+  if (!uuids.length) return;
+  try {
+    const r = await api('/api/ops/force_load', {method:'POST', body: JSON.stringify({uuids, forced})});
+    for (const u of uuids) forced ? FORCED.add(u) : FORCED.delete(u);
+    const failed = (r && r.failed) || [];
+    for (const f of failed) FORCED.delete(f.uuid);
+    if (failed.length) toast(t('forcePartial')(r.count, failed.length), 'warn');
+    else toast(t(forced ? 'forceOk' : 'unforceOk')(uuids.length), 'ok');
+    renderAll();
+    if (SEL) renderDetail();
+    loadBodies();   // 状态会从 stored 变 loaded,拉一次服务端真值
+  } catch(e){ toast(t('forceFail') + e.message, 'bad'); }
+}
+function doForceCurrent(){
+  if (SEL) setForcedBodies([SEL.uuid], !FORCED.has(SEL.uuid));
+}
+function doForceSelected(forced){
+  setForcedBodies([...SELECTED].filter(u => forced !== FORCED.has(u)), forced);
+}
 /* 传送玩家到选中结构上方(包围盒顶面中心 +1);体未加载后端会先强制加载 */
 async function doTeleportPlayer(){
   if (!SEL) return;

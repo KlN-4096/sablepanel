@@ -20,6 +20,10 @@ let PLAYERS = [], playersFetchedAt = 0;
 /* 暂停集合:以 /api/bodies 的 paused 为单一事实源,操作成功后本地乐观更新 */
 let PAUSED = new Set();
 
+/* 常驻加载集合(sable force-load ticket):以 /api/bodies 的 forced 为单一事实源;
+   含未加载体的意图。命中的组在列表里变色并恒置顶 */
+let FORCED = new Set();
+
 /* 多选:跨页签/筛选保留,切服清空;BODY_BY_UUID 随 DATA 重建 */
 let SELECTED = new Set(), BODY_BY_UUID = new Map();
 let R_SELECTED = new Set(), RECYCLE_BY_ID = new Map();

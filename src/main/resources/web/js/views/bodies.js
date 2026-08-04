@@ -67,7 +67,11 @@ function sortVal(g, k){
     default: return null;
   }
 }
+function groupForced(g){ return g.bodies.some(b => FORCED.has(b.uuid)) ? 1 : 0; }
 function cmpGroups(a, b){
+  // 常驻加载的组恒置顶,不受用户排序配置影响
+  const fa = groupForced(a), fb = groupForced(b);
+  if (fa !== fb) return fb - fa;
   for (const s of sortCfg) {
     if (s.k === 'alpha') {
       const c = (a.name||'￿').localeCompare(b.name||'￿', 'zh');
@@ -152,9 +156,11 @@ function render() {
     if (shown >= renderLimit) continue;
     shown++;
     const div = document.createElement('div');
-    div.className = 'group' + (g.orphans ? ' is-orphan' : g.rec ? ' is-rec' : '');
+    const forcedN = g.bodies.filter(b=>FORCED.has(b.uuid)).length;
+    div.className = 'group' + (forcedN ? ' is-forced' : g.orphans ? ' is-orphan' : g.rec ? ' is-rec' : '');
     div.dataset.gid = g.gid;
     const tags = [];
+    if (forcedN) tags.push(`<span class="tag forced" title="${t('forcedTag')}">📌${forcedN>1?'×'+forcedN:''}</span>`);
     const pausedN = g.bodies.filter(b=>PAUSED.has(b.uuid)).length;
     if (pausedN) tags.push(`<span class="tag warn">⏸${pausedN>1?'×'+pausedN:''}</span>`);
     if (g.rec) tags.push(`<span class="tag warn">${t('recTag')}</span>`);
@@ -183,6 +189,7 @@ function render() {
       const m = document.createElement('div'); m.className = 'member'; m.dataset.uuid = b.uuid;
       if (SEL && SEL.uuid === b.uuid) m.classList.add('sel');
       const extra = [];
+      if (FORCED.has(b.uuid)) extra.push(`<span class="tag forced" title="${t('forcedTag')}">📌</span>`);
       if (PAUSED.has(b.uuid)) extra.push(`<span class="tag warn" title="${t('pausedTag')}">⏸</span>`);
       if (b.copies) extra.push(`<span class="tag warn">${b.copies} ${t('copiesX')}</span>`);
       if (b.clone) extra.push(`<span class="tag clone">${t('cloneWith')(clonePeerCount(b))}</span>`);
@@ -285,14 +292,17 @@ function updateSelUI(){
   const seg = document.getElementById('selSeg');
   if (!seg) return;
   if (!SELECTED.size) { seg.innerHTML = ''; return; }
-  let blocks = 0, orphans = 0, pausedN = 0, runningN = 0;
+  let blocks = 0, orphans = 0, pausedN = 0, runningN = 0, forcedN = 0, freeN = 0;
   for (const u of SELECTED) {
     const e = BODY_BY_UUID.get(u);
     if (e) { blocks += e.b.blocks; if (e.b.state === 'orphan') orphans++; }
     if (PAUSED.has(u)) pausedN++; else runningN++;
+    if (FORCED.has(u)) forcedN++; else freeN++;
   }
   seg.innerHTML = `<span class="selInfo">${t('selInfo')(SELECTED.size, blocks)}</span>
     <button class="danger" onclick="doDeleteSelected()">${t('selDel')}</button>
+    ${freeN ? `<button class="primary" onclick="doForceSelected(true)">${t('selForce')(freeN)}</button>` : ''}
+    ${forcedN ? `<button onclick="doForceSelected(false)">${t('selUnforce')(forcedN)}</button>` : ''}
     ${runningN ? `<button class="warnb" onclick="doPauseSelected(true)">${t('selPause')(runningN)}</button>` : ''}
     ${pausedN ? `<button onclick="doPauseSelected(false)">${t('selResume')(pausedN)}</button>` : ''}
     ${orphans ? `<button onclick="doAdoptSelected()">${t('selAdopt')(orphans)}</button>` : ''}
@@ -386,6 +396,10 @@ function renderDetail(){
   const pauseBtn = document.getElementById('pauseBtn');
   pauseBtn.textContent = PAUSED.has(b.uuid) ? t('resumeBody') : t('pauseBody');
   pauseBtn.classList.toggle('warnb', !PAUSED.has(b.uuid));
+  const forceBtn = document.getElementById('forceBtn');
+  forceBtn.textContent = FORCED.has(b.uuid) ? t('unforceBody') : t('forceBody');
+  forceBtn.classList.toggle('primary', !FORCED.has(b.uuid));
+  forceBtn.title = t('forceHint');
   loadPlayers();
 }
 /* 把当前坐标填进目的坐标输入框(想基于当前位置微调时用) */

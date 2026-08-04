@@ -16,6 +16,7 @@ async function loadBodies() {
     BODY_BY_UUID = new Map();
     CLONE_SETS = new Map((DATA.clone_sets || []).map(set=>[Number(set.id), set]));
     PAUSED = new Set(DATA.paused || []);
+    FORCED = new Set(DATA.forced || []);
     DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));
     SELECTED = new Set([...SELECTED].filter(u => BODY_BY_UUID.has(u)));
     const dims = new Set();

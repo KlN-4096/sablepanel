@@ -51,6 +51,7 @@ input[type=checkbox]{accent-color:var(--acc);width:14px;height:14px}
 .tag.bad{background:#f2635c16;border-color:#f2635c3d;color:var(--bad)}
 .tag.acc{background:#5aa9ff16;border-color:#5aa9ff3d;color:var(--acc)}
 .tag.clone{background:#b98cff16;border-color:#b98cff3d;color:var(--clone)}
+.tag.forced{background:#5aa9ff26;border-color:#5aa9ff66;color:#a8d4ff}
 .dot{width:6px;height:6px;border-radius:50%;display:inline-block;flex:none}
 
 /* ---------- 顶栏 ---------- */
@@ -192,6 +193,9 @@ header .hbtn{padding:6px 11px;font-size:12px;display:inline-flex;align-items:cen
 .group:hover{border-color:var(--line2)}
 .group.is-rec{border-color:#4a3a1c}
 .group.is-orphan{border-color:#4d2a2a}
+/* 常驻加载:比 rec/orphan 更醒目(它同时恒置顶),放最后保证覆盖 hover 与其他状态 */
+.group.is-forced{border-color:#3b7fc4;box-shadow:0 0 0 1px #5aa9ff1f}
+.group.is-forced .ghead{background:linear-gradient(90deg,#5aa9ff14,transparent 60%)}
 .ghead{display:flex;align-items:center;gap:9px;padding:9px 13px;cursor:pointer;line-height:1.35;position:relative}
 .ghead:hover{background:#161d29}
 .ghead .caret{color:var(--dim);font-size:9px;width:10px;flex:none;transition:transform .15s}
@@ -313,6 +317,7 @@ button.favStar{border:none;background:none;padding:0 6px;font-size:16px;vertical
   font-size:12.5px;box-shadow:0 8px 24px rgba(0,0,0,.55);animation:tIn .2s cubic-bezier(.2,.8,.3,1);line-height:1.5;word-break:break-all}
 .toast.bad{border-color:var(--bad)}
 .toast.ok{border-color:var(--ok)}
+.toast.warn{border-color:var(--warn)}
 @keyframes tIn{from{transform:translateX(24px);opacity:0}to{transform:none;opacity:1}}
 #modalBack{position:fixed;inset:0;z-index:85;background:rgba(5,7,10,.7);display:none;align-items:center;
   justify-content:center;backdrop-filter:blur(2px)}
