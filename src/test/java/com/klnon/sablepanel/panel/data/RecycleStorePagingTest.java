@@ -159,11 +159,35 @@ class RecycleStorePagingTest {
         for (int i = 1; i <= 3; i++) writeGroup(String.format("20260101-00000%d-000", i), 800, 0);
         RecycleStore store = store();
 
+        // 每组 800 体 × 128 当量 = 102400,两组就越过 20 万预算,所以一页只能出一组
+        int pages = 0;
+        String cursor = "";
+        do {
+            JsonObject page = store.view(cursor, 100);
+            assertEquals(1, page.getAsJsonArray("groups").size(), "体的元数据必须记进预算");
+            cursor = page.get("next_cursor").getAsString();
+            assertTrue(++pages <= 5, "翻页必须收敛");
+        } while (!cursor.isEmpty());
+        assertEquals(3, pages, "不记元数据时这 3 个组预算恒为 0,会被一次性塞进同一页");
+    }
+
+    @Test
+    void anOversizedGroupAfterASmallOneIsPushedToTheNextPage() throws Exception {
+        // 先一个小组占位,紧接着一个自己就超预算的大组。只检查读取前的旧 cost 时,大组会被整条
+        // 加进来 —— 而且此时页面已有两条,blocks_omitted 的判断不成立,完整调色板照发
+        String small = writeGroup("20260101-000009-000", 1, 2);
+        String huge = writeGroup("20260101-000001-000", 1600, 2);
+        RecycleStore store = store();
+
         JsonObject first = store.view("", 100);
-        assertEquals(2, first.getAsJsonArray("groups").size(), "体的元数据必须记进预算");
-        assertNotEquals("", first.get("next_cursor").getAsString(), "翻不完就要给游标");
-        assertEquals(1, store.view(first.get("next_cursor").getAsString(), 100)
-                .getAsJsonArray("groups").size());
+        assertEquals(List.of(small), ids(first), "超预算的大组必须留到下一页");
+        assertFalse(first.getAsJsonArray("groups").get(0).getAsJsonObject().has("blocks_omitted"));
+
+        JsonObject second = store.view(first.get("next_cursor").getAsString(), 100);
+        assertEquals(List.of(huge), ids(second), "大组单独成页");
+        assertTrue(second.getAsJsonArray("groups").get(0).getAsJsonObject()
+                .get("blocks_omitted").getAsBoolean(), "单独成页才轮得到只发元数据");
+        assertEquals(0, second.getAsJsonArray("block_palette").size());
     }
 
     @Test

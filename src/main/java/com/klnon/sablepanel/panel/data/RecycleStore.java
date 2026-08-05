@@ -52,6 +52,10 @@ public final class RecycleStore {
     private static final int PAGE_BLOCK_BUDGET = 200_000;
     /** 一个体的元数据(名称/坐标/包围盒/依赖链/备份名)折算成多少个方块索引当量 */
     private static final int BODY_COST_UNITS = 128;
+    /** 单份清单读进堆的字节上限。取值远高于任何正常组(每体几百字节),只为兜住坏文件 */
+    private static final long MANIFEST_MAX_BYTES = 64L << 20;
+    /** 全盘统计缓存的存活时间,见 {@link #storageStatsCached} */
+    private static final long STATS_TTL_MS = 30_000;
 
     public record Source(UUID uuid, String dimension, DiskScanner.EntryKey key, CompoundTag tag) {
     }
@@ -91,6 +95,9 @@ public final class RecycleStore {
     private final PanelConfig config;
     private final Path root;
     private final Path pendingRoot;
+    /** 全盘统计缓存,见 {@link #storageStatsCached} */
+    private StorageStats stats;
+    private long statsAt;
     private final Map<UUID, String> latestByUuid = new LinkedHashMap<>();
     private final Map<String, Set<UUID>> latestMembers = new LinkedHashMap<>();
     private final Set<String> pendingOldGroups = new LinkedHashSet<>();
@@ -169,6 +176,7 @@ public final class RecycleStore {
         } catch (Exception error) {
             SablePanel.LOGGER.warn("sablepanel: recycle retention cleanup failed", error);
         }
+        invalidateStats();
         return stage.id;
     }
 
@@ -305,17 +313,23 @@ public final class RecycleStore {
             for (Path directory : directories) {
                 String id = directory.getFileName().toString();
                 if (!from.isEmpty() && id.compareTo(from) >= 0) continue;
-                // 单条记录可能异常大(一个组几百个体),所以除了条数还有一份方块索引预算;
-                // 但每页至少出一条,否则超预算的那一组会永远翻不过去
-                if (manifests.size() >= pageLimit || (cost >= PAGE_BLOCK_BUDGET && !manifests.isEmpty())) {
+                if (manifests.size() >= pageLimit) {
                     more = true;
                     break;
                 }
                 try {
                     JsonObject manifest = readManifest(directory);
+                    // 预算要连"这一条有多大"一起算。只看读取前的旧 cost 的话,小组先占了位,
+                    // 紧跟着的超大组照样整条进来 —— 而且此时页面已有两条,下面的 withBlocks
+                    // 判断不成立,完整调色板和索引仍会一起发出去
+                    int next = manifestCost(manifest);
+                    if (!manifests.isEmpty() && cost + next > PAGE_BLOCK_BUDGET) {
+                        more = true;
+                        break;
+                    }
                     manifest.addProperty("version_state", version);
                     manifests.add(manifest);
-                    cost += manifestCost(manifest);
+                    cost += next;
                     nextCursor = id;
                 } catch (Exception error) {
                     SablePanel.LOGGER.warn("sablepanel: skipping unreadable recycle group {}", id, error);
@@ -328,9 +342,9 @@ public final class RecycleStore {
             for (JsonObject manifest : manifests) groups.add(toView(manifest, palette, withBlocks));
             // 全盘统计要走一遍目录树,只在第一页算,翻页时前端沿用首页的值
             if (from.isEmpty()) {
-                StorageStats stats = storageStats();
-                out.addProperty("file_count", stats.files);
-                out.addProperty("disk_bytes", stats.bytes);
+                StorageStats current = storageStatsCached();
+                out.addProperty("file_count", current.files);
+                out.addProperty("disk_bytes", current.bytes);
             }
             out.add("block_palette", paletteJson(palette));
             out.addProperty("next_cursor", more ? nextCursor : "");
@@ -388,6 +402,7 @@ public final class RecycleStore {
         out.addProperty("files", removedFiles);
         out.addProperty("bytes", removedBytes);
         out.add("results", results);
+        invalidateStats();
         return out;
     }
 
@@ -798,12 +813,35 @@ public final class RecycleStore {
         Files.deleteIfExists(directory);
     }
 
+    /**
+     * 全盘统计只用于显示"已用 N / 上限 M 个备份文件 · 磁盘 X"。它要走一遍整棵树,
+     * 而回收站上限允许到 1,000,000 个文件 —— 每次刷新、每次切筛选都重走一遍是纯浪费。
+     * <p>
+     * 写入路径(提交、清理)会主动作废缓存;再兜一层 TTL,防止漏掉某个改动路径导致数字长期不动。
+     * <p>
+     * ponytail: 缓存而非增量计数器。真要做增量就得给每个写入点都记账,漏一个就是永久错数;
+     * 显示用的数字慢 30 秒没有代价。等到 TTL 内的一次全走都嫌慢再上目录索引。
+     */
+    private StorageStats storageStatsCached() throws IOException {
+        long now = System.currentTimeMillis();
+        if (this.stats != null && now - this.statsAt < STATS_TTL_MS) return this.stats;
+        this.stats = storageStats();
+        this.statsAt = now;
+        return this.stats;
+    }
+
+    private void invalidateStats() {
+        this.stats = null;
+    }
+
     private StorageStats storageStats() throws IOException {
         if (!Files.isDirectory(this.root)) return new StorageStats(0, 0);
         int files = 0;
         long bytes = 0;
+        // 不要 toList():这里的元素数就是回收站的全部文件数,物化一遍等于白占一份堆
         try (var stream = Files.walk(this.root)) {
-            for (Path path : stream.filter(Files::isRegularFile).toList()) {
+            for (var iterator = stream.filter(Files::isRegularFile).iterator(); iterator.hasNext(); ) {
+                Path path = iterator.next();
                 bytes += Files.size(path);
                 if (path.getFileName().toString().endsWith(".nbt.gz") && !path.startsWith(this.pendingRoot)) files++;
             }
@@ -882,6 +920,10 @@ public final class RecycleStore {
     private static JsonObject readManifest(Path directory) throws IOException {
         Path file = directory.resolve(MANIFEST);
         try {
+            // 整份读进堆里,大小没有上限就等于把堆峰值交给磁盘上的文件说了算。
+            // 正常清单是每体几百字节 × 组成员数,撞到这条线的只可能是坏文件
+            long size = Files.size(file);
+            if (size > MANIFEST_MAX_BYTES) throw new IOException("回收组清单过大: " + size + " 字节");
             return JsonParser.parseString(Files.readString(file, StandardCharsets.UTF_8)).getAsJsonObject();
         } catch (Exception error) {
             throw new IOException("回收组清单无法读取: " + directory.getFileName(), error);
