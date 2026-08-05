@@ -188,6 +188,55 @@ class RecycleStorePagingTest {
         assertFalse(Files.exists(this.root.resolve(gone)), "目录树要真的删干净");
     }
 
+    @Test
+    void capacityPruningDropsTheCachedListing() throws Exception {
+        // 先让缓存建立起来,再触发容量淘汰。失效从前挂在调用方身上,setLimit 调完 prune
+        // 直接返回就漏掉了 —— 于是调低上限之后最多 30 秒里,列表还在列已经删掉的组,
+        // 用户点进去只会拿到"回收组不存在"。失效现在挂在 prune 自己身上,每个调用方都覆盖到。
+        // (这里直接驱动 prune:setLimit 要先 config.save(),那条路要 FMLPaths,单测里没有)
+        PanelConfig config = new PanelConfig();
+        for (int i = 1; i <= 4; i++) {
+            String id = writeGroup(String.format("20260101-00000%d-000", i), 1, 2);
+            Files.writeString(this.root.resolve(id).resolve("a.nbt.gz"), "x", StandardCharsets.UTF_8);
+        }
+        RecycleStore store = new RecycleStore(config, this.root);
+        JsonObject before = store.view("", 100);
+        assertEquals(4, before.getAsJsonArray("groups").size(), "先建立缓存");
+        assertEquals(4, before.get("file_count").getAsInt());
+
+        config.recycleMaxFiles = 2;
+        store.prune();
+
+        JsonObject after = store.view("", 100);
+        assertEquals(2, after.getAsJsonArray("groups").size(), "淘汰之后缓存必须立刻失效");
+        assertEquals(2, after.get("total_groups").getAsInt());
+        assertEquals(2, after.get("file_count").getAsInt(), "文件数统计同样不能是旧值");
+    }
+
+    @Test
+    void everyGroupIsStillReachableWhenPagingFromACursor() throws Exception {
+        // 游标定位改成了二分。二分写错的典型表现是漏掉边界那一条或死循环,
+        // 所以这里逐页走完并核对总数
+        Set<String> written = new LinkedHashSet<>();
+        for (int i = 1; i <= 9; i++) written.add(writeGroup(String.format("2026010%d-000000-000", i), 1, 2));
+        RecycleStore store = store();
+        Set<String> seen = new LinkedHashSet<>();
+        String cursor = "";
+        int pages = 0;
+        do {
+            JsonObject page = store.view(cursor, 2);
+            for (String id : ids(page)) assertTrue(seen.add(id), "同一组不能翻到两次: " + id);
+            cursor = page.get("next_cursor").getAsString();
+            assertTrue(++pages <= 12, "翻页必须收敛");
+        } while (!cursor.isEmpty());
+        assertEquals(written, seen, "二分定位不能漏掉边界上的组");
+
+        // 游标指向一个已经不存在的 id(两次请求之间被清掉):keyset 语义下仍要继续往后翻。
+        // 后缀 zzzzzzzz 排在 05 那组的真实随机后缀之后,所以 05 自己也在游标之后 —— 05..01 共 5 组
+        JsonObject afterStale = store.view("20260105-000000-000-zzzzzzzz", 100);
+        assertEquals(5, afterStale.getAsJsonArray("groups").size(), "失效游标要落到同一个位置");
+    }
+
     /** 一路翻到底,收集所有翻得到的组 id */
     private static Set<String> walkAllIds(RecycleStore store) {
         Set<String> seen = new LinkedHashSet<>();

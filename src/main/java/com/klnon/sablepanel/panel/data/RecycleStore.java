@@ -329,9 +329,10 @@ public final class RecycleStore {
             String nextCursor = "";
             boolean more = false;
             long cost = 0;
-            for (Path directory : directories) {
+            // 清单已按 id 降序排好,游标位置直接二分 —— 从头线性扫到游标的话,
+            // 翻到第 N 页就要白扫前 N 页的全部条目
+            for (Path directory : directories.subList(cursorOffset(directories, from), directories.size())) {
                 String id = directory.getFileName().toString();
-                if (!from.isEmpty() && id.compareTo(from) >= 0) continue;
                 if (groups.size() >= pageLimit) {
                     more = true;
                     break;
@@ -355,8 +356,17 @@ public final class RecycleStore {
                         candidate = toView(manifest, palette, false);
                         size = JsonSize.of(candidate);
                         if (size > PAGE_BYTE_BUDGET) {
-                            candidate = summaryView(manifest);
+                            candidate = summaryView(id, manifest);
                             size = JsonSize.of(candidate);
+                            // 摘要是按固定尺寸构造的,到这儿还超说明构造本身出了问题。
+                            // 跳过这一组但推进游标,后面的组照样翻得到
+                            if (size > PAGE_BYTE_BUDGET) {
+                                SablePanel.LOGGER.error(
+                                        "sablepanel: 回收组 {} 的固定摘要仍有 {} 字节,已跳过;这是需要修的 bug",
+                                        id, size);
+                                nextCursor = id;
+                                continue;
+                            }
                         }
                     }
                     palette.commit();
@@ -384,7 +394,8 @@ public final class RecycleStore {
             out.addProperty("next_cursor", "");
         }
         out.add("groups", groups);
-        return out;
+        // 和 /api/bodies 同一道闸:哪天又有字段漏了记账,页面还打得开,日志里有 error 指路
+        return ResponseGuard.enforce("/api/recycle", out, "groups", "block_palette");
     }
 
     public synchronized JsonObject purgeGroups(List<String> groupIds) {
@@ -596,11 +607,17 @@ public final class RecycleStore {
         return new RestoreGroup(id, state, isOldVersion(directory), List.copyOf(bodies));
     }
 
+    /**
+     * 容量淘汰。删了东西就地作废缓存 —— 失效挂在调用方身上时,总会有一个调用方漏掉:
+     * {@code setLimit} 调完 prune 直接返回,于是调低上限之后最多 30 秒里,列表还在列
+     * 已经删掉的组,用户点进去只会拿到"回收组不存在"。删除动作和缓存失效放在同一处才不会脱节。
+     */
     void prune() throws IOException {
         if (!Files.isDirectory(this.root)) return;
         List<RetentionEntry> entries = retentionEntries();
         int total = countBackupFiles(this.root, true);
         entries.sort(Comparator.comparingLong(RetentionEntry::createdAt));
+        boolean removed = false;
         for (RetentionEntry entry : entries) {
             if (total <= this.config.recycleMaxFiles) break;
             if (entry.directory) {
@@ -611,7 +628,9 @@ public final class RecycleStore {
                 this.pendingOldGroups.remove(id);
             } else Files.deleteIfExists(entry.path);
             total -= entry.files;
+            removed = true;
         }
+        if (removed) invalidateCaches();
     }
 
     private List<RetentionEntry> retentionEntries() throws IOException {
@@ -701,6 +720,22 @@ public final class RecycleStore {
 
     private void invalidateIndex() {
         this.index = null;
+    }
+
+    /**
+     * 降序清单里第一个 id 严格小于游标的位置。keyset 语义:游标那一组即使在两次请求之间
+     * 被清掉,也只是二分落到同一个位置,不会翻页失败。
+     */
+    private static int cursorOffset(List<Path> directories, String from) {
+        if (from.isEmpty()) return 0;
+        int low = 0;
+        int high = directories.size();
+        while (low < high) {
+            int mid = (low + high) >>> 1;
+            if (directories.get(mid).getFileName().toString().compareTo(from) >= 0) low = mid + 1;
+            else high = mid;
+        }
+        return low;
     }
 
     private record PageIndex(List<Path> latest, List<Path> old) {
@@ -886,17 +921,33 @@ public final class RecycleStore {
         }
     }
 
+    /**
+     * 先流式删掉备份文件,最后才删事务标记 / 清单 / 根目录 —— 中途崩了仍能被恢复流程认出来。
+     * <p>
+     * 和 {@link #deleteTree} 一样不再 {@code Files.walk().sorted().toList()}:
+     * purge 和容量淘汰走的是这个方法,一个组允许到百万个备份文件,排序就要先把百万个 Path
+     * 全排进内存。{@link FileVisitor} 天然后序,不需要排序也不需要列表。
+     */
     private static void deleteCommittedGroup(Path directory) throws IOException {
         Path manifest = directory.resolve(MANIFEST);
         Path marker = directory.resolve(OLD_VERSION_MARKER);
         Path transaction = directory.resolve(VERSION_TRANSACTION);
-        try (var stream = Files.walk(directory)) {
-            for (Path path : stream.sorted(Comparator.reverseOrder()).toList()) {
-                if (path.equals(directory) || path.equals(manifest) || path.equals(marker)
-                        || path.equals(transaction)) continue;
-                Files.deleteIfExists(path);
+        Files.walkFileTree(directory, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
+                if (!file.equals(manifest) && !file.equals(marker) && !file.equals(transaction)) {
+                    Files.deleteIfExists(file);
+                }
+                return FileVisitResult.CONTINUE;
             }
-        }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path visited, IOException failure) throws IOException {
+                if (failure != null) throw failure;
+                if (!visited.equals(directory)) Files.deleteIfExists(visited);
+                return FileVisitResult.CONTINUE;
+            }
+        });
         Files.deleteIfExists(transaction);
         Files.deleteIfExists(marker);
         Files.deleteIfExists(manifest);
@@ -988,20 +1039,52 @@ public final class RecycleStore {
     /**
      * 固定尺寸摘要:连元数据都装不下的组用它。
      * <p>
-     * 只留组级计数,名称截断,成员明细一个不发 —— 大小与组里有多少体、名字多长都无关,
-     * 这样"至少让这一组翻得过去"这条规则本身不会变成新的无界出口。
+     * 一个字符串都不从清单里复制。上一版是"复制白名单字段再截断 name",于是 {@code dims}
+     * 和 {@code state} 这两个同样来自磁盘、同样没有长度限制的字段照样整份进来 ——
+     * 一个 34 MiB 的 dims 就能让"摘要"自己越过协议上限。
+     * <p>
+     * 现在:{@code id} 用目录名(已经过 {@link #SAFE_ID} 校验,≤96 字符),数值字段一律
+     * 强制转成 long,状态只认几个已知值,名称截断。大小与清单内容无关,是真的固定尺寸。
      */
-    private static JsonObject summaryView(JsonObject manifest) {
+    private static JsonObject summaryView(String directoryId, JsonObject manifest) {
         JsonObject view = new JsonObject();
-        copyFields(manifest, view, GROUP_FIELDS);
-        if (view.has("name")) {
-            String name = view.get("name").getAsString();
-            if (name.length() > SUMMARY_NAME_CHARS) view.addProperty("name", name.substring(0, SUMMARY_NAME_CHARS));
-        }
+        view.addProperty("id", directoryId);
+        view.addProperty("state", knownState(manifest));
+        view.addProperty("version_state", "latest".equals(text(manifest, "version_state")) ? "latest" : "old");
+        view.addProperty("name", clip(text(manifest, "name")));
+        view.addProperty("dims", clip(text(manifest, "dims")));
+        // 数字也可能是攻击面:JSON 里的数值是任意长度的字面量,原样转发就是原样的字节数
+        view.addProperty("members", number(manifest, "members"));
+        view.addProperty("blocks", number(manifest, "blocks"));
+        view.addProperty("file_count", number(manifest, "file_count"));
+        view.addProperty("deleted_at", number(manifest, "deleted_at"));
         view.add("bodies", new JsonArray());
         view.addProperty("blocks_omitted", true);
         view.addProperty("bodies_omitted", true);
         return view;
+    }
+
+    private static final Set<String> KNOWN_STATES = Set.of("deleted", "restored", "recovery_required");
+
+    private static String knownState(JsonObject manifest) {
+        String state = text(manifest, "state");
+        return KNOWN_STATES.contains(state) ? state : "deleted";
+    }
+
+    private static String text(JsonObject from, String field) {
+        return from.has(field) && from.get(field).isJsonPrimitive() ? from.get(field).getAsString() : "";
+    }
+
+    private static String clip(String value) {
+        return value.length() > SUMMARY_NAME_CHARS ? value.substring(0, SUMMARY_NAME_CHARS) : value;
+    }
+
+    private static long number(JsonObject from, String field) {
+        try {
+            return from.has(field) && from.get(field).isJsonPrimitive() ? from.get(field).getAsLong() : 0L;
+        } catch (RuntimeException notANumber) {
+            return 0L;
+        }
     }
 
     private static void copyFields(JsonObject from, JsonObject to, String[] fields) {
