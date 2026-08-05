@@ -302,7 +302,11 @@ function resetFilters(silent){
 }
 /* ===================== 多选 ===================== */
 function toggleSel(u){
-  const entry=BODY_BY_UUID.get(u), bodies=entry?entry.g.bodies:[{uuid:u}];
+  const entry=BODY_BY_UUID.get(u);
+  // 整组切换的前提是 g.bodies 就是全组。组被截断时它只是"已下发的那部分",
+  // 再按整组切就等于让暂停/常驻/收养作用在可见成员上,而不是用户点的那一个 ——
+  // 组头复选框在这种组上是禁用的,成员复选框就退回单选
+  const bodies=entry&&!(entry.g.members_omitted>0)?entry.g.bodies:[{uuid:u}];
   const all=bodies.every(body=>SELECTED.has(body.uuid));
   for (const body of bodies) all?SELECTED.delete(body.uuid):SELECTED.add(body.uuid);
   updateSelUI();

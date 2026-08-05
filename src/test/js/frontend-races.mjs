@@ -624,6 +624,29 @@ test('LIMIT-01 加载更多成功后按钮要恢复可用', async () => {
   assert.ok(!/disabled/.test(html), '按钮渲染在清 loading 之前就会永久停在禁用的"加载中…":' + html);
 });
 
+test('UI-04 组被截断时成员复选框只切自己,完整组仍整组切', () => {
+  const { sandbox } = setup();
+  const select = (map) => {
+    evalIn(sandbox, 'BODY_BY_UUID = new Map(); SELECTED = new Set();');
+    evalIn(sandbox, 'globalThis.__fixture = ' + JSON.stringify(map));
+    evalIn(sandbox, `
+      for (const [u, g] of Object.entries(__fixture)) BODY_BY_UUID.set(u, {b:{uuid:u}, g});
+    `);
+  };
+  const partial = {gid:'g1', members:9, members_omitted:6,
+    bodies:[{uuid:'u1'},{uuid:'u2'},{uuid:'u3'}]};
+  select({u1: partial, u2: partial, u3: partial});
+  evalIn(sandbox, 'toggleSel')('u1');
+  assert.deepEqual([...evalIn(sandbox, 'SELECTED')], ['u1'],
+    '组只下发了 3/9 个成员,整组切就等于让后续操作作用在"可见的那些"上');
+
+  const whole = {gid:'g2', members:3, bodies:[{uuid:'v1'},{uuid:'v2'},{uuid:'v3'}]};
+  select({v1: whole, v2: whole, v3: whole});
+  evalIn(sandbox, 'toggleSel')('v1');
+  assert.deepEqual([...evalIn(sandbox, 'SELECTED')].sort(), ['v1','v2','v3'],
+    '完整组是删除原子单位,整组选择的语义不变');
+});
+
 /* ---------- 运行 ---------- */
 let failures = 0;
 for (const [name, fn] of tests) {
