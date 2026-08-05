@@ -50,8 +50,11 @@ async function doDeleteSelected(){
   let uuids=groups.flatMap(group=>group.bodies.map(body=>body.uuid));
   if (!uuids.length) return;
   const blocks=groups.reduce((sum,group)=>sum+group.blocks,0);
-  if (!await askModal(t('selDelT'), t('selDelMsg')(uuids.length, blocks), false)) return;
-  if (uuids.length > 500) { toast(t('recTooMany'), 'bad'); return; }
+  // 后端按依赖链把每个组重新展开成完整组,所以确认数和 500 上限都要按 members(真值)算。
+  // 按可见 uuid 算的话:提示说删 60 个实际删 100 个,展开后超 500 还会直接失败
+  const total=groups.reduce((sum,group)=>sum+group.members,0);
+  if (!await askModal(t('selDelT'), t('selDelMsg')(total, blocks), false)) return;
+  if (total > 500) { toast(t('recTooMany'), 'bad'); return; }
   await batchDelete(uuids);
   clearSel();
 }
@@ -182,8 +185,9 @@ async function doDeleteRecommended(){
   if (!groups.length) return;
   let uuids = groups.flatMap(g => g.bodies.map(b=>b.uuid));
   const blocks = groups.reduce((s,g)=>s+g.blocks,0);
-  if (!await askModal(t('recBatchT'), t('recBatchMsg')(groups.length, uuids.length, blocks), false)) return;
-  if (uuids.length > 500) { toast(t('recTooMany'), 'bad'); return; }
+  const total = groups.reduce((s,g)=>s+g.members,0);   // 同上:后端展开后的真实数量
+  if (!await askModal(t('recBatchT'), t('recBatchMsg')(groups.length, total, blocks), false)) return;
+  if (total > 500) { toast(t('recTooMany'), 'bad'); return; }
   await batchDelete(uuids);
 }
 async function batchDelete(uuids){

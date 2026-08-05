@@ -193,8 +193,13 @@ function render() {
     if (gcost > 0) tags.push(`<span class="tag acc mono">${gcost.toFixed(2)} ms/t</span>`);
     tags.push(`<span class="tag mono">${fmt(g.blocks)} ${t('blocksUnit')}</span>`);
     tags.push(`<span class="tag">${esc(g.dims.replace(/minecraft:/g,''))}</span>`);
+    // 组内成员被截断时禁止整组选择:复选框看着是"选中整组",实际只选中已发下来的那部分,
+    // 而后端删除会按依赖链重新展开成完整组 —— 确认数和真实动作对不上
+    const partial = g.members_omitted > 0;
+    if (partial) tags.push(
+      `<span class="tag warn" title="${t('groupPartialTip')(g.members_omitted)}">${t('groupPartial')}</span>`);
     div.innerHTML = `<div class="ghead">
-        <input type="checkbox" class="gsel">
+        <input type="checkbox" class="gsel" ${partial ? `disabled title="${t('groupPartialTip')(g.members_omitted)}"` : ''}>
         <span class="caret">▶</span>
         <span class="favStar ${FAV.has(g.gid)?'on':''}" title="${t('favTip')}">${FAV.has(g.gid)?'★':'☆'}</span>
         <span class="gname">${esc(g.name) || '<span class="muted">'+t('unnamed')+'</span>'}</span>
@@ -257,9 +262,15 @@ function render() {
 
 function renderToolbar(matched, tabTotal){
   const parts = [`<span>${t('filterBar')(matched, tabTotal)}</span>`];
-  // 服务端对单次响应有组数硬上限,超了只发体积最大的那批 —— 不说的话用户会以为体没了
-  if (DATA && DATA.truncated) parts.push(
-    `<span style="color:var(--warn)">· ${t('bodiesTruncated')(DATA.group_limit, DATA.total_groups)}</span>`);
+  // 服务端对单次响应有硬上限。三种截断后果不同,分开说 —— 从前一律套"只显示 N / M 组"的
+  // 模板,单个巨型组被按成员截断时会显示成自相矛盾的"只显示 3000 / 1 组"
+  if (DATA && DATA.truncated) {
+    const why = [];
+    if (DATA.shown_groups < DATA.total_groups) why.push(t('bodiesTruncated')(DATA.shown_groups, DATA.total_groups));
+    if (DATA.omitted_members) why.push(t('bodiesMembersOmitted')(DATA.omitted_members));
+    if (DATA.palette_truncated) why.push(t('bodiesPaletteTruncated'));
+    parts.push(`<span style="color:var(--warn)">· ${why.join(' · ')}</span>`);
+  }
   if (matched < tabTotal) parts.push(`<span style="color:var(--warn)">· ${t('filterActive')}</span>
     <button class="warnb" onclick="resetFilters()">${t('resetFilters')}</button>`);
   parts.push(`<button onclick="expandAll(true)">${t('expandAll')}</button>`);

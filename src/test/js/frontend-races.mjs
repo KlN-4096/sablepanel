@@ -578,6 +578,52 @@ test('UI-02 当前凭据的 401 仍然要注销', async () => {
   assert.equal(evalIn(sandbox, 'authenticated'), false, '口令真被改掉时必须锁页,别把保护也一起关了');
 });
 
+test('LIMIT-01 组内成员被截断时禁止整组选择,删除确认按真实成员数', async () => {
+  const { sandbox } = setup();
+  const group = { gid: 'g1', name: '', members: 100, members_omitted: 40, blocks: 9,
+    dims: 'minecraft:overworld', loaded: 0, orphans: 0, holding: 0, types: 1, be: 0, contents: 0,
+    bodies: [{ uuid: 'u1', dim: 'minecraft:overworld', blocks: 9, state: 'stored', blk: [] }] };
+  evalIn(sandbox, 'DATA = { groups: [], truncated: true, shown_groups: 1, total_groups: 1, omitted_members: 40 }');
+  evalIn(sandbox, '__group = null');
+  sandbox.__group = group;
+
+  // 确认弹窗按 members 而不是可见 uuid 数报数:后端会把依赖组重新展开成完整组
+  const asked = [];
+  evalIn(sandbox, 'askModal = (title, msg) => { globalThis.__asked.push(msg); return Promise.resolve(false); }');
+  evalIn(sandbox, '__asked = []');
+  evalIn(sandbox, "BODY_BY_UUID = new Map([['u1', {b: __group.bodies[0], g: __group}]]); SELECTED = new Set(['u1'])");
+  await evalIn(sandbox, 'doDeleteSelected')();
+  asked.push(...evalIn(sandbox, '__asked'));
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /100/, '确认数必须是展开后的 100,不是可见的 1:' + asked[0]);
+  assert.ok(!/\b1 个物理体/.test(asked[0]), '不能按可见 uuid 数报数');
+
+  // 截断提示要分开说,不能套"只显示 N / M 组"的模板报出自相矛盾的数字
+  evalIn(sandbox, 'renderToolbar')(1, 1);
+  const bar = evalIn(sandbox, "document.getElementById('toolbar')").innerHTML;
+  assert.ok(!/3000/.test(bar), '组数没被截断时不该出现组数上限:' + bar);
+  assert.match(bar, /40/, '应当说清省略了 40 个成员');
+});
+
+test('LIMIT-01 加载更多成功后按钮要恢复可用', async () => {
+  const { sandbox, state } = setup();
+  let page = 0;
+  state.fetch = async (url) => {
+    if (!url.startsWith('/api/recycle')) return jsonResponse({});
+    page++;
+    return jsonResponse({ groups: [], block_palette: [], total_groups: 9, limit: 500,
+      file_count: 0, disk_bytes: 0, next_cursor: page < 3 ? 'c' + page : '' });
+  };
+  evalIn(sandbox, "authenticated = true; VIEW = 'recycle'");
+  await evalIn(sandbox, 'loadRecycle')();
+  await evalIn(sandbox, 'loadRecycle')(true);
+  await tick();
+
+  assert.equal(evalIn(sandbox, 'RECYCLE_LOADING'), false);
+  const html = evalIn(sandbox, "document.getElementById('rToolbar')").innerHTML;
+  assert.ok(!/disabled/.test(html), '按钮渲染在清 loading 之前就会永久停在禁用的"加载中…":' + html);
+});
+
 /* ---------- 运行 ---------- */
 let failures = 0;
 for (const [name, fn] of tests) {
