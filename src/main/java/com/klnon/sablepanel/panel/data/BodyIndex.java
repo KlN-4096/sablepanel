@@ -52,6 +52,20 @@ public final class BodyIndex {
     private static final int RUNTIME_BYTES = 256;
     /** 克隆集合是去重提示,不是权威数据,超过这个数就不再往外发 */
     private static final int MAX_CLONE_SETS = 500;
+    /** 克隆集合的总成员数上限:集合数封顶了,单个集合能有多少成员并没有封顶 */
+    private static final int MAX_CLONE_MEMBERS = 20_000;
+    /** 一条组记录除成员之外的固定开销上界(gid、名称、各类计数、rec/prot) */
+    private static final int GROUP_BASE_BYTES = 512;
+    /** 一条调色板记录的上界(命名空间 id + 中英文名) */
+    private static final int PALETTE_ENTRY_BYTES = 160;
+    /**
+     * 调色板条数上限。它是全局表,一个成员的 blockIds 有多少种就能往里塞多少条,而每条都带
+     * 中英文名 —— 组和成员都封顶之后,单个成员仍能靠这张表把响应顶过协议上限。
+     * 取值远高于任何整合包的方块注册表规模,正常存档碰不到。
+     */
+    private static final int MAX_PALETTE = 20_000;
+    /** 一个 UUID 文本加引号逗号 */
+    private static final int UUID_TEXT_BYTES = 40;
 
     /** 成员记录的字节上界估算,用于 {@link #VIEW_BYTE_BUDGET} */
     private static long memberBytes(DiskScanner.DiskEntry entry, boolean loaded) {
@@ -327,8 +341,14 @@ public final class BodyIndex {
                 .filter(en -> en.getValue().size() >= 2)
                 .sorted(Map.Entry.comparingByKey())
                 .toList();
+        long cloneBytes = 0;
+        int cloneMembers = 0;
         for (int setId = 0; setId < Math.min(orderedCloneSets.size(), MAX_CLONE_SETS); setId++) {
             List<UUID> matches = new ArrayList<>(orderedCloneSets.get(setId).getValue());
+            // 只封顶集合数不够:几万个同尺寸残骸会挤进同一个集合,一个集合就能撑爆响应
+            if (cloneMembers + matches.size() > MAX_CLONE_MEMBERS) break;
+            cloneMembers += matches.size();
+            cloneBytes += GROUP_BASE_BYTES + (long) matches.size() * UUID_TEXT_BYTES;
             matches.sort(UUID::compareTo);
             DiskScanner.DiskEntry sample = byUuid.get(matches.get(0));
             JsonObject set = new JsonObject();
@@ -423,16 +443,31 @@ public final class BodyIndex {
         }
         ordered.sort(Comparator.comparingLong((Map.Entry<UUID, List<UUID>> g) -> weight.get(g.getKey())).reversed());
 
+        // 暂停集合(含未加载体的暂停意图):前端以此为单一事实源渲染 ⏸ 标记
+        JsonArray pausedArr = new JsonArray();
+        for (UUID u : com.klnon.sablepanel.panel.service.PauseService.snapshot()) pausedArr.add(u.toString());
+        // 常驻加载集合(sable force-load ticket,含未加载体的意图):前端据此变色/置顶/渲染 📌
+        JsonArray forcedArr = new JsonArray();
+        for (UUID u : com.klnon.sablepanel.panel.service.ForceLoadService.snapshot()) forcedArr.add(u.toString());
+
         JsonArray groupArr = new JsonArray();
         groupArr.addAll(freshArr);
-        long budget = freshBytes;
-        int shownGroups = 0;
+        // 预算是一份运行总账:整份发出去的 paused/forced/clone_sets 先记进去,组列表用剩下的额度,
+        // 调色板则边建边记。只算组成员的话,这几项加起来照样能把响应顶过协议上限。
+        // ponytail: paused/forced 不截断 —— 它们是徽章的唯一事实源。二者只随用户手动暂停/常驻的
+        // 体增长(单次操作上限 500 个),真涨到几十万条再给它们单独开接口。
+        long budget = freshBytes + cloneBytes
+                + (long) (pausedArr.size() + forcedArr.size()) * UUID_TEXT_BYTES;
+        // 组数上限管的是"发出去多少组",fresh 组也占名额,分开计数就会一起超过 MAX_VIEW_GROUPS
+        int shownGroups = freshArr.size();
+        int omittedMembers = 0;
+        boolean paletteFull = false;
         for (Map.Entry<UUID, List<UUID>> g : ordered) {
             // 至少出一组:否则单个超预算的巨型组会让整个列表空着
             if (shownGroups > 0 && (shownGroups >= MAX_VIEW_GROUPS || budget >= VIEW_BYTE_BUDGET)) break;
             shownGroups++;
+            budget += GROUP_BASE_BYTES;
             List<UUID> members = g.getValue();
-            for (UUID u : members) budget += memberBytes(byUuid.get(u), rt.containsKey(u));
             long totalBlocks = 0;
             String bestName = null;
             int bestNameBlocks = -1;
@@ -470,6 +505,14 @@ public final class BodyIndex {
                     bestName = e.name();
                     bestNameBlocks = e.blocks();
                 }
+                // 预算要按成员查,不能只在组的入口查:一条几万成员的依赖链就是一个单组的
+                // 超大响应,入口那次检查放它进来之后再无第二道闸。上面的聚合计数仍按全部成员算,
+                // 所以 members/blocks 是真值,只有 bodies 明细会少。
+                if (!memberArr.isEmpty() && budget >= VIEW_BYTE_BUDGET) {
+                    omittedMembers++;
+                    continue;
+                }
+                budget += memberBytes(e, loaded);
                 JsonObject m = new JsonObject();
                 m.addProperty("uuid", u.toString());
                 m.addProperty("entry", e.key().id());
@@ -500,8 +543,15 @@ public final class BodyIndex {
                 for (String id : e.blockIds()) {
                     Integer at = paletteIdx.get(id);
                     if (at == null) {
+                        // 表满就不再收:多出来的方块索引直接丢掉(前端当未知方块),
+                        // 这样 blk 每条也顺带被封在 MAX_PALETTE 之内
+                        if (paletteIdx.size() >= MAX_PALETTE) {
+                            paletteFull = true;
+                            continue;
+                        }
                         at = paletteIdx.size();
                         paletteIdx.put(id, at);
+                        budget += PALETTE_ENTRY_BYTES;
                     }
                     blk.add(at);
                 }
@@ -523,6 +573,7 @@ public final class BodyIndex {
             go.addProperty("types", groupBlockIds.size());
             go.addProperty("be", groupBe);
             go.addProperty("contents", groupContents);
+            if (memberArr.size() < members.size()) go.addProperty("members_omitted", members.size() - memberArr.size());
             JsonObject verdict = recommend(new RecInput(totalBlocks, maxBlocks, groupBlockIds.size(), groupBe,
                     groupContents, anyNamed, anyTracked, anyUserData, orphanCount, nonOrphan, groupDup, groupClone));
             if (verdict.has("reasons")) go.add("rec", verdict);
@@ -543,21 +594,19 @@ public final class BodyIndex {
 
         JsonObject out = new JsonObject();
         out.addProperty("scan_time", this.diskScanTime);
-        out.addProperty("total_bodies", byUuid.size() + freshArr.size());
+        // freshArr 是被截断过的显示量,总数必须用真值,否则截断时连"少了多少"都看不出来
+        out.addProperty("total_bodies", byUuid.size() + freshTotal);
         out.addProperty("total_entries", disk.size());
         int totalGroups = groups.size() + freshTotal;
         out.addProperty("total_groups", totalGroups);
         out.addProperty("shown_groups", groupArr.size());
         out.addProperty("group_limit", MAX_VIEW_GROUPS);
-        // 组数上限和字节预算任一条生效都算截断:前端据此提示,别让用户以为体没了
-        if (groupArr.size() < totalGroups) out.addProperty("truncated", true);
-        // 暂停集合(含未加载体的暂停意图):前端以此为单一事实源渲染 ⏸ 标记
-        JsonArray pausedArr = new JsonArray();
-        for (UUID u : com.klnon.sablepanel.panel.service.PauseService.snapshot()) pausedArr.add(u.toString());
+        // 组数上限、字节预算、组内成员截断、调色板封顶,任一条生效都算截断:
+        // 前端据此提示,别让用户以为体没了
+        if (groupArr.size() < totalGroups || omittedMembers > 0 || paletteFull) {
+            out.addProperty("truncated", true);
+        }
         out.add("paused", pausedArr);
-        // 常驻加载集合(sable force-load ticket,含未加载体的意图):前端据此变色/置顶/渲染 📌
-        JsonArray forcedArr = new JsonArray();
-        for (UUID u : com.klnon.sablepanel.panel.service.ForceLoadService.snapshot()) forcedArr.add(u.toString());
         out.add("forced", forcedArr);
         JsonObject policy = new JsonObject();
         policy.addProperty("blocks", this.config.protectBlocks);

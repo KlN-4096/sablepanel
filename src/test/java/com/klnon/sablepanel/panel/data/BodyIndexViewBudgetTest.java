@@ -1,10 +1,13 @@
 package com.klnon.sablepanel.panel.data;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -19,11 +22,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class BodyIndexViewBudgetTest {
 
     private static DiskScanner.DiskEntry entry(UUID uuid, int slot, int blockTypes) {
-        List<String> blockIds = new ArrayList<>();
-        for (int i = 0; i < blockTypes; i++) blockIds.add("sp:t_" + i);
+        return entry(uuid, slot, blockTypes, List.of());
+    }
+
+    /** 同一份方块 id 列表在体之间共享:DiskEntry 只存引用,每体重建会让大用例直接 OOM */
+    private static final Map<Integer, List<String>> BLOCK_IDS = new HashMap<>();
+
+    private static DiskScanner.DiskEntry entry(UUID uuid, int slot, int blockTypes, List<UUID> deps) {
+        List<String> blockIds = BLOCK_IDS.computeIfAbsent(blockTypes, n -> {
+            List<String> ids = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) ids.add("sp:t_" + i);
+            return List.copyOf(ids);
+        });
         return new DiskScanner.DiskEntry(
                 new DiskScanner.EntryKey("minecraft:overworld", 0, 0, 0, slot), uuid, "n",
-                new double[]{1, 2, 3}, new double[]{4, 5, 6}, blockTypes, List.of(), true, 0, 0,
+                new double[]{1, 2, 3}, new double[]{4, 5, 6}, blockTypes, deps, true, 0, 0,
                 blockIds, false, 0, 0);
     }
 
@@ -56,9 +69,7 @@ class BodyIndexViewBudgetTest {
         assertTrue(shown < 200, "字节预算必须在组数上限之前生效,实际输出 " + shown + " 组");
         assertTrue(shown > 0, "至少要出一组");
         assertTrue(view.get("truncated").getAsBoolean());
-        // 真正要防的是「先把整个对象建出来才发现发不出去」:实际序列化长度必须远低于 32 MiB
-        int bytes = view.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-        assertTrue(bytes < 32 * 1024 * 1024, "响应必须落在协议上限之内,实际 " + bytes);
+        assertBounded(view);
     }
 
     @Test
@@ -66,6 +77,56 @@ class BodyIndexViewBudgetTest {
         // 单个组自己就超预算(一个 60 万索引的体):不能因此输出空列表
         JsonObject view = view(List.of(entry(UUID.randomUUID(), 0, 600_000)));
         assertEquals(1, view.getAsJsonArray("groups").size(), "至少出一组,否则这个体永远看不见");
+        assertBounded(view);
+    }
+
+    @Test
+    void oneHugeDependencyGroupIsClampedByMembersNotJustByGroupCount() {
+        // 一条 4000 成员、每体 500 种方块的依赖链 = 一个组,估算 15 MB 已越过 12 MiB 预算。
+        // 只在组入口查预算的话,它是"第一组"所以无条件整份发出去,
+        // 3000 组上限和字节预算都拦不住 —— 组内成员数没有任何上限
+        UUID head = UUID.randomUUID();
+        List<UUID> all = new ArrayList<>(List.of(head));
+        for (int i = 1; i < 4000; i++) all.add(UUID.randomUUID());
+        List<DiskScanner.DiskEntry> entries = new ArrayList<>();
+        for (int i = 0; i < all.size(); i++) {
+            // 全都依赖 head:并查集把它们并成同一个组
+            entries.add(entry(all.get(i), i, 500, i == 0 ? List.of() : List.of(head)));
+        }
+        JsonObject view = view(entries);
+
+        JsonArray groups = view.getAsJsonArray("groups");
+        assertEquals(1, groups.size(), "确实只有一个依赖组");
+        JsonObject group = groups.get(0).getAsJsonObject();
+        assertEquals(4000, group.get("members").getAsInt(), "组聚合计数必须是真值");
+        int shown = group.getAsJsonArray("bodies").size();
+        assertTrue(shown < 4000, "组内成员也要受预算约束,实际输出 " + shown + " 个");
+        assertEquals(4000 - shown, group.get("members_omitted").getAsInt());
+        assertTrue(view.get("truncated").getAsBoolean(), "组内截断同样要告诉前端");
+        assertBounded(view);
+    }
+
+    @Test
+    void freshGroupsCountTowardsTheGroupCapAndTotalStaysTruthful() {
+        // 运行时有 3200 个盘上还没有条目的体(刚生成),磁盘条目 0 个。
+        // fresh 和磁盘组分开计数时两者相加会越过 3000
+        BodyIndex index = new BodyIndex();
+        index.updateDisk(List.of());
+        for (int i = 0; i < 3200; i++) {
+            index.updateRuntimePosition(UUID.randomUUID(), "minecraft:overworld", new double[]{1, 2, 3});
+        }
+        JsonObject view = index.view();
+
+        assertEquals(3000, view.getAsJsonArray("groups").size(), "fresh 组也占组数名额");
+        assertEquals(3200, view.get("total_bodies").getAsInt(), "总数是真值,不是显示数");
+        assertEquals(3200, view.get("total_groups").getAsInt());
+        assertTrue(view.get("truncated").getAsBoolean());
+    }
+
+    /** 真正要防的是「先把整个对象建出来才发现发不出去」:序列化后必须落在 32 MiB 协议上限内 */
+    private static void assertBounded(JsonObject view) {
+        int bytes = view.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        assertTrue(bytes < 32 * 1024 * 1024, "响应必须落在协议上限之内,实际 " + bytes);
     }
 
     @Test
