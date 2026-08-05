@@ -66,6 +66,10 @@ public final class BodyIndex {
     private static final int MAX_PALETTE = 20_000;
     /** 一个 UUID 文本加引号逗号 */
     private static final int UUID_TEXT_BYTES = 40;
+    /** 单个体最多列出这么多个冗余条目 id;真实数量由 copies 字段给出 */
+    private static final int MAX_ENTRY_IDS = 50;
+    /** 一条条目 id 的上界(维度名 + 区域坐标 + 槽位 + "(无指针)") */
+    private static final int ENTRY_ID_BYTES = 96;
 
     /** 成员记录的字节上界估算,用于 {@link #VIEW_BYTE_BUDGET} */
     private static long memberBytes(DiskScanner.DiskEntry entry, boolean loaded) {
@@ -387,12 +391,14 @@ public final class BodyIndex {
 
         // 运行时存在但磁盘还没有条目的体(刚生成/未保存):单独成组显示,可传送不可预览
         JsonArray freshArr = new JsonArray();
+        List<UUID> freshUuids = new ArrayList<>();
         long freshBytes = 0;
         int freshTotal = 0;
         for (Map.Entry<UUID, JsonObject> en : rt.entrySet()) {
             if (byUuid.containsKey(en.getKey())) continue;
             freshTotal++;
             if (freshArr.size() >= MAX_VIEW_GROUPS || freshBytes >= VIEW_BYTE_BUDGET) continue;
+            freshUuids.add(en.getKey());
             freshBytes += MEMBER_BASE_BYTES + RUNTIME_BYTES;
             JsonObject rto = en.getValue();
             JsonObject m = new JsonObject();
@@ -443,25 +449,17 @@ public final class BodyIndex {
         }
         ordered.sort(Comparator.comparingLong((Map.Entry<UUID, List<UUID>> g) -> weight.get(g.getKey())).reversed());
 
-        // 暂停集合(含未加载体的暂停意图):前端以此为单一事实源渲染 ⏸ 标记
-        JsonArray pausedArr = new JsonArray();
-        for (UUID u : com.klnon.sablepanel.panel.service.PauseService.snapshot()) pausedArr.add(u.toString());
-        // 常驻加载集合(sable force-load ticket,含未加载体的意图):前端据此变色/置顶/渲染 📌
-        JsonArray forcedArr = new JsonArray();
-        for (UUID u : com.klnon.sablepanel.panel.service.ForceLoadService.snapshot()) forcedArr.add(u.toString());
-
         JsonArray groupArr = new JsonArray();
         groupArr.addAll(freshArr);
-        // 预算是一份运行总账:整份发出去的 paused/forced/clone_sets 先记进去,组列表用剩下的额度,
+        // 预算是一份运行总账:整份发出去的 clone_sets 先记进去,组列表用剩下的额度,
         // 调色板则边建边记。只算组成员的话,这几项加起来照样能把响应顶过协议上限。
-        // ponytail: paused/forced 不截断 —— 它们是徽章的唯一事实源。二者只随用户手动暂停/常驻的
-        // 体增长(单次操作上限 500 个),真涨到几十万条再给它们单独开接口。
-        long budget = freshBytes + cloneBytes
-                + (long) (pausedArr.size() + forcedArr.size()) * UUID_TEXT_BYTES;
+        long budget = freshBytes + cloneBytes;
         // 组数上限管的是"发出去多少组",fresh 组也占名额,分开计数就会一起超过 MAX_VIEW_GROUPS
         int shownGroups = freshArr.size();
         int omittedMembers = 0;
         boolean paletteFull = false;
+        // 真正发出去的体。paused/forced 只发这些体的状态,见下面
+        Set<UUID> emitted = new HashSet<>(freshUuids);
         for (Map.Entry<UUID, List<UUID>> g : ordered) {
             // 至少出一组:否则单个超预算的巨型组会让整个列表空着
             if (shownGroups > 0 && (shownGroups >= MAX_VIEW_GROUPS || budget >= VIEW_BYTE_BUDGET)) break;
@@ -513,6 +511,7 @@ public final class BodyIndex {
                     continue;
                 }
                 budget += memberBytes(e, loaded);
+                emitted.add(u);
                 JsonObject m = new JsonObject();
                 m.addProperty("uuid", u.toString());
                 m.addProperty("entry", e.key().id());
@@ -528,8 +527,14 @@ public final class BodyIndex {
                 if (cp > 1) {
                     m.addProperty("copies", cp);
                     groupDup = true;
+                    // 同 UUID 的冗余条目数没有上限(存档损坏/反复搬迁能刷出成千上万条),
+                    // 而 memberBytes 没算这一段。真实数量由 copies 带出去,列表只发前几条够看即可
                     JsonArray ea = new JsonArray();
-                    for (String id : entryIds.getOrDefault(u, List.of())) ea.add(id);
+                    for (String id : entryIds.getOrDefault(u, List.of())) {
+                        if (ea.size() >= MAX_ENTRY_IDS) break;
+                        ea.add(id);
+                    }
+                    budget += (long) ea.size() * ENTRY_ID_BYTES;
                     m.add("entries", ea);
                 }
                 Integer cloneSet = cloneSetByUuid.get(u);
@@ -601,10 +606,24 @@ public final class BodyIndex {
         out.addProperty("total_groups", totalGroups);
         out.addProperty("shown_groups", groupArr.size());
         out.addProperty("group_limit", MAX_VIEW_GROUPS);
-        // 组数上限、字节预算、组内成员截断、调色板封顶,任一条生效都算截断:
-        // 前端据此提示,别让用户以为体没了
+        // 组数上限、字节预算、组内成员截断、调色板封顶,任一条生效都算截断。
+        // 三种截断的后果完全不同(少了组 / 组内少了成员 / 构成不全),提示要分开说,
+        // 否则"只显示 3000 / 1 组"这种自相矛盾的话就会出现在界面上
         if (groupArr.size() < totalGroups || omittedMembers > 0 || paletteFull) {
             out.addProperty("truncated", true);
+        }
+        if (omittedMembers > 0) out.addProperty("omitted_members", omittedMembers);
+        if (paletteFull) out.addProperty("palette_truncated", true);
+        // 暂停 / 常驻集合(含未加载体的意图):前端以此为单一事实源渲染 ⏸ 和 📌。
+        // 只发已经输出出去的体 —— 徽章画在行上,没有行的体发过去没人看,而这两个集合
+        // 自身没有任何上限,整份发就是响应里最后一处只随存档增长的字段
+        Set<UUID> pausedAll = com.klnon.sablepanel.panel.service.PauseService.snapshot();
+        Set<UUID> forcedAll = com.klnon.sablepanel.panel.service.ForceLoadService.snapshot();
+        JsonArray pausedArr = new JsonArray();
+        JsonArray forcedArr = new JsonArray();
+        for (UUID u : emitted) {
+            if (pausedAll.contains(u)) pausedArr.add(u.toString());
+            if (forcedAll.contains(u)) forcedArr.add(u.toString());
         }
         out.add("paused", pausedArr);
         out.add("forced", forcedArr);

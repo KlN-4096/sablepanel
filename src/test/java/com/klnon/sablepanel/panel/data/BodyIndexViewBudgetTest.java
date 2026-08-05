@@ -6,8 +6,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -121,6 +123,40 @@ class BodyIndexViewBudgetTest {
         assertEquals(3200, view.get("total_bodies").getAsInt(), "总数是真值,不是显示数");
         assertEquals(3200, view.get("total_groups").getAsInt());
         assertTrue(view.get("truncated").getAsBoolean());
+    }
+
+    @Test
+    void duplicateEntryIdsAreCappedWhileTheRealCountStaysTruthful() {
+        // 同 UUID 的冗余条目数没有上限(存档损坏/反复搬迁能刷出成千上万条),而 memberBytes
+        // 不算这一段 —— 单个成员就能靠它把响应撑爆
+        UUID uuid = UUID.randomUUID();
+        List<DiskScanner.DiskEntry> entries = new ArrayList<>();
+        for (int slot = 0; slot < 5000; slot++) entries.add(entry(uuid, slot, 1));
+        JsonObject view = view(entries);
+
+        JsonObject member = view.getAsJsonArray("groups").get(0).getAsJsonObject()
+                .getAsJsonArray("bodies").get(0).getAsJsonObject();
+        assertEquals(5000, member.get("copies").getAsInt(), "真实副本数仍要给出来");
+        assertEquals(50, member.getAsJsonArray("entries").size(), "条目列表要封顶");
+        assertBounded(view);
+    }
+
+    @Test
+    void pausedAndForcedOnlyCoverEmittedBodies() {
+        // 这两个集合在单测里是空的(要写它们得有 MinecraftServer),这里固定的是结构契约:
+        // 它们由 emitted 集合生成,永远是已输出体的子集,不会随存档总量增长
+        List<DiskScanner.DiskEntry> entries = new ArrayList<>();
+        for (int i = 0; i < 50; i++) entries.add(entry(UUID.randomUUID(), i, 1));
+        JsonObject view = view(entries);
+
+        Set<String> shown = new HashSet<>();
+        for (var group : view.getAsJsonArray("groups")) {
+            for (var body : group.getAsJsonObject().getAsJsonArray("bodies")) {
+                shown.add(body.getAsJsonObject().get("uuid").getAsString());
+            }
+        }
+        for (var element : view.getAsJsonArray("paused")) assertTrue(shown.contains(element.getAsString()));
+        for (var element : view.getAsJsonArray("forced")) assertTrue(shown.contains(element.getAsString()));
     }
 
     /** 真正要防的是「先把整个对象建出来才发现发不出去」:序列化后必须落在 32 MiB 协议上限内 */
