@@ -5,7 +5,7 @@
  *   node src/test/js/frontend-races.mjs
  *
  * 覆盖:UI-01 终态契约、UI-02 并发登录、UI-03 切服隔离、UI-04 预览旧失败、
- *      PERF-03 忙碌轮询与注销、PERF-05 批量收养只发一次请求刷一次。
+ *      PERF-03 忙碌轮询与注销、PERF-05 批量收养只发一次请求刷一次、回收站版本/清除交互。
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -391,6 +391,88 @@ test('PERF-05 批量收养只发一次请求、只刷一次列表', async () => 
   assert.equal(posts.length, 1, '3 个孤儿体从前会产生 3 次 POST');
   assert.equal(posts[0], '/api/ops/batch_adopt');
   assert.equal(bodiesLoads, 1, '3 个孤儿体从前会产生 3 次全量刷新');
+});
+
+test('回收站切换版本页签会清选择但保留筛选条件', async () => {
+  const urls = [];
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    urls.push(url);
+    if (url.startsWith('/api/recycle')) return jsonResponse({
+      groups: [], block_palette: [], next_cursor: '', total_groups: 0,
+      latest_groups: 2, old_groups: 3, file_count: 5, disk_bytes: 1024, limit: 500,
+    });
+    return jsonResponse({});
+  };
+  evalIn(sandbox, `
+    authenticated = true;
+    RECYCLE = {groups:[], latest_groups:2, old_groups:3};
+    R_SELECTED = new Set(['group-1']);
+    R_DIM_DISABLED.add('minecraft:the_nether');
+    document.getElementById('rSearch').value = '飞艇';
+    document.getElementById('rNamedOnly').checked = true;
+  `);
+
+  evalIn(sandbox, 'setRecycleTab')('old');
+  await tick();
+  await tick();
+
+  assert.equal(evalIn(sandbox, 'R_TAB'), 'old');
+  assert.equal(evalIn(sandbox, 'R_SELECTED').size, 0, '切版本页签后不能保留隐藏选择');
+  assert.equal(evalIn(sandbox, "document.getElementById('rSearch').value"), '飞艇');
+  assert.equal(evalIn(sandbox, "document.getElementById('rNamedOnly').checked"), true);
+  assert.equal(evalIn(sandbox, "R_DIM_DISABLED.has('minecraft:the_nether')"), true);
+  assert.ok(urls.some(url => url.startsWith('/api/recycle?version=old')),
+    '旧版本页签必须请求服务端全局分类后的 old 分页');
+});
+
+test('旧版本恢复和需恢复彻底删除都会给出对应警告', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    __modals = [];
+    askModal = (title, message) => { __modals.push([title, message]); return Promise.resolve(false); };
+  `);
+  const oldRecovery = {
+    id: 'old-group', members: 1, blocks: 10, file_count: 1,
+    version_state: 'old', state: 'recovery_required', bodies: [],
+  };
+
+  await evalIn(sandbox, 'confirmRestore')([oldRecovery]);
+  await evalIn(sandbox, 'confirmPurge')([oldRecovery]);
+
+  const modals = evalIn(sandbox, '__modals');
+  assert.match(modals[0][1], /旧版本/);
+  assert.ok(!modals[0][1].includes('先清除同 UUID 残留'), '旧版本恢复不得暗示会覆盖当前结构');
+  assert.match(modals[1][1], /唯一的完整恢复材料/);
+  assert.match(modals[1][1], /无法恢复/);
+});
+
+test('回收站作业结束后自动刷新版本统计', async () => {
+  let recycleLoads = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    if (url.startsWith('/api/jobs')) return jsonResponse({ running: [], files: [], log: [
+      { seq: 12, op: '回收站彻底删除', state: 'done', outcome: 'partial', message: '1/2',
+        warnings: ['missing-group: 回收组不存在'] },
+    ] });
+    if (url.startsWith('/api/recycle')) {
+      recycleLoads++;
+      return jsonResponse({ groups: [], block_palette: [], next_cursor: '', total_groups: 0 });
+    }
+    return jsonResponse({});
+  };
+  evalIn(sandbox, `
+    authenticated = true; JOB_WATCH.set(12, '回收站彻底删除');
+    __toasts = []; toast = (message, cls) => __toasts.push([message, cls]);
+  `);
+
+  await evalIn(sandbox, 'loadBodies')();
+  await tick();
+  await tick();
+
+  assert.equal(recycleLoads, 1, '彻底删除完成后必须刷新组数和磁盘占用');
+  assert.match(evalIn(sandbox, '__toasts[0][0]'), /missing-group: 回收组不存在/);
 });
 
 // UI-04:预览旧失败

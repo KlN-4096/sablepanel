@@ -88,14 +88,15 @@ function renderDash(){
       </div></div>`;
 
   document.getElementById('cleanCard').innerHTML = `
-    <h4><span>${t('recycleT')}</span><span class="more" onclick="setView('recycle')">${t('dashGo')}</span></h4>
+    <h4><span>${t('recycleT')}</span></h4>
     ${RECYCLE === null ? `<div class="empty">${t('loading')}</div>`
-      : !RECYCLE.groups.length ? `<div class="empty">${t('recycleEmpty')}</div>`
-      : `<div class="mini"><table>${RECYCLE.groups.slice(0,7).map(g=>`<tr class="clickable" onclick="setView('recycle')">
-          <td>${esc(g.name)||g.bodies[0].uuid.slice(0,8)}</td><td>${g.members} · ${new Date(g.deleted_at).toLocaleDateString()}</td></tr>`).join('')}</table></div>
-         ${(RECYCLE_TOTAL||RECYCLE.groups.length)>7?`<div class="hint">… +${(RECYCLE_TOTAL||RECYCLE.groups.length)-7}</div>`:''}`}
-    ${RECYCLE?`<div class="hint">${t('recycleUsage')(RECYCLE.file_count||0,RECYCLE.limit||500)}</div>`:''}
-    <div class="hint">${t('recycleHint')}</div>`;
+      : `<div class="bignum">${fmt((RECYCLE.latest_groups||0)+(RECYCLE.old_groups||0))}</div>
+         <div class="hint">${t('recycleStructures')}</div>
+         <div class="kvgrid">
+           <div class="k">${t('rTabLatest')}</div><div class="v">${fmt(RECYCLE.latest_groups||0)}</div>
+           <div class="k">${t('rTabOld')}</div><div class="v">${fmt(RECYCLE.old_groups||0)}</div>
+         </div>
+         <div class="hint">${t('recycleDisk')(fmtBytes(RECYCLE.disk_bytes||0))}</div>`}`;
   document.getElementById('toolCard').innerHTML = `
     <h4>${t('tools')}</h4>
     <div style="display:flex;gap:9px;flex-wrap:wrap">

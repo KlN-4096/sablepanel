@@ -113,6 +113,7 @@ async function reapFinishedJobs(){
   let log;
   try { log = (await api('/api/jobs')).log || []; } catch(e){ return; }
   if (gen !== srvGen()) return;   // 切服后旧服的作业结果不该弹在新服的界面上
+  let refreshRecycle = false;
   for (const seq of finished) {
     JOB_WATCH.delete(seq);
     const job = log.find(entry => entry.seq === seq);
@@ -121,8 +122,11 @@ async function reapFinishedJobs(){
     const outcome = jobOutcome(job);
     const label = outcome === 'fail' ? t('jobFailed') : outcome === 'partial' ? t('jobPartial') : t('jobDone');
     const parts = [job.op, job.name, label, job.message];
+    if (job.op === '回收站彻底删除' && (job.warnings || []).length) parts.push(job.warnings[0]);
     toast(parts.filter(Boolean).join(' · '), outcome === 'ok' ? 'ok' : 'bad');
+    if (job.op === '回收站恢复' || job.op === '回收站彻底删除') refreshRecycle = true;
   }
+  if (refreshRecycle) loadRecycle();
 }
 function reselect(uuid){
   for (const g of DATA.groups) for (const b of g.bodies) if (b.uuid === uuid) {
@@ -173,9 +177,13 @@ async function loadRecycle(append){
   const gen = srvGen();
   const cursor = append ? RECYCLE_CURSOR : '';
   try {
-    const page = await api('/api/recycle' + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''));
+    const query = `?version=${R_TAB}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+    const page = await api('/api/recycle' + query);
     // 整表重拉可能和翻页撞上,晚到的那次不能落地 —— 否则会把一页追加到另一份列表上
     if (gen !== srvGen() || req !== RECYCLE_REQ) return;
+    // 必须在渲染之前清:下面的 renderRecycle 会照着 RECYCLE_LOADING 画按钮,
+    // 留到 finally 里清就只改变量不重绘,"加载更多"会永久停在 disabled 的"加载中…"
+    RECYCLE_LOADING = false;
     const groups = page.groups || [];
     if (append && RECYCLE) {
       RECYCLE.groups = RECYCLE.groups.concat(groups);
@@ -191,7 +199,8 @@ async function loadRecycle(append){
     RECYCLE_TOTAL = page.total_groups ?? RECYCLE.groups.length;
     RECYCLE_BY_ID = new Map(RECYCLE.groups.map(g=>[g.id,g]));
     document.getElementById('rLimit').value = RECYCLE.limit || 500;
-    document.getElementById('rUsage').textContent = t('recycleUsage')(RECYCLE.file_count || 0, RECYCLE.limit || 500);
+    document.getElementById('rUsage').textContent = t('recycleUsage')(RECYCLE.file_count || 0, RECYCLE.limit || 500)
+      + ' · ' + t('recycleDisk')(fmtBytes(RECYCLE.disk_bytes || 0));
     renderRecycleDims();
     if (RSEL) {
       const group = RECYCLE_BY_ID.get(RSELG && RSELG.id);
@@ -203,7 +212,11 @@ async function loadRecycle(append){
     if (VIEW==='recycle') renderRecycle();
   } catch(e){
     if (gen !== srvGen() || req !== RECYCLE_REQ) return;
-    if (!append) { RECYCLE = {groups:[],block_palette:[],file_count:0,limit:500}; RECYCLE_CURSOR=''; RECYCLE_TOTAL=0; }
+    RECYCLE_LOADING = false;   // 同上:失败时也要在重绘之前清,否则按钮卡在禁用态
+    if (!append) {
+      RECYCLE = {groups:[],block_palette:[],file_count:0,disk_bytes:0,limit:500,latest_groups:0,old_groups:0};
+      RECYCLE_CURSOR=''; RECYCLE_TOTAL=0;
+    }
     else toast(t('loadFail') + e.message, 'bad');
     if (VIEW==='recycle') renderRecycle();
   } finally {
@@ -225,10 +238,10 @@ function mergePalette(store, palette, appended){
 /* 维度筛选按已加载的组重建,保留用户已经取消勾选的项 */
 function renderRecycleDims(){
   const host = document.getElementById('rDims');
-  const checked = new Set([...host.querySelectorAll('.rFDim:checked')].map(x=>x.value));
-  const had = host.querySelectorAll('.rFDim').length > 0;
+  host.querySelectorAll('.rFDim').forEach(input => input.checked
+    ? R_DIM_DISABLED.delete(input.value) : R_DIM_DISABLED.add(input.value));
   const dims = new Set();
   RECYCLE.groups.forEach(g=>g.bodies.forEach(b=>dims.add(b.dim || 'minecraft:overworld')));
   host.innerHTML = [...dims].map(d=>
-    `<label><input type="checkbox" class="rFDim" value="${esc(d)}" ${(!had||checked.has(d))?'checked':''} onchange="renderRecycle()"> ${esc(d.replace('minecraft:',''))}</label>`).join('');
+    `<label><input type="checkbox" class="rFDim" value="${esc(d)}" ${R_DIM_DISABLED.has(d)?'':'checked'} onchange="renderRecycle()"> ${esc(d.replace('minecraft:',''))}</label>`).join('');
 }

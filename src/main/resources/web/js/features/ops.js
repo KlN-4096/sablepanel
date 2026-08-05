@@ -90,12 +90,31 @@ async function restoreSelectedGroups(){
 async function confirmRestore(groups){
   const bodies=groups.reduce((sum,group)=>sum+group.members,0);
   const blocks=groups.reduce((sum,group)=>sum+(group.blocks||0),0);
-  const recovery=groups.filter(group=>group.state==='recovery_required').length;
-  const message=t('restoreSelectedMsg')(groups.length,bodies,blocks)+(recovery?t('restoreRecoveryWarn')(recovery):'');
+  const old=groups.filter(group=>group.version_state==='old').length;
+  const recovery=groups.filter(group=>group.version_state!=='old'&&group.state==='recovery_required').length;
+  const message=t('restoreSelectedMsg')(groups.length,bodies,blocks)
+    +(old?t('restoreOldWarn')(old):'')+(recovery?t('restoreRecoveryWarn')(recovery):'');
   if (!await askModal(t('restoreSelectedT'),message,false)) return;
   const r = await submitJob('/api/recycle/restore',
     {method:'POST',body:JSON.stringify({ids:groups.map(g=>g.id)})}, t('restoreOp'));
-  if (r) { R_SELECTED.clear(); loadRecycle(); }
+  if (r) { R_SELECTED.clear(); renderRecycle(); }
+}
+async function purgeCurrentGroup(){
+  if (RSELG) await confirmPurge([RSELG]);
+}
+async function purgeSelectedGroups(){
+  const groups=[...R_SELECTED].map(id=>RECYCLE_BY_ID.get(id)).filter(Boolean);
+  if (groups.length) await confirmPurge(groups);
+}
+async function confirmPurge(groups){
+  const bodies=groups.reduce((sum,group)=>sum+group.members,0);
+  const files=groups.reduce((sum,group)=>sum+(group.file_count||0),0);
+  const recovery=groups.filter(group=>group.state==='recovery_required').length;
+  const message=t('purgeMsg')(groups.length,bodies,files)+(recovery?t('purgeRecoveryWarn')(recovery):'');
+  if (!await askModal(t('purgeT'),message,false)) return;
+  const r=await submitJob('/api/recycle/purge',
+    {method:'POST',body:JSON.stringify({ids:groups.map(group=>group.id)})},t('purgeOp'));
+  if (r) { R_SELECTED.clear(); clearRecycleDetail(); renderRecycle(); }
 }
 /* 单体物理暂停:无确认直接执行;内存态,重启服务端自动恢复运行 */
 async function setPausedBodies(uuids, paused){

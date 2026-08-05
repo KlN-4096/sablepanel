@@ -55,21 +55,26 @@ const I18N = {
     adoptT:'收养孤儿物理体', adoptMsg:(n)=>`将把「${n}」重新接入 sable 加载管线(依赖体一并收养)。\n不修改任何磁盘数据,失败也无副作用。`,
     adoptOk:'收养成功,已重新加载', adoptPart:'收养完成(部分成员未能加载)', adoptFail:'收养失败: ',
     adoptTrunc:(n)=>`依赖链超过 ${n} 个成员上限,本次只收养了扫描到的前 ${n} 个`,
-    recycleT:'回收站', recycleEmpty:'回收站为空', recycleHint:'显示已验收删除和删除中断后保留的完整备份。',
+    recycleT:'回收站', recycleEmpty:'回收站为空', recycleVersionEmpty:'此版本页签暂无回收组', recycleHint:'显示已验收删除和删除中断后保留的完整备份。',
     recycleState:'恢复状态', recycleDeleted:'待恢复', recycleRecovery:'需恢复', recycleRestored:'已恢复', recycleStorage:'存储上限',
-    apply:'应用', recycleUsage:(n,m)=>`${n} / ${m} 个备份文件`, pickRecycle:'选择一个备份物理体查看详情',
+    apply:'应用', recycleUsage:(n,m)=>`${n} / ${m} 个备份文件`, recycleDisk:n=>`磁盘占用 ${n}`,
+    recycleStructures:'物理结构', pickRecycle:'选择一个备份物理体查看详情',
     restoreGroup:'恢复该依赖组', restoreHint:'恢复后会在保存位置重新加载',
-    rTabAll:'全部', rTabNamed:'命名', rTabUnnamed:'未命名', rTabRestored:'已恢复',
+    rTabLatest:'最新版本', rTabOld:'旧版本',
     rShowing:(n,m)=>`显示 ${n} / ${m} 个依赖组`, rSelectInfo:(g,b)=>`已选 ${g} 组 · ${b} 个物理体`,
     rLoaded:(n,m)=>`已加载 ${n} / ${m}`, rLoadMore:'加载更多', rLoading:'加载中…',
     bodiesTruncated:(n,m)=>`依赖组过多,只显示体积最大的 ${n} / ${m} 组`,
     rBlocksOmitted:'该依赖组过大,已省略方块构成(其余信息完整)',
     restoreSelected:'恢复所选', restoreSelectedT:'恢复所选物理体',
     restoreSelectedMsg:(g,b,blk)=>`将恢复勾选的 ${g} 个依赖组,共 ${b} 个物理体、${fmt(blk)} 块。\n恢复后会在原保存位置重新加载。`,
+    restoreOldWarn:(n)=>`\n其中 ${n} 个是旧版本；不会覆盖世界中已有的同 UUID 物理体，当前版本仍存在时恢复会失败。`,
     restoreRecoveryWarn:(n)=>`\n其中 ${n} 个“需恢复”事务会先清除同 UUID 残留,再从备份重建整组。`,
+    purgeGroup:'彻底删除该依赖组', purgeSelected:'彻底删除所选', purgeT:'彻底删除回收组',
+    purgeMsg:(g,b,f)=>`将彻底删除 ${g} 个依赖组，共 ${b} 个物理体、${f} 个备份文件。\n磁盘备份删除后无法恢复。`,
+    purgeRecoveryWarn:(n)=>`\n其中 ${n} 个是“需恢复”记录，可能包含唯一的完整恢复材料。`,
     restoreDone:(n,m)=>`恢复完成:成功 ${n}/${m} 组`, restoreFail:'恢复失败: ',
     deletedAt:'删除时间', restoredAt:'恢复时间', backupFiles:'备份文件', backupGroup:'回收组',
-    saveLimitOk:'回收站上限已更新', saveLimitFail:'更新上限失败: ', rEmpty:'没有符合条件的回收组',
+    saveLimitOk:'回收站上限已更新', saveLimitFail:'更新上限失败: ', recycleNoMatch:'没有符合条件的回收组',
     limitConfirmT:'调整回收站上限',
     limitConfirmMsg:(n,m)=>`当前有 ${n} 个备份文件。将上限降到 ${m} 后,会立即删除日期最早的完整依赖组。`,
     copied:'已复制', showMore:(n)=>`显示其余 ${n} 组`, noMatch:'没有符合条件的物理体',
@@ -90,7 +95,7 @@ const I18N = {
     jobsOnlyFailed:'只看失败', jobsWorkers:n=>`并发上限 ${n}`,
     jobTime:'时间', jobOp:'操作', jobTarget:'目标', jobState:'状态', jobCost:'耗时', jobMsg:'消息',
     jobTrail:'过程', jobWarn:'告警',
-    rescanOp:'重扫磁盘', adoptOp:'收养', restoreOp:'回收站恢复', pauseOp:'暂停', resumeOp:'恢复',
+    rescanOp:'重扫磁盘', adoptOp:'收养', restoreOp:'回收站恢复', purgeOp:'回收站彻底删除', pauseOp:'暂停', resumeOp:'恢复',
     forceOp:'常驻加载', unforceOp:'取消常驻', tpOp:'传送', tpPlayerOp:'传送玩家', delOp:'删除',
     recTag:'推荐删除',
     rEmpty:'空体(0 块)', rFragment:'微型碎片(<10 块)', rDebris:'小型残块',
@@ -162,7 +167,7 @@ const MANUAL = {
     ]},
     {k:'recycle',label:'manualRecycle',sections:[
       {h:'何时进入回收站',body:'<p>删除前会暂存完整依赖组备份；磁盘条目和 holding 指针通过删除后验收时记为待恢复。删除或自动回滚中断时，完整备份会记为需恢复，不再隐藏。</p>'},
-      {h:'恢复与容量',body:'<ul><li>恢复始终恢复完整依赖组，并在保存的维度和位置重新加载；旧备份若没有维度则按主世界处理。</li><li><b>待恢复</b>表示删除成功且备份可用；<b>需恢复</b>会先清除同 UUID 残留再从快照重建整组，且不会被容量策略自动淘汰；<b>已恢复</b>表示该记录已经成功执行过恢复。</li><li>容量按实际备份文件计数。超过上限时，按删除日期淘汰最早的普通完整依赖组；需恢复备份占满容量时，新删除会在执行前被拒绝。</li></ul>'}
+      {h:'恢复与容量',body:'<ul><li>恢复始终恢复完整依赖组，并在保存的维度和位置重新加载；旧版本不会覆盖世界中已有的同 UUID 物理体。旧备份若没有维度则按主世界处理。</li><li><b>待恢复</b>表示删除成功且备份可用；最新版本的<b>需恢复</b>会先清除同 UUID 残留再从快照重建整组，且不会被容量策略自动淘汰；<b>已恢复</b>表示该记录已经成功执行过恢复。</li><li>容量按实际备份文件计数。超过上限时，按删除日期淘汰最早的普通完整依赖组；需恢复备份占满容量时，新删除会在执行前被拒绝。</li></ul>'}
     ]},
     {k:'performance',label:'manualPerformance',sections:[
       {h:'曲线口径',body:'<ul><li><b>各维度物理引擎</b>：该维度物理步进耗时按服务器 tick 折算的毫秒值。</li><li><b>物理体逻辑</b>：所有已加载物理体 Java 逻辑每 tick 的采样合计，不包含服务器其它 mod。</li><li>历史同时保存 tick 数、平均 MSPT 与峰值 MSPT，供区间聚合和接口查询。</li></ul>'},
@@ -177,6 +182,12 @@ const MANUAL = {
 };
 function t(k){ const v = I18N.zh[k]; return v !== undefined ? v : k; }
 function fmt(n){ return Number(n).toLocaleString('en-US'); }
+function fmtBytes(value){
+  let size=Math.max(0,Number(value)||0), unit=0;
+  const units=['B','KiB','MiB','GiB','TiB'];
+  while(size>=1024&&unit<units.length-1){ size/=1024; unit++; }
+  return `${size.toFixed(unit===0||size>=100?0:size>=10?1:2)} ${units[unit]}`;
+}
 function applyI18n(){
   document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.dataset.i18nPh); });

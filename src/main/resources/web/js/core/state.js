@@ -5,7 +5,7 @@ let CLONE_SETS = new Map();
 let SEL = null, SELG = null, RSEL = null, RSELG = null, MESH_DATA = null, MESH_UUID = null, MESH_SOURCE = null;
 let VIEW = localStorage.getItem('spView') || 'dash';
 let TAB = 'all';
-let R_TAB = 'all';
+let R_TAB = 'latest';
 let refreshTimer = 60;
 const CHART_PRESETS = [300,900,3600,21600,86400,604800,2592000];
 let CHART = {from:0,to:0,span:300,live:true,preset:300,hoverIndex:-1,fetchTimer:null};
@@ -44,8 +44,9 @@ let REACH = {void_below:-64, sky_above:1000};
 /* 多选:跨页签/筛选保留,切服清空;BODY_BY_UUID 随 DATA 重建 */
 let SELECTED = new Set(), BODY_BY_UUID = new Map();
 let R_SELECTED = new Set(), RECYCLE_BY_ID = new Map();
-/* 回收站游标分页:服务端单页有组数和方块预算双重上限,这里记翻页状态。
-   RECYCLE.groups 是"已加载的页",不是全部;筛选和页签计数都只针对已加载部分 */
+let R_DIM_DISABLED = new Set();
+/* 回收站游标分页:服务端按 latest/old 分页并返回全局版本计数。
+   RECYCLE.groups 仍只是当前版本页签已经加载的页。 */
 let RECYCLE_CURSOR = '', RECYCLE_TOTAL = 0, RECYCLE_LOADING = false, RECYCLE_REQ = 0;
 
 /* 折叠记忆:用户显式展开/折叠过的组(gid → bool),优先于默认展开策略;切服清空 */

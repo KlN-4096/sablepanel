@@ -2,18 +2,20 @@
 /* 回收站视图:页签/筛选/分组列表/详情 */
 /* ===================== 回收站 ===================== */
 const R_TABS = [
-  {k:'all', label:'rTabAll', test:()=>true},
-  {k:'named', label:'rTabNamed', test:g=>!!g.name},
-  {k:'unnamed', label:'rTabUnnamed', test:g=>!g.name},
-  {k:'restored', label:'rTabRestored', test:g=>g.state==='restored'},
+  {k:'latest', label:'rTabLatest', count:'latest_groups'},
+  {k:'old', label:'rTabOld', count:'old_groups'},
 ];
-function recycleTabTest(group){ return (R_TABS.find(x=>x.k===R_TAB)||R_TABS[0]).test(group); }
-function setRecycleTab(tab){ R_TAB=tab; renderRecycle(); }
+function setRecycleTab(tab){
+  if (tab===R_TAB) return;
+  R_TAB=tab;
+  R_SELECTED.clear(); RECYCLE_BY_ID=new Map(); RECYCLE_CURSOR=''; RECYCLE_TOTAL=0; RECYCLE=null;
+  clearRecycleDetail(); renderRecycle(); loadRecycle();
+}
 function renderRecycleTabs(){
-  if (!RECYCLE) return;
+  const data=RECYCLE||{};
   document.getElementById('rTabs').innerHTML = R_TABS.map(tab=>
     `<button class="${R_TAB===tab.k?'on':''}" onclick="setRecycleTab('${tab.k}')">${t(tab.label)}
-      <span class="cnt">${RECYCLE.groups.filter(tab.test).length}</span></button>`).join('');
+      <span class="cnt">${fmt(data[tab.count]||0)}</span></button>`).join('');
 }
 function recycleStateTag(state){
   if (state==='restored') return `<span class="tag ok">${t('recycleRestored')}</span>`;
@@ -30,8 +32,7 @@ function renderRecycle(){
   const dimInputs = [...document.querySelectorAll('.rFDim')];
   const dims = new Set(dimInputs.filter(x=>x.checked).map(x=>x.value));
   const namedOnly = document.getElementById('rNamedOnly').checked;
-  const tabGroups = RECYCLE.groups.filter(recycleTabTest);
-  const visible = tabGroups.filter(group => {
+  const visible = RECYCLE.groups.filter(group => {
     if (!states.has(group.state || 'deleted') || !sizes.has(sizeClass(group.blocks || 0))) return false;
     if (namedOnly && !group.name) return false;
     if (dimInputs.length && !group.bodies.some(body=>dims.has(body.dim || 'minecraft:overworld'))) return false;
@@ -41,7 +42,9 @@ function renderRecycle(){
         || body.uuid.toLowerCase().includes(needle));
   }).sort((a,b)=>(b.deleted_at||0)-(a.deleted_at||0));
   if (!visible.length) {
-    list.innerHTML=`<div class="listEmpty"><span class="big">♲</span>${RECYCLE.groups.length?t('rEmpty'):t('recycleEmpty')}</div>`;
+    const allVersions=(RECYCLE.latest_groups||0)+(RECYCLE.old_groups||0);
+    const emptyText=RECYCLE_TOTAL?t('recycleNoMatch'):(allVersions?t('recycleVersionEmpty'):t('recycleEmpty'));
+    list.innerHTML=`<div class="listEmpty"><span class="big">♲</span>${emptyText}</div>`;
   } else {
     list.innerHTML = visible.map(group => {
       const title = esc(group.name) || `${group.bodies[0].uuid.slice(0,8)}…`;
@@ -63,7 +66,7 @@ function renderRecycle(){
         </div><div class="members" style="${opened?'display:block':''}">${members}</div></div>`;
     }).join('');
   }
-  renderRecycleToolbar(visible.length, tabGroups.length);
+  renderRecycleToolbar(visible.length, RECYCLE.groups.length);
 }
 function toggleGroupEl(head){
   const members=head.nextElementSibling, open=members.style.display==='block';
@@ -91,6 +94,7 @@ function renderRecycleToolbar(visible, total){
      ${more}
      ${selectedGroups.length?`<span id="rSelSeg"><span class="selInfo">${t('rSelectInfo')(selectedGroups.length,selectedBodies)}</span>
        <button class="primary" onclick="restoreSelectedGroups()">${t('restoreSelected')}</button>
+       <button class="danger" onclick="purgeSelectedGroups()">${t('purgeSelected')}</button>
        <button class="ghost" onclick="clearRecycleSelection()">${t('selClear')}</button></span>`:''}`;
 }
 function toggleRecycleGroup(id){
