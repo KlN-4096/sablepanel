@@ -217,6 +217,24 @@ class DiskScannerCorruptionTest {
         assertEquals(List.of(), pointerWarnings);
     }
 
+    @Test
+    void fullPointerCensusPreservesDanglingDuplicateOccurrences() throws Exception {
+        Path dir = dimDir();
+        UUID alive = UUID.randomUUID();
+        writeStorageFile(dir.resolve("r.0.0.0.slvls"), 4096,
+                Map.of(0, gzipNbt(bodyTag(alive, 1, 2))));
+        writeStorageFile(dir.resolve("r.0.0.slvlr"), 128,
+                Map.of(7, gzipNbt(pointerTag(0, 5, 5))));
+
+        List<DiskScanner.PointerReference> references =
+                DiskScanner.scanPointersStrict(Map.of(DIM, dir), new ArrayList<>());
+        DiskScanner.EntryKey dangling = new DiskScanner.EntryKey(DIM, 0, 0, 0, 5);
+
+        assertEquals(3, references.size());
+        assertEquals(2, references.stream().filter(reference -> reference.key().equals(dangling)).count());
+        assertTrue(references.stream().allMatch(reference -> reference.chunkX() == 7 && reference.chunkZ() == 0));
+    }
+
     // ---- readEntryTag 改成按头部偏移直读单槽后的回归:必须仍然只取到目标那一条 ----
 
     @Test

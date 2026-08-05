@@ -189,28 +189,25 @@ class RecycleStorePagingTest {
     }
 
     @Test
-    void capacityPruningDropsTheCachedListing() throws Exception {
-        // 先让缓存建立起来,再触发容量淘汰。失效从前挂在调用方身上,setLimit 调完 prune
-        // 直接返回就漏掉了 —— 于是调低上限之后最多 30 秒里,列表还在列已经删掉的组,
-        // 用户点进去只会拿到"回收组不存在"。失效现在挂在 prune 自己身上,每个调用方都覆盖到。
-        // (这里直接驱动 prune:setLimit 要先 config.save(),那条路要 FMLPaths,单测里没有)
+    void capacityNeverDeletesGroupsAutomatically() throws Exception {
+        // 超过上限只拒绝新的备份，不由后台淘汰任何已有回收组。
+        // 现有组始终保留，彻底删除只能由人工操作。
+        // 容量统计仍反映真实磁盘占用。
         PanelConfig config = new PanelConfig();
+        config.recycleMaxFiles = 2;
         for (int i = 1; i <= 4; i++) {
             String id = writeGroup(String.format("20260101-00000%d-000", i), 1, 2);
             Files.writeString(this.root.resolve(id).resolve("a.nbt.gz"), "x", StandardCharsets.UTF_8);
         }
         RecycleStore store = new RecycleStore(config, this.root);
         JsonObject before = store.view("", 100);
-        assertEquals(4, before.getAsJsonArray("groups").size(), "先建立缓存");
+        assertEquals(4, before.getAsJsonArray("groups").size(), "超限也不能自动删除");
         assertEquals(4, before.get("file_count").getAsInt());
 
-        config.recycleMaxFiles = 2;
-        store.prune();
-
-        JsonObject after = store.view("", 100);
-        assertEquals(2, after.getAsJsonArray("groups").size(), "淘汰之后缓存必须立刻失效");
-        assertEquals(2, after.get("total_groups").getAsInt());
-        assertEquals(2, after.get("file_count").getAsInt(), "文件数统计同样不能是旧值");
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> store.stage(List.of(new RecycleStore.Source(UUID.randomUUID(),
+                        RecycleStore.DEFAULT_DIMENSION, new DiskScanner.EntryKey(
+                                RecycleStore.DEFAULT_DIMENSION, 0, 0, 0, 0), new net.minecraft.nbt.CompoundTag()))));
     }
 
     @Test

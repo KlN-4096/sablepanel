@@ -11,6 +11,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -97,13 +99,12 @@ class RecycleStoreVersionTest {
     }
 
     @Test
-    void isolatedMigrationClassifiesExistingGroupsAndReportsActualDiskBytes() throws Exception {
+    void currentGroupsReportVersionCountsAndActualDiskBytes() throws Exception {
         UUID shared = UUID.randomUUID();
         UUID dependency = UUID.randomUUID();
-        String older = writeLegacyGroup("20260101-000001-000", "recovery_required", shared, dependency);
-        String newer = writeLegacyGroup("20260101-000002-000", "restored", shared);
-
         RecycleStore store = store();
+        String older = commitGroup(store, 0, shared, dependency);
+        String newer = commit(store, shared, 2);
         store.stage(List.of(source(UUID.randomUUID(), 9)));
         JsonObject latest = store.view("latest", "", 10);
         JsonObject old = store.view("old", "", 10);
@@ -119,9 +120,9 @@ class RecycleStoreVersionTest {
     @Test
     void purgingLatestNeverPromotesAnOldVersionEvenAfterRestart() throws Exception {
         UUID uuid = UUID.randomUUID();
-        String older = writeLegacyGroup("20260101-000001-000", "restored", uuid);
-        String newer = writeLegacyGroup("20260101-000002-000", "restored", uuid);
         RecycleStore store = store();
+        String older = commit(store, uuid, 0);
+        String newer = commit(store, uuid, 1);
 
         JsonObject result = store.purgeGroups(List.of(newer));
 
@@ -135,8 +136,8 @@ class RecycleStoreVersionTest {
 
     @Test
     void purgeContinuesAfterAnInvalidGroup() throws Exception {
-        String valid = writeLegacyGroup("20260101-000001-000", "deleted", UUID.randomUUID());
         RecycleStore store = store();
+        String valid = commit(store, UUID.randomUUID(), 0);
 
         JsonObject result = store.purgeGroups(List.of("missing-group", valid));
 
@@ -148,46 +149,59 @@ class RecycleStoreVersionTest {
     }
 
     @Test
-    void retentionMayRemoveTheOldTargetWithoutLosingTheNewOwnersTransaction() throws Exception {
-        PanelConfig config = new PanelConfig();
-        config.recycleMaxFiles = 10;
-        RecycleStore store = new RecycleStore(config, this.root);
+    void operationalStateAndSourceEntryRoundTrip() throws Exception {
+        RecycleStore store = store();
         UUID uuid = UUID.randomUUID();
-        String older = commit(store, uuid, 0);
-        Files.createDirectory(this.root.resolve(older).resolve(".old-version"));
-        String newer = commit(store, uuid, 1);
-        setDeletedAt(older, 1);
-        setDeletedAt(newer, 2);
+        RecycleStore.Source source = source(uuid, 7);
 
-        config.recycleMaxFiles = 1;
-        store.prune();
+        String id = store.commit(store.stage(List.of(source), Map.of(
+                uuid, new RecycleStore.OperationalState(true, true))));
+        RecycleStore.RestoreBody body = store.loadGroup(id).bodies().get(0);
 
-        assertFalse(Files.exists(this.root.resolve(older)));
-        assertTrue(Files.isRegularFile(this.root.resolve(newer).resolve(".supersedes")));
-        RecycleStore restarted = new RecycleStore(config, this.root);
-        assertEquals(List.of(newer), ids(restarted.view("latest", "", 10)));
-        assertTrue(ids(restarted.view("old", "", 10)).isEmpty());
-        assertFalse(Files.exists(this.root.resolve(newer).resolve(".supersedes")));
+        assertEquals(source.key().id(), body.sourceEntry());
+        assertTrue(body.paused());
+        assertTrue(body.forced());
     }
 
     @Test
-    void retentionNeverDeletesATransactionOwnerBeforeItCanClassifyTheProtectedTarget() throws Exception {
-        PanelConfig config = new PanelConfig();
-        config.recycleMaxFiles = 10;
-        RecycleStore store = new RecycleStore(config, this.root);
+    void incompleteArchiveIsOldAndNeverBecomesLatest() throws Exception {
+        RecycleStore store = store();
         UUID uuid = UUID.randomUUID();
-        String protectedOlder = commitRecoveryRequired(store, uuid, 0);
-        Files.createDirectory(this.root.resolve(protectedOlder).resolve(".old-version"));
-        String newer = commit(store, uuid, 1);
 
+        String id = store.commitIncomplete(store.stageArchived(List.of(source(uuid, 4)),
+                Map.of(), "incomplete"));
+
+        assertTrue(ids(store.view("latest", "", 10)).isEmpty());
+        assertEquals(List.of(id), ids(store.view("old", "", 10)));
+        assertEquals("incomplete", store.loadGroup(id).state());
+        assertTrue(store.loadGroup(id).oldVersion());
+    }
+
+    @Test
+    void interruptedArchivedStagesRecoverOnlyToTheOldTab() throws Exception {
+        RecycleStore running = store();
+        RecycleStore.Stage complete = running.stageArchived(
+                List.of(source(UUID.randomUUID(), 4)), Map.of(), "deleted");
+        RecycleStore.Stage incomplete = running.stageArchived(
+                List.of(source(UUID.randomUUID(), 5)), Map.of(), "incomplete");
+
+        RecycleStore restarted = store();
+
+        assertTrue(ids(restarted.view("latest", "", 10)).isEmpty());
+        assertEquals(Set.of(complete.id(), incomplete.id()), Set.copyOf(ids(restarted.view("old", "", 10))));
+        assertEquals("deleted", restarted.loadGroup(complete.id()).state());
+        assertEquals("incomplete", restarted.loadGroup(incomplete.id()).state());
+    }
+
+    @Test
+    void pendingStagesReserveRecycleCapacity() throws Exception {
+        PanelConfig config = new PanelConfig();
         config.recycleMaxFiles = 1;
-        org.junit.jupiter.api.Assertions.assertThrows(java.io.IOException.class, store::prune);
+        RecycleStore store = new RecycleStore(config, this.root);
+        store.stage(List.of(source(UUID.randomUUID(), 0)));
 
-        assertTrue(Files.isDirectory(this.root.resolve(protectedOlder)));
-        assertTrue(Files.isDirectory(this.root.resolve(newer)));
-        assertTrue(Files.isRegularFile(this.root.resolve(newer).resolve(".supersedes")));
-        assertEquals(List.of(newer), ids(store.view("latest", "", 10)));
-        assertEquals(List.of(protectedOlder), ids(store.view("old", "", 10)));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> store.stage(List.of(source(UUID.randomUUID(), 1))));
     }
 
     private RecycleStore store() {
@@ -196,10 +210,6 @@ class RecycleStoreVersionTest {
 
     private static String commit(RecycleStore store, UUID uuid, int slot) throws Exception {
         return store.commit(store.stage(List.of(source(uuid, slot))));
-    }
-
-    private static String commitRecoveryRequired(RecycleStore store, UUID uuid, int slot) throws Exception {
-        return store.commitRecoveryRequired(store.stage(List.of(source(uuid, slot))));
     }
 
     private static String commitGroup(RecycleStore store, int firstSlot, UUID... uuids) throws Exception {
@@ -215,33 +225,6 @@ class RecycleStoreVersionTest {
         tag.putUUID("uuid", uuid);
         return new RecycleStore.Source(uuid, RecycleStore.DEFAULT_DIMENSION,
                 new DiskScanner.EntryKey(RecycleStore.DEFAULT_DIMENSION, 0, 0, 0, slot), tag);
-    }
-
-    private void setDeletedAt(String id, long value) throws Exception {
-        Path manifest = this.root.resolve(id).resolve("manifest.json");
-        JsonObject json = com.google.gson.JsonParser.parseString(Files.readString(manifest,
-                StandardCharsets.UTF_8)).getAsJsonObject();
-        json.addProperty("deleted_at", value);
-        Files.writeString(manifest, json.toString(), StandardCharsets.UTF_8);
-    }
-
-    private String writeLegacyGroup(String stamp, String state, UUID... uuids) throws Exception {
-        String id = stamp + "-" + UUID.randomUUID().toString().substring(0, 8);
-        Path directory = this.root.resolve(id);
-        Files.createDirectories(directory);
-        StringBuilder bodies = new StringBuilder();
-        for (int index = 0; index < uuids.length; index++) {
-            if (index > 0) bodies.append(',');
-            String backup = uuids[index] + ".nbt.gz";
-            Files.writeString(directory.resolve(backup), "backup-" + index, StandardCharsets.UTF_8);
-            bodies.append("{\"uuid\":\"").append(uuids[index]).append("\",\"blocks\":1,")
-                    .append("\"block_ids\":[],\"backups\":[\"").append(backup).append("\"]}");
-        }
-        String manifest = "{\"version\":1,\"id\":\"" + id + "\",\"state\":\"" + state
-                + "\",\"deleted_at\":1,\"file_count\":" + uuids.length + ",\"members\":"
-                + uuids.length + ",\"blocks\":" + uuids.length + ",\"bodies\":[" + bodies + "]}";
-        Files.writeString(directory.resolve("manifest.json"), manifest, StandardCharsets.UTF_8);
-        return id;
     }
 
     private static List<String> ids(JsonObject page) {
