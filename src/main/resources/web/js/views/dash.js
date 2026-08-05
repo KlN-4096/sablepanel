@@ -101,6 +101,7 @@ function renderDash(){
     <h4>${t('tools')}</h4>
     <div style="display:flex;gap:9px;flex-wrap:wrap">
       <button onclick="doRescan()">${t('rescan')}</button>
+      <button onclick="runConsistencyScan()">${t('consistencyScan')}</button>
       <button onclick="loadAll(true)">${t('refresh')}</button>
       <button onclick="doChangeToken()">${t('tokenChange')}</button>
       <button onclick="openManual()">${t('manualOpen')}</button>

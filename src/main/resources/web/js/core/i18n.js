@@ -55,8 +55,9 @@ const I18N = {
     adoptT:'收养孤儿物理体', adoptMsg:(n)=>`将把「${n}」重新接入 sable 加载管线(依赖体一并收养)。\n不修改任何磁盘数据,失败也无副作用。`,
     adoptOk:'收养成功,已重新加载', adoptPart:'收养完成(部分成员未能加载)', adoptFail:'收养失败: ',
     adoptTrunc:(n)=>`依赖链超过 ${n} 个成员上限,本次只收养了扫描到的前 ${n} 个`,
-    recycleT:'回收站', recycleEmpty:'回收站为空', recycleVersionEmpty:'此版本页签暂无回收组', recycleHint:'显示已验收删除和删除中断后保留的完整备份。',
-    recycleState:'恢复状态', recycleDeleted:'待恢复', recycleRecovery:'需恢复', recycleRestored:'已恢复', recycleStorage:'存储上限',
+    recycleT:'回收站', recycleEmpty:'回收站为空', recycleVersionEmpty:'此版本页签暂无回收组', recycleHint:'显示完整备份；不会自动清除，容量不足时需人工彻底删除。',
+    recycleState:'恢复状态', recycleDeleted:'待恢复', recycleRecovery:'需恢复', recycleRestored:'已恢复',
+    recycleIncomplete:'依赖不完整', restoreIncomplete:'依赖不完整的隔离副本不能直接恢复', recycleStorage:'存储上限',
     apply:'应用', recycleUsage:(n,m)=>`${n} / ${m} 个备份文件`, recycleDisk:n=>`磁盘占用 ${n}`,
     recycleStructures:'物理结构', pickRecycle:'选择一个备份物理体查看详情',
     restoreGroup:'恢复该依赖组', restoreHint:'恢复后会在保存位置重新加载',
@@ -81,7 +82,7 @@ const I18N = {
     deletedAt:'删除时间', restoredAt:'恢复时间', backupFiles:'备份文件', backupGroup:'回收组',
     saveLimitOk:'回收站上限已更新', saveLimitFail:'更新上限失败: ', recycleNoMatch:'没有符合条件的回收组',
     limitConfirmT:'调整回收站上限',
-    limitConfirmMsg:(n,m)=>`当前有 ${n} 个备份文件。将上限降到 ${m} 后,会立即删除日期最早的完整依赖组。`,
+    limitConfirmMsg:(n,m)=>`当前有 ${n} 个备份文件。将上限降到 ${m} 不会删除已有备份，但在人工彻底删除到上限以内前，新的删除会被拒绝。`,
     copied:'已复制', showMore:(n)=>`显示其余 ${n} 组`, noMatch:'没有符合条件的物理体',
     loadFail:'加载失败: ',
     statPhys:'物理引擎', statLoaded:'加载体', statNone:'暂无数据', confirmMismatch:'输入不匹配,已取消',
@@ -120,17 +121,35 @@ const I18N = {
     physHint:'维度曲线是物理引擎整体步进耗时,粉色曲线是全部加载体的 Java 逻辑耗时;均不含其它 mod。',
     dashGo:'查看 →', dashHealthy:'存档干净', dashRecBlocks:'可回收方块', dashRecGroups:'推荐组',
     dashOrphans:'孤儿体', dashDup:'多副本体', dashClone:'疑似克隆体', dashHolding:'暂存中',
-    tools:'维护', rescan:'立即重扫磁盘', rescanOk:'已触发重扫,数秒后刷新',
+    tools:'维护', rescan:'立即重扫磁盘', rescanOk:'已触发重扫,数秒后刷新', consistencyScan:'存档一致性检查',
+    consistencyTitle:'存档一致性检查', consistencyPointers:'悬空 holding 指针',
+    consistencyForced:'失效常驻票', consistencyPaused:'失效暂停状态', consistencyMissingBody:'物理体不存在',
+    consistencyHealthy:'未发现可确定修复的一致性问题。', consistencyRepair:'修复所选项',
+    consistencyAsk:(n)=>`确认修复所选 ${n} 项?\n修改前会备份对应元数据文件,不会删除任何仍存在的物理结构数据。`,
+    consistencyNone:'没有选择修复项', consistencyFail:'一致性检查失败: ', consistencyTruncated:'结果超过显示上限,请先修复本页后重新扫描。',
+    consistencyRepairResult:(ok,total)=>`本次修复 ${ok}/${total} 项`, consistencyBackup:'元数据备份',
+    consistencyRepairFailed:(n)=>`${n} 项因状态已变化或写入失败而跳过：`,
+    consistencyScanOp:'一致性检查', consistencyRepairOp:'一致性修复',
     manualOpen:'使用说明', manualTitle:'SablePanel 使用说明',
     manualStates:'状态与判断', manualCleanup:'清理判断', manualOps:'操作', manualRecycle:'回收站',
     manualPerformance:'性能数据', manualMaintenance:'面板维护',
-    dedupe:'去重副本', dedupeTitle:'整理重复存档副本', dedupeConfirm:'确认去重',
-    dedupeScanning:'正在实时扫描所有副本和 holding 指针…',
-    dedupeSafe:(n)=>`共 ${n} 个副本,完整 NBT 全部一致。将保留标记为“主副本”的条目。`,
-    dedupeUnsafe:'副本完整 NBT 不一致,只能查看差异,禁止自动删除。',
-    dedupeSingle:'实时扫描只找到一个条目,无需去重。',
-    dedupeAsk:(n)=>`确认通过 Sable 保存流程清理 ${n} 个完全相同的多余条目?\n主副本会保留,本操作不生成回收站记录。`,
-    dedupeDone:(n)=>`副本去重完成,已清理 ${n} 个条目`, dedupeFail:'副本去重失败: ',
+    dedupe:'处理副本', dedupeTitle:'处理物理结构副本', dedupeConfirm:'设为主版本',
+    dedupeScanning:'正在扫描完整依赖组、存储条目和 holding 指针…',
+    dedupeSingle:'没有需要处理的副本版本。', dedupeFail:'副本扫描失败: ',
+    copyVersionN:(n)=>`候选版本 ${n}`, copyCurrent:'当前使用', copyComplete:'依赖完整', copyIncomplete:'依赖不完整',
+    copyRedundant:(n)=>`${n} 个相同冗余`, copyVersionMeta:(members,blocks,delta)=>
+      `${members} 个成员 · ${fmt(blocks)} 个方块${delta===null?' · 当前基准未知':` · 相对当前 ${delta>0?'+':''}${fmt(delta)}`}`,
+    copyMissing:'缺失依赖', copyQuarantineWarn:(n)=>
+      `另有 ${n} 个无法组成完整依赖组的条目。确认主版本后会逐份归档为不可直接恢复的旧版本。`,
+    copyGroupSummary:(members,versions)=>`${members} 个关联成员 · ${versions} 个候选版本。点击版本切换右侧只读预览。`,
+    copyReady:'可设为主版本', copyCurrentUnknown:'当前活动版本无法判定',
+    copyCurrentUnknownWarn:'当前活动版本无法可靠判定；若处理失败，将以你所选版本作为恢复基线。',
+    copyCannotSelect:'依赖不完整,不可选为主版本', copyNoVersion:'没有完整候选版本',
+    copyOnlyIncomplete:'没有完整候选版本，只能隔离全部残缺条目', copyQuarantineAll:'隔离全部',
+    copyQuarantineAsk:(n)=>`确认隔离全部 ${n} 个残缺条目?\n原始 NBT 会逐份进入回收站旧版本，但不能直接恢复；世界中不会保留这个残缺依赖组。`,
+    copyQuarantineOp:'隔离不完整副本',
+    copyResolveAsk:(old,incomplete)=>`确认切换到所选完整依赖组?\n${old} 个未选版本将进入回收站旧版本,${incomplete} 个不完整条目将被隔离。`,
+    copyResolveOp:'处理副本',
     copyEntry:'条目 ID', copyPointer:'指针', copyBlocks:'方块', copyPlace:'位置 / 尺寸', copyCompare:'与主副本',
     copyKeep:'主副本', copySame:'完全一致', copyDifferent:'内容不同', copyReachable:(n)=>`有效 ×${n}`, copyUnreachable:'无有效指针',
     cloneWith:(n)=>`与 ${n} 个物理体疑似克隆`, cloneRelation:'疑似克隆关联', clonePeers:'关联物理结构',
@@ -168,11 +187,11 @@ const MANUAL = {
     ]},
     {k:'operations',label:'manualOps',sections:[
       {h:'日常操作',body:'<ul><li><b>重扫</b>：立即重建磁盘索引；后台也会每 120 秒自动扫描。</li><li><b>传送</b>：坐标指结构包围盒的<b>底面中心</b>（目的 y=100 表示结构底部落在 y=100）。未加载体会先强制加载；孤儿会先尝试连同依赖一起收养。</li><li><b>收养</b>：重建 holding 指针并接回加载管线，不删除或改写原有物理体条目。</li><li><b>删除</b>：按完整依赖组执行，严格验收成功后才提交回收站备份。</li><li><b>暂停</b>：用引擎固定约束把结构锁定在原地（与"创造模式物理手杖"的锁定同机制）。已持久化，重启后仍保持，需手动恢复。</li><li><b>批量操作</b>：勾选会跨筛选保留；批量删除仍会按依赖组去重并逐组验收。</li></ul>'},
-      {h:'副本去重',body:'<p>打开后会重新读取同 UUID 的每个槽位和全部 holding 指针。优先保留运行时正在使用的条目，其次保留有有效指针的条目，最后按条目 ID 稳定选择。只有所有完整 CompoundTag 深度相等时才可执行；操作通过 Sable 的 queueDeletion 与 saveAll 清理其它槽位，不直接改 region 文件，也不生成回收站备份。</p>'}
+      {h:'副本处理',body:'<p>打开后按完整依赖组、holding 位置和当前活动指针列出候选版本，并提供只读预览。只有依赖完整的版本可以设为主版本；未选版本会进入旧版本回收站，不会自动晋升。无法组成完整依赖组的条目只能隔离，不能直接恢复。</p>'}
     ]},
     {k:'recycle',label:'manualRecycle',sections:[
-      {h:'何时进入回收站',body:'<p>删除前会暂存完整依赖组备份；磁盘条目和 holding 指针通过删除后验收时记为待恢复。删除或自动回滚中断时，完整备份会记为需恢复，不再隐藏。</p>'},
-      {h:'恢复与容量',body:'<ul><li>恢复始终恢复完整依赖组，并在保存的维度和位置重新加载；旧版本不会覆盖世界中已有的同 UUID 物理体。旧备份若没有维度则按主世界处理。</li><li><b>待恢复</b>表示删除成功且备份可用；最新版本的<b>需恢复</b>会先清除同 UUID 残留再从快照重建整组，且不会被容量策略自动淘汰；<b>已恢复</b>表示该记录已经成功执行过恢复。</li><li>容量按实际备份文件计数。超过上限时，按删除日期淘汰最早的普通完整依赖组；需恢复备份占满容量时，新删除会在执行前被拒绝。</li></ul>'}
+      {h:'何时进入回收站',body:'<p>删除前会暂存完整依赖组备份；磁盘条目和 holding 指针通过删除后验收时记为待恢复。删除或自动回滚中断时，完整备份会记为需恢复，不再隐藏。回收站不会自动清除任何组，容量不足时请在列表中多选并彻底删除。</p>'},
+      {h:'恢复与容量',body:'<ul><li>恢复始终恢复完整依赖组，并在保存的维度和位置重新加载；旧版本不会覆盖世界中已有的同 UUID 物理体。</li><li><b>待恢复</b>表示删除成功且备份可用；最新版本的<b>需恢复</b>会先清除同 UUID 残留再从快照重建整组；<b>已恢复</b>表示该记录已经成功执行过恢复。</li><li>容量按实际备份文件计数。面板不会自动淘汰任何回收组；达到或超过上限时，新删除会在执行前被拒绝，需人工多选并彻底删除。</li></ul>'}
     ]},
     {k:'performance',label:'manualPerformance',sections:[
       {h:'曲线口径',body:'<ul><li><b>各维度物理引擎</b>：该维度物理步进耗时按服务器 tick 折算的毫秒值。</li><li><b>物理体逻辑</b>：所有已加载物理体 Java 逻辑每 tick 的采样合计，不包含服务器其它 mod。</li><li>历史同时保存 tick 数、平均 MSPT 与峰值 MSPT，供区间聚合和接口查询。</li></ul>'},
@@ -201,5 +220,6 @@ function applyI18n(){
   updateChartControls();
   if (document.getElementById('manualBack').style.display === 'flex') renderManual();
   if (COPY_SCAN && document.getElementById('copyBack').style.display === 'flex') renderDedupe(COPY_SCAN);
+  if (CONSISTENCY && document.getElementById('consistencyBack').style.display === 'flex') renderConsistency();
   renderSortRows();
 }

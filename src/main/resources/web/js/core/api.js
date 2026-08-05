@@ -77,6 +77,7 @@ async function authenticate(candidate, remembered){
     await loadAll(true);
     if (seq !== authSeq) return false;
     startEventStream();
+    scheduleStartupConsistency();
     return true;
   } catch (e) {
     // 旧尝试的失败不得清 token、不得重新锁页 —— 现在的状态属于更新的那次提交

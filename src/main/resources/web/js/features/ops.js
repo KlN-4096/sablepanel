@@ -91,6 +91,7 @@ async function restoreSelectedGroups(){
   if (groups.length) await confirmRestore(groups);
 }
 async function confirmRestore(groups){
+  if (groups.some(group=>group.state==='incomplete')) { toast(t('restoreIncomplete'),'bad'); return; }
   const bodies=groups.reduce((sum,group)=>sum+group.members,0);
   const blocks=groups.reduce((sum,group)=>sum+(group.blocks||0),0);
   const old=groups.filter(group=>group.version_state==='old').length;
@@ -193,7 +194,6 @@ async function doDeleteRecommended(){
 async function batchDelete(uuids){
   const r = await submitJob('/api/ops/batch_delete', {method:'POST', body: JSON.stringify({uuids})}, t('delOp'));
   if (!r) return;
-  SEL = null; SELG = null;
   loadRecycle();
 }
 async function doAdopt() {

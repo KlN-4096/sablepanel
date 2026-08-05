@@ -109,6 +109,10 @@ async function loadRecycleMesh(groupId,uuid) {
   return loadMeshAt(`/api/recycle/${groupId}/body/${uuid}/mesh`,uuid,`recycle:${groupId}`,
     ()=>RSEL&&RSELG&&RSEL.uuid===uuid&&RSELG.id===groupId);
 }
+async function loadCopyVersionMesh(uuid,versionId) {
+  return loadMeshAt(`/api/body/${uuid}/copy/${versionId}/mesh`,uuid,`copy:${versionId}`,
+    ()=>COPY_UUID===uuid&&COPY_VERSION===versionId&&document.getElementById('copyBack').style.display==='flex');
+}
 async function loadMeshAt(endpoint, uuid, source, isCurrent) {
   const info = document.getElementById('pvInfo');
   info.textContent = t('pvLoad');
@@ -199,4 +203,5 @@ document.getElementById('fsOpen').addEventListener('click', openPreviewFs);
 document.getElementById('fsClose').addEventListener('click', closePreviewFs);
 document.getElementById('manualBack').addEventListener('mousedown',event=>{ if(event.target.id==='manualBack') closeManual(); });
 document.getElementById('copyBack').addEventListener('mousedown',event=>{ if(event.target.id==='copyBack') closeDedupe(); });
+document.getElementById('consistencyBack').addEventListener('mousedown',event=>{ if(event.target.id==='consistencyBack') closeConsistency(); });
 window.addEventListener('resize', () => { resizeGL(); if (VIEW==='dash') renderDash(); });

@@ -472,11 +472,12 @@ function renderPlayerSelect(){
 }
 /* 成分表默认只列前 30 种,点"展开"看全部;切体时复位 */
 const COMP_PAGE = 30;
-let compExpanded = {compList:false, rCompList:false, fsComp:false};
+let compExpanded = {compList:false, rCompList:false, copyComp:false, fsComp:false};
 function toggleComp(id){ compExpanded[id] = !compExpanded[id]; renderComposition(); }
 function renderComposition(){
   const selected = VIEW==='recycle' ? RSEL : SEL;
-  for (const box of [document.getElementById('compList'), document.getElementById('rCompList'), document.getElementById('fsComp')]) {
+  for (const box of [document.getElementById('compList'), document.getElementById('rCompList'),
+    document.getElementById('copyComp'), document.getElementById('fsComp')]) {
     if (!box) continue;
     if (!MESH_DATA || !selected || MESH_UUID !== selected.uuid) { box.innerHTML = ''; continue; }
     const pal = [...MESH_DATA.palette].sort((a,b)=>b.count-a.count);
@@ -484,7 +485,8 @@ function renderComposition(){
     const open = compExpanded[box.id];
     const shown = open ? pal : pal.slice(0, COMP_PAGE);
     const rest = pal.length - shown.length;
-    box.innerHTML = (box.id==='compList'||box.id==='rCompList' ? `<h4>${t('composition')}${MESH_DATA.truncated?t('pvTrunc'):''}</h4>` : '') +
+    box.innerHTML = (box.id==='compList'||box.id==='rCompList'||box.id==='copyComp'
+      ? `<h4>${t('composition')}${MESH_DATA.truncated?t('pvTrunc'):''}</h4>` : '') +
       shown.map(p => `<div class="compRow">
         <span class="chip" style="background:#${(p.color>>>0).toString(16).padStart(6,'0')}"></span>
         <span class="cname" title="${esc(p.id)}">${esc(p.zh)}</span>

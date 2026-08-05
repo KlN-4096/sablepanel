@@ -21,6 +21,7 @@ function toggleSrvPop(){
 async function switchServer(id){
   document.getElementById('srvPop').style.display = 'none';
   closeDedupe();
+  if (document.getElementById('consistencyBack').style.display==='flex') closeConsistency();
   const self = SERVERS.find(s => s.self);
   CURSRV = (self && id === self.id) ? '' : id;
   localStorage.setItem('spServer', CURSRV);
@@ -50,6 +51,7 @@ async function switchServer(id){
   renderServerPicker(self ? self.id : id);
   renderDashServer();
   await loadAll(true);
+  CONSISTENCY=null; scheduleStartupConsistency();
   // A→B 快速连切时,A 那次的慢请求回来后界面已经是 B 了,再弹"已切换到 A"就是骗人。
   // 数据落地有代次保护,操作反馈也要有
   if (gen === srvGen()) toast(t('srvSwitched')(id));

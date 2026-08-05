@@ -184,6 +184,7 @@
       <label><input type="checkbox" class="rFState" value="deleted" checked onchange="renderRecycle()"> <span data-i18n="recycleDeleted">待恢复</span></label>
       <label><input type="checkbox" class="rFState" value="recovery_required" checked onchange="renderRecycle()"> <span data-i18n="recycleRecovery">需恢复</span></label>
       <label><input type="checkbox" class="rFState" value="restored" checked onchange="renderRecycle()"> <span data-i18n="recycleRestored">已恢复</span></label>
+      <label><input type="checkbox" class="rFState" value="incomplete" checked onchange="renderRecycle()"> <span data-i18n="recycleIncomplete">依赖不完整</span></label>
       <h3 data-i18n="scale">规模</h3>
       <label><input type="checkbox" class="rFSize" value="huge" checked onchange="renderRecycle()"> <span data-i18n="szHuge">巨型 ≥10000</span></label>
       <label><input type="checkbox" class="rFSize" value="large" checked onchange="renderRecycle()"> <span data-i18n="szLarge">大型 ≥1000</span></label>
@@ -211,7 +212,7 @@
       <div id="rBody"><div id="rDetailEmpty"><span class="big">♲</span><span data-i18n="pickRecycle">选择一个备份物理体查看详情</span></div></div>
       <div class="ops" id="rOps" style="display:none">
         <div class="row">
-          <button class="primary" onclick="restoreCurrentGroup()" data-i18n="restoreGroup">恢复该依赖组</button>
+          <button class="primary" id="restoreGroupBtn" onclick="restoreCurrentGroup()" data-i18n="restoreGroup">恢复该依赖组</button>
           <button class="danger" onclick="purgeCurrentGroup()" data-i18n="purgeGroup">彻底删除该依赖组</button>
           <span class="muted" style="font-size:11px" data-i18n="restoreHint">恢复后会在保存位置重新加载</span>
         </div>
@@ -258,10 +259,18 @@
   <div class="wideHead"><h3 data-i18n="manualTitle">SablePanel 使用说明</h3><button onclick="closeManual()">✕</button></div>
   <div class="manualLayout"><div id="manualTabs"></div><div id="manualContent"></div></div>
 </div></div>
-<div id="copyBack" class="panelBack"><div class="widePanel" style="width:820px;height:min(610px,84vh)">
-  <div class="wideHead"><h3 data-i18n="dedupeTitle">整理重复存档副本</h3><button onclick="closeDedupe()">✕</button></div>
-  <div class="copyPanelBody" id="copyPanelBody"></div>
-  <div class="copyPanelFoot"><span class="status" id="copyPanelStatus"></span><button onclick="closeDedupe()" data-i18n="cancel">取消</button><button class="primary" id="dedupeConfirm" onclick="confirmDedupe()" data-i18n="dedupeConfirm">确认去重</button></div>
+<div id="copyBack" class="panelBack"><div class="widePanel copyResolverPanel">
+  <div class="wideHead"><h3 data-i18n="dedupeTitle">处理物理结构副本</h3><button onclick="closeDedupe()">✕</button></div>
+  <div class="copyResolver">
+    <div class="copyPanelBody" id="copyPanelBody"></div>
+    <div class="copyPreviewColumn"><div id="copyPreviewHost" class="previewHost"></div><div id="copyComp"></div></div>
+  </div>
+  <div class="copyPanelFoot"><span class="status" id="copyPanelStatus"></span><button onclick="closeDedupe()" data-i18n="cancel">取消</button><button class="primary" id="dedupeConfirm" onclick="confirmDedupe()" data-i18n="dedupeConfirm">设为主版本</button></div>
+</div></div>
+<div id="consistencyBack" class="panelBack"><div class="widePanel consistencyPanel">
+  <div class="wideHead"><h3 data-i18n="consistencyTitle">存档一致性检查</h3><button onclick="closeConsistency()">✕</button></div>
+  <div id="consistencyBody"></div>
+  <div class="copyPanelFoot"><span class="status" id="consistencyStatus"></span><button onclick="closeConsistency()" data-i18n="close">关闭</button><button class="danger" id="consistencyRepair" onclick="repairConsistency()" data-i18n="consistencyRepair">修复所选项</button></div>
 </div></div>
 <div id="busy"><div class="spinner"></div><div id="busyText"></div></div>
 
@@ -275,6 +284,7 @@
 <script src="/js/features/cluster.js"></script>
 <script src="/js/features/ops.js"></script>
 <script src="/js/features/dedupe.js"></script>
+<script src="/js/features/consistency.js"></script>
 <script src="/js/views/chart.js"></script>
 <script src="/js/views/dash.js"></script>
 <script src="/js/views/bodies.js"></script>

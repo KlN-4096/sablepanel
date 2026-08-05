@@ -124,6 +124,8 @@ async function reapFinishedJobs(){
     const parts = [job.op, job.name, label, job.message];
     if (job.op === '回收站彻底删除' && (job.warnings || []).length) parts.push(job.warnings[0]);
     toast(parts.filter(Boolean).join(' · '), outcome === 'ok' ? 'ok' : 'bad');
+    if ((job.op==='删除'||job.op==='批量删除')&&outcome==='fail'
+      &&String(job.message||'').includes('处理副本')&&SEL&&SEL.copies>1) openDedupe();
     if (job.op === '回收站恢复' || job.op === '回收站彻底删除') refreshRecycle = true;
   }
   if (refreshRecycle) loadRecycle();

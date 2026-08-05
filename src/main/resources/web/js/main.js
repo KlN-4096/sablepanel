@@ -3,6 +3,7 @@
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('modalBack').style.display === 'flex') modalCancel();
+    else if (document.getElementById('consistencyBack').style.display === 'flex') closeConsistency();
     else if (document.getElementById('copyBack').style.display === 'flex') closeDedupe();
     else if (document.getElementById('manualBack').style.display === 'flex') closeManual();
     else if (document.getElementById('fsOverlay').style.display === 'block') closePreviewFs();

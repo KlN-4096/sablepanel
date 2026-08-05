@@ -20,6 +20,7 @@ function renderRecycleTabs(){
 function recycleStateTag(state){
   if (state==='restored') return `<span class="tag ok">${t('recycleRestored')}</span>`;
   if (state==='recovery_required') return `<span class="tag warn">${t('recycleRecovery')}</span>`;
+  if (state==='incomplete') return `<span class="tag bad">${t('recycleIncomplete')}</span>`;
   return `<span class="tag acc">${t('recycleDeleted')}</span>`;
 }
 function renderRecycle(){
@@ -90,6 +91,7 @@ function expandRecycle(open){
 function renderRecycleToolbar(visible, total){
   const selectedGroups=[...R_SELECTED].map(id=>RECYCLE_BY_ID.get(id)).filter(Boolean);
   const selectedBodies=selectedGroups.reduce((sum,group)=>sum+group.members,0);
+  const restoreable=selectedGroups.every(group=>group.state!=='incomplete');
   // 列表是分页拉的,所以要同时告诉用户"已加载多少 / 服务端一共多少",筛选只作用在已加载部分
   const loaded=(RECYCLE&&RECYCLE.groups.length)||0;
   const more=RECYCLE_CURSOR
@@ -102,7 +104,7 @@ function renderRecycleToolbar(visible, total){
      <button onclick="expandRecycle(false)">${t('collapseAll')}</button>
      ${more}
      ${selectedGroups.length?`<span id="rSelSeg"><span class="selInfo">${t('rSelectInfo')(selectedGroups.length,selectedBodies)}</span>
-       <button class="primary" onclick="restoreSelectedGroups()">${t('restoreSelected')}</button>
+       <button class="primary" onclick="restoreSelectedGroups()" ${restoreable?'':'disabled'}>${t('restoreSelected')}</button>
        <button class="danger" onclick="purgeSelectedGroups()">${t('purgeSelected')}</button>
        <button class="ghost" onclick="clearRecycleSelection()">${t('selClear')}</button></span>`:''}`;
 }
@@ -114,7 +116,7 @@ function clearRecycleSelection(){ R_SELECTED.clear(); renderRecycle(); }
 function selectRecycleBody(groupId, uuid){
   const group=RECYCLE_BY_ID.get(groupId), body=group&&(group.bodies||[]).find(item=>item.uuid===uuid);
   if (!body) return;
-  if (!RSEL || RSEL.uuid!==uuid) compExpanded={compList:false,rCompList:false,fsComp:false};
+  if (!RSEL || RSEL.uuid!==uuid) compExpanded={compList:false,rCompList:false,copyComp:false,fsComp:false};
   RSELG=group; RSEL=body; renderRecycleDetail(); renderRecycle();
   loadRecycleMesh(groupId,uuid);
 }
@@ -142,6 +144,7 @@ function renderRecycleDetail(){
   document.getElementById('rBody').innerHTML=
     `<table>${rows.map(row=>`<tr><td>${row[0]}</td><td>${row[1]}</td></tr>`).join('')}</table><div id="rCompList"></div>`;
   document.getElementById('rOps').style.display='block';
+  document.getElementById('restoreGroupBtn').disabled=group.state==='incomplete';
   renderComposition();
 }
 function clearRecycleDetail(){
