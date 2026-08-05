@@ -914,8 +914,8 @@ public final class OpsService {
         if (restoredAny) this.rescan.run();
     }
 
-    public JsonObject recycleView() {
-        return this.recycle.view();
+    public JsonObject recycleView(String cursor, int limit) {
+        return this.recycle.view(cursor, limit);
     }
 
     public JsonObject recycleMesh(String groupId, UUID uuid) throws Exception {
@@ -1191,6 +1191,13 @@ public final class OpsService {
 
     /** 孤儿收养(依赖闭包一起):不动盘,全部经 sable 原生 loadHoldingSubLevel 入场 */
     public JsonObject adopt(UUID uuid) throws Exception {
+        JsonObject result = adoptOne(uuid);
+        this.rescan.run();
+        return result;
+    }
+
+    /** 收养单体但不触发重扫。批量路径用它,整批结束后只扫一次。 */
+    private JsonObject adoptOne(UUID uuid) throws Exception {
         Map<UUID, MemberPlan> chain = prepareChain(uuid);
         if (chain.isEmpty()) throw new IllegalStateException("找不到该体的存档条目");
         // 链闭包触到 MAX_CHAIN 上限说明还有成员没进本次收养,要让用户知道是部分收养
@@ -1221,8 +1228,48 @@ public final class OpsService {
             r.add("chain", per);
             return r;
         });
-        this.rescan.run();
         return result;
+    }
+
+    /**
+     * 批量收养。前端从前是对每个孤儿体单独 POST 一次,N 个体就是 N 次作业提交 + N 次全量
+     * bodies 刷新,选区一大就线性放大;现在整批一个作业,失败项结构化留在 results/failed 里。
+     * <p>
+     * 逐项走 {@link #adoptOne} 而不是 {@code adopt}:后者每次都要重扫一遍磁盘,合并门闩只在
+     * 扫描仍排队时能合并,前一次扫完了下一项照样会再排一次,N 个体最坏就是 N 次全量扫描。
+     */
+    public JsonObject adoptBatch(List<UUID> uuids) {
+        JsonArray results = new JsonArray();
+        JsonArray failed = new JsonArray();
+        int ok = 0;
+        int index = 0;
+        for (UUID uuid : uuids) {
+            JobService.phase("收养");
+            JobService.detail(++index + "/" + uuids.size());
+            JsonObject item = new JsonObject();
+            item.addProperty("uuid", uuid.toString());
+            try {
+                JsonObject one = adoptOne(uuid);
+                boolean adopted = one.has("ok") && one.get("ok").getAsBoolean();
+                item.addProperty("ok", adopted);
+                if (one.has("truncated")) item.add("truncated", one.get("truncated"));
+                if (adopted) ok++;
+                else failed.add(uuid.toString());
+            } catch (Exception error) {
+                item.addProperty("ok", false);
+                item.addProperty("error", messageOf(error));
+                failed.add(uuid.toString());
+                SablePanel.LOGGER.warn("sablepanel: batch adopt {} failed", uuid, error);
+            }
+            results.add(item);
+        }
+        this.rescan.run();   // 整批一次
+        JsonObject out = new JsonObject();
+        out.addProperty("ok", ok);
+        out.addProperty("total", uuids.size());
+        out.add("results", results);
+        if (!failed.isEmpty()) out.add("failed", failed);
+        return out;
     }
 
     /** 实时副本审查:列表快照只负责提示,真正操作前始终严格重扫并深比较完整 NBT。 */

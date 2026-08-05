@@ -55,6 +55,10 @@ dependencies {
     compileOnly files("libs/sable-companion-common-1.21.1-1.6.0.jar")
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    // 单元测试要能调 BodyIndex.view():它引用 sable 的 SubLevel 类型，只 compileOnly 会 NoClassDefFound。
+    // 只进测试类路径，不影响发布产物（运行时仍由服务器 mods 目录提供）。
+    testRuntimeOnly files("libs/sable-neoforge-1.21.1-2.0.3.jar")
+    testRuntimeOnly files("libs/sable-companion-common-1.21.1-1.6.0.jar")
 
     jarJar(implementation('org.bouncycastle:bcprov-jdk18on:1.84')) {
         version { strictly '[1.84,1.85)'; prefer '1.84' }

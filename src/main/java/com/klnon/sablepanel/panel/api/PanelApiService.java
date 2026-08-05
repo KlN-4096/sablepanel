@@ -19,8 +19,10 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.regex.Pattern;
@@ -105,7 +107,11 @@ public final class PanelApiService {
                 return PanelResponse.json(200, stats, true);
             }
             case "/api/recycle" -> {
-                return PanelResponse.json(200, this.ops.recycleView(), true);
+                // 游标分页:cursor 是上一页最后一个组的 id,服务端只读这一页的 manifest
+                String cursor = request.query().getOrDefault("cursor", "");
+                int limit = request.query().containsKey("limit")
+                        ? Integer.parseInt(request.query().get("limit")) : 0;
+                return PanelResponse.json(200, this.ops.recycleView(cursor, limit), true);
             }
             case "/api/recycle/config" -> {
                 requirePost(request);
@@ -136,6 +142,11 @@ public final class PanelApiService {
                 requirePost(request);
                 List<UUID> uuids = readUuids(request);
                 return enqueue("批量删除", uuids, targetLabel(uuids), () -> this.ops.deleteBatch(uuids));
+            }
+            case "/api/ops/batch_adopt" -> {
+                requirePost(request);
+                List<UUID> uuids = readUuids(request);
+                return enqueue("批量收养", uuids, targetLabel(uuids), () -> this.ops.adoptBatch(uuids));
             }
             case "/api/ops/pause" -> {
                 requirePost(request);
@@ -219,6 +230,9 @@ public final class PanelApiService {
             return PanelResponse.json(200, out, false);
         } catch (IllegalStateException conflict) {
             return PanelResponse.error(409, conflict.getMessage());
+        } catch (java.util.concurrent.RejectedExecutionException overload) {
+            // worker 和队列都满了。必须当场回绝而不是继续排队 —— 排队只会推迟失败,还看不出容量已经不够
+            return PanelResponse.error(503, "面板作业队列已满,请等当前操作结束后重试");
         }
     }
 
@@ -348,9 +362,10 @@ public final class PanelApiService {
         JsonArray values = body.getAsJsonArray("uuids");
         if (values == null || values.isEmpty()) throw new IllegalArgumentException("uuids 为空");
         if (values.size() > 500) throw new IllegalArgumentException("单次最多 500 个");
-        List<UUID> result = new ArrayList<>();
+        // 去重放在这里,所有批量入口共用:重复 uuid 只会让同一个体被处理两遍
+        Set<UUID> result = new LinkedHashSet<>();
         for (var value : values) result.add(UUID.fromString(value.getAsString()));
-        return result;
+        return List.copyOf(result);
     }
 
     private static void requirePost(PanelRequest request) {

@@ -13,6 +13,7 @@ import net.minecraft.server.level.ServerLevel;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -30,6 +31,34 @@ import java.util.UUID;
 public final class BodyIndex {
     /** 磁盘快照超过这个年龄就不拿来做孤儿/holding 判定(正常扫描周期 120s) */
     private static final long STALE_SNAPSHOT_MS = 300_000L;
+    /**
+     * {@code /api/bodies} 单次响应最多输出这么多依赖组。
+     * <p>
+     * ponytail: 固定上限而非游标分页。这个接口喂的是整页的筛选/排序/多选/看板聚合,
+     * 全部在前端本地算;真改成分页要把这几样一起搬到服务端,是另一个量级的改动。
+     * 真有服务器越过这个数,再上分页。
+     */
+    private static final int MAX_VIEW_GROUPS = 3000;
+    /**
+     * 单次响应的估算字节预算。取值远低于 32 MiB 的协议上限:估算只能是上界近似,而且 JsonObject
+     * 在堆上比它的文本形态大好几倍,真正要防的是"先把整个对象建出来才发现发不出去"。
+     */
+    private static final long VIEW_BYTE_BUDGET = 12L << 20;
+    /** 一条成员记录除 blk/name 之外的固定开销上界(uuid、条目 id、维度、pos/size、状态字段) */
+    private static final int MEMBER_BASE_BYTES = 320;
+    /** 一个 blk 索引的上界(五位数 + 逗号) */
+    private static final int BLOCK_INDEX_BYTES = 7;
+    /** 已加载体附带的 runtime 对象上界 */
+    private static final int RUNTIME_BYTES = 256;
+    /** 克隆集合是去重提示,不是权威数据,超过这个数就不再往外发 */
+    private static final int MAX_CLONE_SETS = 500;
+
+    /** 成员记录的字节上界估算,用于 {@link #VIEW_BYTE_BUDGET} */
+    private static long memberBytes(DiskScanner.DiskEntry entry, boolean loaded) {
+        long name = entry.name() == null ? 0 : entry.name().length() * 3L;
+        return MEMBER_BASE_BYTES + name + (long) entry.blockIds().size() * BLOCK_INDEX_BYTES
+                + (loaded ? RUNTIME_BYTES : 0);
+    }
 
     private volatile List<DiskScanner.DiskEntry> diskSnapshot = List.of();
     private volatile long diskScanTime;
@@ -298,7 +327,7 @@ public final class BodyIndex {
                 .filter(en -> en.getValue().size() >= 2)
                 .sorted(Map.Entry.comparingByKey())
                 .toList();
-        for (int setId = 0; setId < orderedCloneSets.size(); setId++) {
+        for (int setId = 0; setId < Math.min(orderedCloneSets.size(), MAX_CLONE_SETS); setId++) {
             List<UUID> matches = new ArrayList<>(orderedCloneSets.get(setId).getValue());
             matches.sort(UUID::compareTo);
             DiskScanner.DiskEntry sample = byUuid.get(matches.get(0));
@@ -319,11 +348,9 @@ public final class BodyIndex {
             cloneSetArr.add(set);
         }
 
-        // 方块调色板(全局去重,body 引用索引)
+        // 方块调色板(全局去重,body 引用索引)。只收真正输出出去的成员用到的方块 ——
+        // 从前是先按全部磁盘条目建一张完整表,截断之后表里全是没人引用的条目,白占字节
         Map<String, Integer> paletteIdx = new LinkedHashMap<>();
-        for (DiskScanner.DiskEntry e : byUuid.values()) {
-            for (String id : e.blockIds()) paletteIdx.putIfAbsent(id, paletteIdx.size());
-        }
 
         // 并查集分组(按 deps,双向)
         Map<UUID, UUID> parent = new HashMap<>();
@@ -340,8 +367,13 @@ public final class BodyIndex {
 
         // 运行时存在但磁盘还没有条目的体(刚生成/未保存):单独成组显示,可传送不可预览
         JsonArray freshArr = new JsonArray();
+        long freshBytes = 0;
+        int freshTotal = 0;
         for (Map.Entry<UUID, JsonObject> en : rt.entrySet()) {
             if (byUuid.containsKey(en.getKey())) continue;
+            freshTotal++;
+            if (freshArr.size() >= MAX_VIEW_GROUPS || freshBytes >= VIEW_BYTE_BUDGET) continue;
+            freshBytes += MEMBER_BASE_BYTES + RUNTIME_BYTES;
             JsonObject rto = en.getValue();
             JsonObject m = new JsonObject();
             m.addProperty("uuid", en.getKey().toString());
@@ -378,10 +410,29 @@ public final class BodyIndex {
             freshArr.add(go);
         }
 
+        // 单页硬上限。从前是无条件全量构建:响应大小只随存档增长,32 MiB 的协议上限拦不住
+        // "先把整个对象建到堆里"。只按组数截断还不够 —— 3000 个巨型组照样能撑爆,所以组数之外
+        // 再算一份字节预算(按各字段上界估),两条中先到的那条生效。
+        // 排序按总方块数降序:真被砍掉的是最小的那些组,total_bodies 仍是真值,前端显式提示已截断。
+        List<Map.Entry<UUID, List<UUID>>> ordered = new ArrayList<>(groups.entrySet());
+        Map<UUID, Long> weight = new HashMap<>();
+        for (Map.Entry<UUID, List<UUID>> g : ordered) {
+            long sum = 0;
+            for (UUID u : g.getValue()) sum += byUuid.get(u).blocks();
+            weight.put(g.getKey(), sum);
+        }
+        ordered.sort(Comparator.comparingLong((Map.Entry<UUID, List<UUID>> g) -> weight.get(g.getKey())).reversed());
+
         JsonArray groupArr = new JsonArray();
         groupArr.addAll(freshArr);
-        for (Map.Entry<UUID, List<UUID>> g : groups.entrySet()) {
+        long budget = freshBytes;
+        int shownGroups = 0;
+        for (Map.Entry<UUID, List<UUID>> g : ordered) {
+            // 至少出一组:否则单个超预算的巨型组会让整个列表空着
+            if (shownGroups > 0 && (shownGroups >= MAX_VIEW_GROUPS || budget >= VIEW_BYTE_BUDGET)) break;
+            shownGroups++;
             List<UUID> members = g.getValue();
+            for (UUID u : members) budget += memberBytes(byUuid.get(u), rt.containsKey(u));
             long totalBlocks = 0;
             String bestName = null;
             int bestNameBlocks = -1;
@@ -446,7 +497,14 @@ public final class BodyIndex {
                 }
                 if (!e.deps().isEmpty()) m.addProperty("deps", e.deps().size());
                 JsonArray blk = new JsonArray();
-                for (String id : e.blockIds()) blk.add(paletteIdx.get(id));
+                for (String id : e.blockIds()) {
+                    Integer at = paletteIdx.get(id);
+                    if (at == null) {
+                        at = paletteIdx.size();
+                        paletteIdx.put(id, at);
+                    }
+                    blk.add(at);
+                }
                 m.add("blk", blk);
                 if (loaded) m.add("runtime", rto);
                 memberArr.add(m);
@@ -487,6 +545,12 @@ public final class BodyIndex {
         out.addProperty("scan_time", this.diskScanTime);
         out.addProperty("total_bodies", byUuid.size() + freshArr.size());
         out.addProperty("total_entries", disk.size());
+        int totalGroups = groups.size() + freshTotal;
+        out.addProperty("total_groups", totalGroups);
+        out.addProperty("shown_groups", groupArr.size());
+        out.addProperty("group_limit", MAX_VIEW_GROUPS);
+        // 组数上限和字节预算任一条生效都算截断:前端据此提示,别让用户以为体没了
+        if (groupArr.size() < totalGroups) out.addProperty("truncated", true);
         // 暂停集合(含未加载体的暂停意图):前端以此为单一事实源渲染 ⏸ 标记
         JsonArray pausedArr = new JsonArray();
         for (UUID u : com.klnon.sablepanel.panel.service.PauseService.snapshot()) pausedArr.add(u.toString());

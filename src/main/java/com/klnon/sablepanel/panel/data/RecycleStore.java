@@ -42,6 +42,11 @@ public final class RecycleStore {
     private static final DateTimeFormatter ID_TIME = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS");
     private static final Pattern SAFE_ID = Pattern.compile("[0-9A-Za-z_-]{8,96}");
     private static final String MANIFEST = "manifest.json";
+    /** 单页组数上限与默认值:客户端可以要更少,但要不到更多 */
+    public static final int PAGE_LIMIT_MAX = 200;
+    private static final int PAGE_LIMIT_DEFAULT = 100;
+    /** 单页方块索引总数预算:条数之外再兜一层,防止少数超大组把一页撑爆 */
+    private static final int PAGE_BLOCK_BUDGET = 200_000;
 
     public record Source(UUID uuid, String dimension, DiskScanner.EntryKey key, CompoundTag tag) {
     }
@@ -218,32 +223,81 @@ public final class RecycleStore {
         throw new IOException("回收组中不存在该物理体");
     }
 
-    public synchronized JsonObject view() {
+    /**
+     * 游标分页视图。
+     * <p>
+     * 从前是"读全部 manifest、建全局调色板、输出全部组",一次调用的堆和响应都只随备份数增长
+     * ——实测 3 个组 357 个备份文件就已经 2.6 MB,离 32 MiB 的协议上限并不远,而且是先把整个对象
+     * 建出来才发现发不出去。现在读取、构建、传输三个阶段都有单页上限。
+     * <p>
+     * 游标是上一页最后一个组的 id。组目录名是 {@code yyyyMMdd-HHmmss-SSS-<rand>},字典序即时间序,
+     * 所以定位游标不需要读任何 manifest;用的是 keyset 语义(跳过 id ≥ 游标的),游标那一组即使
+     * 在两次请求之间被清理掉也不会翻页失败。格式非法的游标按"没有游标"处理,退回第一页。
+     *
+     * @param limit 单页组数,≤0 取默认值,上限 {@link #PAGE_LIMIT_MAX}
+     */
+    public synchronized JsonObject view(String cursor, int limit) {
+        int pageLimit = limit <= 0 ? PAGE_LIMIT_DEFAULT : Math.min(limit, PAGE_LIMIT_MAX);
+        String from = cursor != null && SAFE_ID.matcher(cursor).matches() ? cursor : "";
         JsonObject out = new JsonObject();
         out.addProperty("limit", this.config.recycleMaxFiles);
+        out.addProperty("page_limit", pageLimit);
         JsonArray groups = new JsonArray();
-        List<JsonObject> manifests = new ArrayList<>();
         try {
-            for (Path directory : committedDirectories()) {
+            List<Path> directories = new ArrayList<>(committedDirectories());
+            directories.sort(Comparator.comparing((Path path) -> path.getFileName().toString()).reversed());
+            out.addProperty("total_groups", directories.size());
+            List<JsonObject> manifests = new ArrayList<>();
+            String nextCursor = "";
+            boolean more = false;
+            int cost = 0;
+            for (Path directory : directories) {
+                String id = directory.getFileName().toString();
+                if (!from.isEmpty() && id.compareTo(from) >= 0) continue;
+                // 单条记录可能异常大(一个组几百个体),所以除了条数还有一份方块索引预算;
+                // 但每页至少出一条,否则超预算的那一组会永远翻不过去
+                if (manifests.size() >= pageLimit || (cost >= PAGE_BLOCK_BUDGET && !manifests.isEmpty())) {
+                    more = true;
+                    break;
+                }
                 try {
-                    manifests.add(readManifest(directory));
+                    JsonObject manifest = readManifest(directory);
+                    manifests.add(manifest);
+                    cost += blockIdCount(manifest);
+                    nextCursor = id;
                 } catch (Exception error) {
-                    SablePanel.LOGGER.warn("sablepanel: skipping unreadable recycle group {}", directory.getFileName(), error);
+                    SablePanel.LOGGER.warn("sablepanel: skipping unreadable recycle group {}", id, error);
                 }
             }
-            manifests.sort(Comparator.comparingLong(RecycleStore::deletedAt).reversed());
-            Map<String, Integer> palette = collectPalette(manifests);
-            for (JsonObject manifest : manifests) groups.add(toView(manifest, palette));
-            out.addProperty("file_count", countBackupFiles(this.root, true));
+            // 单个组自己就超过预算时(几百个体的巨型依赖组)只发它的元数据,不发方块构成 ——
+            // 强行整份放进去等于分页白做,一页照样能撑爆响应
+            boolean withBlocks = !(manifests.size() == 1 && cost > PAGE_BLOCK_BUDGET);
+            Map<String, Integer> palette = withBlocks ? collectPalette(manifests) : Map.of();
+            for (JsonObject manifest : manifests) groups.add(toView(manifest, palette, withBlocks));
+            // 全盘统计要走一遍目录树,只在第一页算,翻页时前端沿用首页的值
+            if (from.isEmpty()) out.addProperty("file_count", countBackupFiles(this.root, true));
             out.add("block_palette", paletteJson(palette));
+            out.addProperty("next_cursor", more ? nextCursor : "");
         } catch (Exception error) {
             SablePanel.LOGGER.warn("sablepanel: recycle view failed", error);
             out.addProperty("error", String.valueOf(error.getMessage()));
             out.addProperty("file_count", 0);
             out.add("block_palette", new JsonArray());
+            out.addProperty("next_cursor", "");
         }
         out.add("groups", groups);
         return out;
+    }
+
+    private static int blockIdCount(JsonObject manifest) {
+        JsonArray bodies = manifest.getAsJsonArray("bodies");
+        if (bodies == null) return 0;
+        int total = 0;
+        for (var bodyElement : bodies) {
+            JsonArray ids = bodyElement.getAsJsonObject().getAsJsonArray("block_ids");
+            if (ids != null) total += ids.size();
+        }
+        return total;
     }
 
     public synchronized void markRestored(String id) throws IOException {
@@ -448,16 +502,21 @@ public final class RecycleStore {
         return palette;
     }
 
-    private static JsonObject toView(JsonObject manifest, Map<String, Integer> palette) {
+    /**
+     * @param withBlocks false 时丢掉方块构成(只留计数)。单个组自己就超过整页预算时用它 ——
+     *                   总得让这一页翻得过去,但也不能整份塞进来把响应撑爆;构成条前端会显示为空。
+     */
+    private static JsonObject toView(JsonObject manifest, Map<String, Integer> palette, boolean withBlocks) {
         JsonObject view = manifest.deepCopy();
         for (var bodyElement : view.getAsJsonArray("bodies")) {
             JsonObject body = bodyElement.getAsJsonObject();
             JsonArray ids = body.remove("block_ids") instanceof JsonArray array ? array : new JsonArray();
             body.remove("backups");
             JsonArray indexes = new JsonArray();
-            for (var id : ids) indexes.add(palette.get(id.getAsString()));
+            if (withBlocks) for (var id : ids) indexes.add(palette.get(id.getAsString()));
             body.add("blk", indexes);
         }
+        if (!withBlocks) view.addProperty("blocks_omitted", true);
         return view;
     }
 
