@@ -914,8 +914,8 @@ public final class OpsService {
         if (restoredAny) this.rescan.run();
     }
 
-    public JsonObject recycleView(String cursor, int limit) {
-        return this.recycle.view(cursor, limit);
+    public JsonObject recycleView(String version, String cursor, int limit) {
+        return this.recycle.view(version, cursor, limit);
     }
 
     public JsonObject recycleMesh(String groupId, UUID uuid) throws Exception {
@@ -943,7 +943,7 @@ public final class OpsService {
             result.addProperty("id", groupId);
             try {
                 RecycleStore.RestoreGroup group = this.recycle.loadGroup(groupId);
-                restoreGroupData(group, "recovery_required".equals(group.state()), warnings);
+                restoreGroupData(group, !group.oldVersion() && "recovery_required".equals(group.state()), warnings);
                 try {
                     this.recycle.markRestored(groupId);
                 } catch (Exception metadataError) {
@@ -971,6 +971,30 @@ public final class OpsService {
         return out;
     }
 
+    public synchronized JsonObject purgeRecycleGroups(List<String> groupIds) {
+        JobService.phase("彻底删除回收组");
+        JobService.detail(groupIds.size() + " 个依赖组");
+        JsonObject out = this.recycle.purgeGroups(groupIds);
+        JsonArray warnings = new JsonArray();
+        for (var element : out.getAsJsonArray("results")) {
+            JsonObject result = element.getAsJsonObject();
+            if (!result.get("ok").getAsBoolean()) {
+                warnings.add(result.get("id").getAsString() + ": " + result.get("error").getAsString());
+                continue;
+            }
+            JsonObject event = new JsonObject();
+            event.addProperty("ev", "panel_op");
+            event.addProperty("op", "recycle_purge");
+            event.addProperty("group", result.get("id").getAsString());
+            event.addProperty("members", result.get("members").getAsInt());
+            event.addProperty("files", result.get("files").getAsInt());
+            event.addProperty("bytes", result.get("bytes").getAsLong());
+            EventLog.write(event);
+        }
+        if (!warnings.isEmpty()) out.add("warnings", warnings);
+        return out;
+    }
+
     /** 磁盘损坏跳过等非致命告警,随操作结果一并交给前端展示。 */
     private static void attachWarnings(JsonObject response, List<String> warnings) {
         if (warnings.isEmpty()) return;
@@ -991,13 +1015,18 @@ public final class OpsService {
         // 同一趟扫描顺路建 plot 槽位占用表:删除释放的槽位会被 sable 按首位适配复用给新体,
         // 而恢复用的 allocateSubLevel 只查加载态 —— 不拦下来就会造出"同槽双体"(加载互斥)
         Map<DiskScanner.PlotKey, Set<UUID>> plotOwners = DiskScanner.plotOwners(meta);
-        onMainUntilComplete(() -> restoreGroupOnMain(group, existingEntries, plotOwners));
+        List<ServerSubLevel> created = new ArrayList<>();
+        Set<ServerLevel> touched = new LinkedHashSet<>();
+        onMainUntilComplete(() -> restoreGroupOnMain(group, existingEntries, plotOwners, created, touched));
         try {
             verifyRestoredGroup(group, warnings);
         } catch (Exception verificationError) {
             if (!replaceExisting) {
                 try {
-                    purgeRestoreTargets(targets, warnings);
+                    onMainUntilComplete(() -> {
+                        cleanupFailedRestore(created, touched);
+                        return new JsonObject();
+                    });
                 } catch (Exception cleanupError) {
                     verificationError.addSuppressed(cleanupError);
                 }
@@ -1008,9 +1037,9 @@ public final class OpsService {
 
     private JsonObject restoreGroupOnMain(RecycleStore.RestoreGroup group,
                                           Map<UUID, Integer> existingEntries,
-                                          Map<DiskScanner.PlotKey, Set<UUID>> plotOwners) throws Exception {
-        List<ServerSubLevel> created = new ArrayList<>();
-        Set<ServerLevel> touched = new LinkedHashSet<>();
+                                          Map<DiskScanner.PlotKey, Set<UUID>> plotOwners,
+                                          List<ServerSubLevel> created,
+                                          Set<ServerLevel> touched) throws Exception {
         try {
             for (RecycleStore.RestoreBody body : group.bodies()) {
                 boolean exists = existingEntries.getOrDefault(body.uuid(), 0) > 0
@@ -1048,7 +1077,7 @@ public final class OpsService {
         for (ServerSubLevel body : created) {
             try {
                 ServerSubLevelContainer container = SubLevelContainer.getContainer(body.getLevel());
-                if (container != null && resolveLoaded(body.getUniqueId()) != null) {
+                if (container != null && resolveLoaded(body.getUniqueId()) == body) {
                     container.removeSubLevel(body, SubLevelRemovalReason.REMOVED);
                 }
             } catch (Throwable error) {

@@ -32,6 +32,7 @@ public final class PanelApiService {
     private static final long IDLE_AFTER_MS = 300_000L;
     private static final Pattern RECYCLE_MESH = Pattern.compile(
             "/api/recycle/([0-9A-Za-z_-]{8,96})/body/([0-9a-fA-F-]{36})/mesh");
+    private static final Pattern RECYCLE_ID = Pattern.compile("[0-9A-Za-z_-]{8,96}");
     private static final Pattern BODY_OP = Pattern.compile(
             "/api/body/([0-9a-fA-F-]{36})/(mesh|copies|teleport_player|teleport|delete|adopt|deduplicate)");
 
@@ -108,10 +109,14 @@ public final class PanelApiService {
             }
             case "/api/recycle" -> {
                 // 游标分页:cursor 是上一页最后一个组的 id,服务端只读这一页的 manifest
+                String version = request.query().getOrDefault("version", "latest");
+                if (!"latest".equals(version) && !"old".equals(version)) {
+                    throw new IllegalArgumentException("version 必须是 latest 或 old");
+                }
                 String cursor = request.query().getOrDefault("cursor", "");
                 int limit = request.query().containsKey("limit")
                         ? Integer.parseInt(request.query().get("limit")) : 0;
-                return PanelResponse.json(200, this.ops.recycleView(cursor, limit), true);
+                return PanelResponse.json(200, this.ops.recycleView(version, cursor, limit), true);
             }
             case "/api/recycle/config" -> {
                 requirePost(request);
@@ -121,13 +126,15 @@ public final class PanelApiService {
             }
             case "/api/recycle/restore" -> {
                 requirePost(request);
-                JsonArray ids = request.jsonBody().getAsJsonArray("ids");
-                if (ids == null || ids.isEmpty()) throw new IllegalArgumentException("ids 为空");
-                if (ids.size() > 500) throw new IllegalArgumentException("单次最多恢复 500 个依赖组");
-                List<String> groupIds = new ArrayList<>();
-                for (var id : ids) groupIds.add(id.getAsString());
+                List<String> groupIds = readRecycleIds(request);
                 return enqueue("回收站恢复", List.of(), groupIds.size() + " 个依赖组",
                         () -> this.ops.restoreRecycleGroups(groupIds));
+            }
+            case "/api/recycle/purge" -> {
+                requirePost(request);
+                List<String> groupIds = readRecycleIds(request);
+                return enqueue("回收站彻底删除", List.of(), groupIds.size() + " 个依赖组",
+                        () -> this.ops.purgeRecycleGroups(groupIds));
             }
             case "/api/rescan" -> {
                 requirePost(request);
@@ -365,6 +372,19 @@ public final class PanelApiService {
         // 去重放在这里,所有批量入口共用:重复 uuid 只会让同一个体被处理两遍
         Set<UUID> result = new LinkedHashSet<>();
         for (var value : values) result.add(UUID.fromString(value.getAsString()));
+        return List.copyOf(result);
+    }
+
+    private static List<String> readRecycleIds(PanelRequest request) {
+        JsonArray values = request.jsonBody().getAsJsonArray("ids");
+        if (values == null || values.isEmpty()) throw new IllegalArgumentException("ids 为空");
+        if (values.size() > 500) throw new IllegalArgumentException("单次最多处理 500 个依赖组");
+        Set<String> result = new LinkedHashSet<>();
+        for (var value : values) {
+            String id = value.getAsString();
+            if (!RECYCLE_ID.matcher(id).matches()) throw new IllegalArgumentException("回收组 ID 无效");
+            result.add(id);
+        }
         return List.copyOf(result);
     }
 

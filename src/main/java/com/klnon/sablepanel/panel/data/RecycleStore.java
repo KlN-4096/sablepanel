@@ -42,6 +42,9 @@ public final class RecycleStore {
     private static final DateTimeFormatter ID_TIME = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS");
     private static final Pattern SAFE_ID = Pattern.compile("[0-9A-Za-z_-]{8,96}");
     private static final String MANIFEST = "manifest.json";
+    private static final String OLD_VERSION_MARKER = ".old-version";
+    private static final String VERSION_TRANSACTION = ".supersedes";
+    private static final String VERSION_MIGRATION_MARKER = ".version-markers-migrated";
     /** 单页组数上限与默认值:客户端可以要更少,但要不到更多 */
     public static final int PAGE_LIMIT_MAX = 200;
     private static final int PAGE_LIMIT_DEFAULT = 100;
@@ -56,7 +59,7 @@ public final class RecycleStore {
     public record RestoreBody(UUID uuid, String dimension, CompoundTag tag) {
     }
 
-    public record RestoreGroup(String id, String state, List<RestoreBody> bodies) {
+    public record RestoreGroup(String id, String state, boolean oldVersion, List<RestoreBody> bodies) {
     }
 
     public static final class Stage {
@@ -79,9 +82,18 @@ public final class RecycleStore {
     private record RetentionEntry(Path path, long createdAt, int files, boolean directory) {
     }
 
+    private record StorageStats(int files, long bytes) {
+    }
+
+    private record VersionCandidate(Path directory, long enteredAt, Set<UUID> members) {
+    }
+
     private final PanelConfig config;
     private final Path root;
     private final Path pendingRoot;
+    private final Map<UUID, String> latestByUuid = new LinkedHashMap<>();
+    private final Map<String, Set<UUID>> latestMembers = new LinkedHashMap<>();
+    private final Set<String> pendingOldGroups = new LinkedHashSet<>();
 
     public RecycleStore(PanelConfig config) {
         this(config, FMLPaths.GAMEDIR.get().resolve("sablepanel-recycle"));
@@ -91,7 +103,11 @@ public final class RecycleStore {
         this.config = config;
         this.root = root.toAbsolutePath().normalize();
         this.pendingRoot = this.root.resolve(".pending");
+        recoverVersionTransactions();
+        migrateLegacyVersionMarkers();
+        rebuildLatestIndex();
         recoverInterruptedStages();
+        rebuildLatestIndex();
     }
 
     public synchronized Stage stage(List<Source> sources) throws IOException {
@@ -139,8 +155,15 @@ public final class RecycleStore {
         Files.createDirectories(this.root);
         Path destination = this.root.resolve(stage.id);
         if (Files.exists(destination)) throw new IOException("回收组 ID 已存在: " + stage.id);
+        Set<String> previous = prepareVersionTransaction(stage.directory, stage.manifest);
         moveAtomic(stage.directory, destination);
         stage.committed = true;
+        registerLatest(stage.id, bodyUuids(stage.manifest), previous);
+        try {
+            completeVersionTransaction(destination);
+        } catch (Exception error) {
+            SablePanel.LOGGER.warn("sablepanel: recycle version transaction remains pending for {}", stage.id, error);
+        }
         try {
             prune();
         } catch (Exception error) {
@@ -163,16 +186,25 @@ public final class RecycleStore {
                         throw new IOException("事务目录与清单 ID 不一致");
                     }
                     String state = manifest.has("state") ? manifest.get("state").getAsString() : "pending";
-                    if (!"pending".equals(state) && !"recovery_required".equals(state)) continue;
+                    if (!"pending".equals(state) && !"deleted".equals(state)
+                            && !"recovery_required".equals(state)) continue;
                     long now = System.currentTimeMillis();
-                    long stagedAt = Files.getLastModifiedTime(directory).toMillis();
                     manifest.addProperty("state", "recovery_required");
-                    manifest.addProperty("deleted_at", stagedAt);
+                    // pending 直到这里才对用户可见；恢复时刻才是它进入回收站的顺序。
+                    manifest.addProperty("deleted_at", now);
                     manifest.addProperty("recovery_required_at", now);
                     writeJsonAtomic(directory.resolve(MANIFEST), manifest);
                     Path destination = this.root.resolve(id);
                     if (Files.exists(destination)) throw new IOException("同名回收组已存在");
+                    Set<String> previous = prepareVersionTransaction(directory, manifest);
                     moveAtomic(directory, destination);
+                    registerLatest(id, bodyUuids(manifest), previous);
+                    try {
+                        completeVersionTransaction(destination);
+                    } catch (Exception error) {
+                        SablePanel.LOGGER.warn("sablepanel: recovered recycle version transaction remains pending for {}",
+                                id, error);
+                    }
                     recovered++;
                 } catch (Exception error) {
                     SablePanel.LOGGER.error("sablepanel: pending recycle transaction {} needs manual inspection",
@@ -239,14 +271,31 @@ public final class RecycleStore {
      * @param limit 单页组数,≤0 取默认值,上限 {@link #PAGE_LIMIT_MAX}
      */
     public synchronized JsonObject view(String cursor, int limit) {
+        return view("latest", cursor, limit);
+    }
+
+    public synchronized JsonObject view(String version, String cursor, int limit) {
+        if (!"latest".equals(version) && !"old".equals(version)) {
+            throw new IllegalArgumentException("回收站版本必须是 latest 或 old");
+        }
+        boolean oldVersion = "old".equals(version);
         int pageLimit = limit <= 0 ? PAGE_LIMIT_DEFAULT : Math.min(limit, PAGE_LIMIT_MAX);
         String from = cursor != null && SAFE_ID.matcher(cursor).matches() ? cursor : "";
         JsonObject out = new JsonObject();
         out.addProperty("limit", this.config.recycleMaxFiles);
         out.addProperty("page_limit", pageLimit);
+        out.addProperty("latest_groups", 0);
+        out.addProperty("old_groups", 0);
+        out.addProperty("total_groups", 0);
         JsonArray groups = new JsonArray();
         try {
-            List<Path> directories = new ArrayList<>(committedDirectories());
+            List<Path> allDirectories = new ArrayList<>(committedDirectories());
+            int oldGroups = (int) allDirectories.stream().filter(this::isOldVersion).count();
+            out.addProperty("latest_groups", allDirectories.size() - oldGroups);
+            out.addProperty("old_groups", oldGroups);
+            List<Path> directories = allDirectories.stream()
+                    .filter(path -> isOldVersion(path) == oldVersion)
+                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
             directories.sort(Comparator.comparing((Path path) -> path.getFileName().toString()).reversed());
             out.addProperty("total_groups", directories.size());
             List<JsonObject> manifests = new ArrayList<>();
@@ -264,6 +313,7 @@ public final class RecycleStore {
                 }
                 try {
                     JsonObject manifest = readManifest(directory);
+                    manifest.addProperty("version_state", version);
                     manifests.add(manifest);
                     cost += manifestCost(manifest);
                     nextCursor = id;
@@ -277,17 +327,67 @@ public final class RecycleStore {
             Map<String, Integer> palette = withBlocks ? collectPalette(manifests) : Map.of();
             for (JsonObject manifest : manifests) groups.add(toView(manifest, palette, withBlocks));
             // 全盘统计要走一遍目录树,只在第一页算,翻页时前端沿用首页的值
-            if (from.isEmpty()) out.addProperty("file_count", countBackupFiles(this.root, true));
+            if (from.isEmpty()) {
+                StorageStats stats = storageStats();
+                out.addProperty("file_count", stats.files);
+                out.addProperty("disk_bytes", stats.bytes);
+            }
             out.add("block_palette", paletteJson(palette));
             out.addProperty("next_cursor", more ? nextCursor : "");
         } catch (Exception error) {
             SablePanel.LOGGER.warn("sablepanel: recycle view failed", error);
             out.addProperty("error", String.valueOf(error.getMessage()));
             out.addProperty("file_count", 0);
+            out.addProperty("disk_bytes", 0);
             out.add("block_palette", new JsonArray());
             out.addProperty("next_cursor", "");
         }
         out.add("groups", groups);
+        return out;
+    }
+
+    public synchronized JsonObject purgeGroups(List<String> groupIds) {
+        JsonArray results = new JsonArray();
+        int removed = 0;
+        int removedFiles = 0;
+        long removedBytes = 0;
+        for (String id : new LinkedHashSet<>(groupIds)) {
+            JsonObject result = new JsonObject();
+            result.addProperty("id", id);
+            try {
+                Path directory = groupDirectory(id);
+                JsonObject manifest = readManifest(directory);
+                if (!id.equals(manifest.has("id") ? manifest.get("id").getAsString() : "")) {
+                    throw new IOException("回收组目录与清单 ID 不一致");
+                }
+                int files = countBackupFiles(directory, false);
+                long bytes = directoryBytes(directory);
+                int members = manifest.has("members") ? manifest.get("members").getAsInt()
+                        : manifest.getAsJsonArray("bodies").size();
+                // 该组可能仍携带“把前一版标旧”的事务；事务不能随组一起丢失。
+                completeVersionTransaction(directory);
+                deleteCommittedGroup(directory);
+                removeLatestGroup(id);
+                this.pendingOldGroups.remove(id);
+                result.addProperty("ok", true);
+                result.addProperty("members", members);
+                result.addProperty("files", files);
+                result.addProperty("bytes", bytes);
+                removed++;
+                removedFiles += files;
+                removedBytes += bytes;
+            } catch (Exception error) {
+                result.addProperty("ok", false);
+                result.addProperty("error", error.getMessage() == null ? error.toString() : error.getMessage());
+            }
+            results.add(result);
+        }
+        JsonObject out = new JsonObject();
+        out.addProperty("ok", removed);
+        out.addProperty("total", results.size());
+        out.addProperty("files", removedFiles);
+        out.addProperty("bytes", removedBytes);
+        out.add("results", results);
         return out;
     }
 
@@ -423,18 +523,23 @@ public final class RecycleStore {
         }
         if (bodies.isEmpty()) throw new IOException("回收组为空");
         String state = manifest.has("state") ? manifest.get("state").getAsString() : "deleted";
-        return new RestoreGroup(id, state, List.copyOf(bodies));
+        return new RestoreGroup(id, state, isOldVersion(directory), List.copyOf(bodies));
     }
 
-    private void prune() throws IOException {
+    void prune() throws IOException {
         if (!Files.isDirectory(this.root)) return;
         List<RetentionEntry> entries = retentionEntries();
         int total = countBackupFiles(this.root, true);
         entries.sort(Comparator.comparingLong(RetentionEntry::createdAt));
         for (RetentionEntry entry : entries) {
             if (total <= this.config.recycleMaxFiles) break;
-            if (entry.directory) deleteTree(entry.path);
-            else Files.deleteIfExists(entry.path);
+            if (entry.directory) {
+                String id = entry.path.getFileName().toString();
+                completeVersionTransaction(entry.path);
+                deleteCommittedGroup(entry.path);
+                removeLatestGroup(id);
+                this.pendingOldGroups.remove(id);
+            } else Files.deleteIfExists(entry.path);
             total -= entry.files;
         }
     }
@@ -491,11 +596,227 @@ public final class RecycleStore {
         List<Path> directories = new ArrayList<>();
         try (var stream = Files.list(this.root)) {
             for (Path path : stream.toList()) {
-                if (Files.isDirectory(path) && !path.equals(this.pendingRoot)
+                String id = path.getFileName().toString();
+                if (Files.isDirectory(path) && !path.equals(this.pendingRoot) && SAFE_ID.matcher(id).matches()
                         && Files.isRegularFile(path.resolve(MANIFEST))) directories.add(path);
             }
         }
         return directories;
+    }
+
+    /**
+     * 0.13 之前没有版本标记。这个一次性兼容块只补标记，不参与后续正常分类；未发布后可整段删除。
+     */
+    private void migrateLegacyVersionMarkers() {
+        Path migrated = this.root.resolve(VERSION_MIGRATION_MARKER);
+        if (Files.isRegularFile(migrated)) return;
+        boolean complete = true;
+        try {
+            List<VersionCandidate> candidates = new ArrayList<>();
+            for (Path directory : committedDirectories()) {
+                try {
+                    JsonObject manifest = readManifest(directory);
+                    long enteredAt = deletedAt(manifest);
+                    if (enteredAt <= 0) enteredAt = Files.getLastModifiedTime(directory.resolve(MANIFEST)).toMillis();
+                    candidates.add(new VersionCandidate(directory, enteredAt, bodyUuids(manifest)));
+                } catch (Exception error) {
+                    complete = false;
+                    SablePanel.LOGGER.warn("sablepanel: legacy recycle group {} was not read",
+                            directory.getFileName(), error);
+                }
+            }
+            candidates.sort(Comparator.comparingLong(VersionCandidate::enteredAt).reversed()
+                    .thenComparing(candidate -> candidate.directory.getFileName().toString(), Comparator.reverseOrder()));
+            Set<UUID> newer = new LinkedHashSet<>();
+            for (VersionCandidate candidate : candidates) {
+                try {
+                    if (candidate.members.stream().anyMatch(newer::contains)) markOld(candidate.directory);
+                    newer.addAll(candidate.members);
+                } catch (Exception error) {
+                    complete = false;
+                    SablePanel.LOGGER.warn("sablepanel: legacy recycle group {} was not migrated",
+                            candidate.directory.getFileName(), error);
+                }
+            }
+            if (complete) {
+                Files.createDirectories(this.root);
+                Files.writeString(migrated, "done\n", StandardCharsets.UTF_8);
+            }
+        } catch (Exception error) {
+            SablePanel.LOGGER.warn("sablepanel: legacy recycle version migration failed", error);
+        }
+    }
+
+    private void rebuildLatestIndex() {
+        this.latestByUuid.clear();
+        this.latestMembers.clear();
+        try {
+            List<Path> directories = new ArrayList<>(committedDirectories());
+            directories.sort(Comparator.comparing((Path path) -> path.getFileName().toString()));
+            for (Path directory : directories) {
+                if (isOldVersion(directory)) continue;
+                try {
+                    String id = directory.getFileName().toString();
+                    Set<UUID> members = bodyUuids(readManifest(directory));
+                    this.latestMembers.put(id, members);
+                    for (UUID uuid : members) this.latestByUuid.put(uuid, id);
+                } catch (Exception error) {
+                    SablePanel.LOGGER.warn("sablepanel: unreadable recycle group {} was not indexed",
+                            directory.getFileName(), error);
+                }
+            }
+        } catch (Exception error) {
+            SablePanel.LOGGER.warn("sablepanel: recycle latest-version index rebuild failed", error);
+        }
+    }
+
+    private Set<String> prepareVersionTransaction(Path stageDirectory, JsonObject manifest) throws IOException {
+        String newId = manifest.get("id").getAsString();
+        Set<UUID> members = bodyUuids(manifest);
+        Set<String> previous = new LinkedHashSet<>();
+        for (UUID uuid : members) {
+            String id = this.latestByUuid.get(uuid);
+            if (id != null && !id.equals(newId)) previous.add(id);
+        }
+        Path transaction = stageDirectory.resolve(VERSION_TRANSACTION);
+        if (previous.isEmpty()) {
+            Files.deleteIfExists(transaction);
+            return previous;
+        }
+        JsonObject value = new JsonObject();
+        JsonArray ids = new JsonArray();
+        for (String id : previous) ids.add(id);
+        value.add("supersedes", ids);
+        writeJsonAtomic(transaction, value);
+        return previous;
+    }
+
+    private void registerLatest(String newId, Set<UUID> members, Set<String> previous) {
+        this.pendingOldGroups.addAll(previous);
+        for (String id : previous) removeLatestGroup(id);
+        this.latestMembers.put(newId, members);
+        for (UUID uuid : members) this.latestByUuid.put(uuid, newId);
+    }
+
+    private void recoverVersionTransactions() {
+        try {
+            for (Path directory : committedDirectories()) {
+                if (!Files.isRegularFile(directory.resolve(VERSION_TRANSACTION))) continue;
+                try {
+                    Set<String> previous = readVersionTransaction(directory);
+                    this.pendingOldGroups.addAll(previous);
+                    completeVersionTransaction(directory);
+                } catch (Exception error) {
+                    SablePanel.LOGGER.warn("sablepanel: recycle version transaction {} remains pending",
+                            directory.getFileName(), error);
+                }
+            }
+        } catch (Exception error) {
+            SablePanel.LOGGER.warn("sablepanel: recycle version transaction recovery failed", error);
+        }
+    }
+
+    private void completeVersionTransaction(Path directory) throws IOException {
+        Path transaction = directory.resolve(VERSION_TRANSACTION);
+        if (!Files.isRegularFile(transaction)) return;
+        Set<String> previous = readVersionTransaction(directory);
+        this.pendingOldGroups.addAll(previous);
+        for (String id : previous) {
+            Path previousDirectory = this.root.resolve(id).normalize();
+            if (!previousDirectory.getParent().equals(this.root)) throw new IOException("旧版本回收组 ID 无效");
+            if (!Files.exists(previousDirectory)) continue;
+            markOld(groupDirectory(id));
+        }
+        Files.delete(transaction);
+        this.pendingOldGroups.removeAll(previous);
+    }
+
+    private Set<String> readVersionTransaction(Path directory) throws IOException {
+        JsonObject value;
+        try {
+            value = JsonParser.parseString(Files.readString(directory.resolve(VERSION_TRANSACTION),
+                    StandardCharsets.UTF_8)).getAsJsonObject();
+        } catch (RuntimeException error) {
+            throw new IOException("回收站版本事务损坏", error);
+        }
+        JsonArray ids = value.getAsJsonArray("supersedes");
+        if (ids == null) throw new IOException("回收站版本事务缺少 supersedes");
+        Set<String> result = new LinkedHashSet<>();
+        for (var element : ids) {
+            String id = element.getAsString();
+            if (!SAFE_ID.matcher(id).matches()) throw new IOException("回收站版本事务 ID 无效");
+            result.add(id);
+        }
+        return result;
+    }
+
+    private void removeLatestGroup(String id) {
+        Set<UUID> members = this.latestMembers.remove(id);
+        if (members == null) return;
+        for (UUID uuid : members) this.latestByUuid.remove(uuid, id);
+    }
+
+    private static Set<UUID> bodyUuids(JsonObject manifest) {
+        Set<UUID> result = new LinkedHashSet<>();
+        JsonArray bodies = manifest.getAsJsonArray("bodies");
+        if (bodies == null) return result;
+        for (var element : bodies) {
+            JsonObject body = element.getAsJsonObject();
+            if (body.has("uuid")) result.add(UUID.fromString(body.get("uuid").getAsString()));
+        }
+        return result;
+    }
+
+    private boolean isOldVersion(Path directory) {
+        return hasOldMarker(directory) || this.pendingOldGroups.contains(directory.getFileName().toString());
+    }
+
+    private static boolean hasOldMarker(Path directory) {
+        return Files.isRegularFile(directory.resolve(OLD_VERSION_MARKER));
+    }
+
+    private static void markOld(Path directory) throws IOException {
+        if (!hasOldMarker(directory)) {
+            Files.writeString(directory.resolve(OLD_VERSION_MARKER), "old\n", StandardCharsets.UTF_8);
+        }
+    }
+
+    private static void deleteCommittedGroup(Path directory) throws IOException {
+        Path manifest = directory.resolve(MANIFEST);
+        Path marker = directory.resolve(OLD_VERSION_MARKER);
+        Path transaction = directory.resolve(VERSION_TRANSACTION);
+        try (var stream = Files.walk(directory)) {
+            for (Path path : stream.sorted(Comparator.reverseOrder()).toList()) {
+                if (path.equals(directory) || path.equals(manifest) || path.equals(marker)
+                        || path.equals(transaction)) continue;
+                Files.deleteIfExists(path);
+            }
+        }
+        Files.deleteIfExists(transaction);
+        Files.deleteIfExists(marker);
+        Files.deleteIfExists(manifest);
+        Files.deleteIfExists(directory);
+    }
+
+    private StorageStats storageStats() throws IOException {
+        if (!Files.isDirectory(this.root)) return new StorageStats(0, 0);
+        int files = 0;
+        long bytes = 0;
+        try (var stream = Files.walk(this.root)) {
+            for (Path path : stream.filter(Files::isRegularFile).toList()) {
+                bytes += Files.size(path);
+                if (path.getFileName().toString().endsWith(".nbt.gz") && !path.startsWith(this.pendingRoot)) files++;
+            }
+        }
+        return new StorageStats(files, bytes);
+    }
+
+    private static long directoryBytes(Path directory) throws IOException {
+        try (var stream = Files.walk(directory)) {
+            long bytes = 0;
+            for (Path path : stream.filter(Files::isRegularFile).toList()) bytes += Files.size(path);
+            return bytes;
+        }
     }
 
     private static Map<String, Integer> collectPalette(List<JsonObject> manifests) {
