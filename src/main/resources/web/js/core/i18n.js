@@ -61,6 +61,8 @@ const I18N = {
     restoreGroup:'恢复该依赖组', restoreHint:'恢复后会在保存位置重新加载',
     rTabAll:'全部', rTabNamed:'命名', rTabUnnamed:'未命名', rTabRestored:'已恢复',
     rShowing:(n,m)=>`显示 ${n} / ${m} 个依赖组`, rSelectInfo:(g,b)=>`已选 ${g} 组 · ${b} 个物理体`,
+    rLoaded:(n,m)=>`已加载 ${n} / ${m}`, rLoadMore:'加载更多', rLoading:'加载中…',
+    bodiesTruncated:(n,m)=>`依赖组过多,只显示体积最大的 ${n} / ${m} 组`,
     restoreSelected:'恢复所选', restoreSelectedT:'恢复所选物理体',
     restoreSelectedMsg:(g,b,blk)=>`将恢复勾选的 ${g} 个依赖组,共 ${b} 个物理体、${fmt(blk)} 块。\n恢复后会在原保存位置重新加载。`,
     restoreRecoveryWarn:(n)=>`\n其中 ${n} 个“需恢复”事务会先清除同 UUID 残留,再从备份重建整组。`,
@@ -82,7 +84,7 @@ const I18N = {
     voidTag:y=>`整个包围盒低于 y=${y},玩家无法到达(阈值可在配置文件调)`, voidBadge:'虚空',
     skyTag:y=>`整个包围盒高于 y=${y},玩家无法到达(阈值可在配置文件调)`, skyBadge:'极高空',
     /* 作业:后端返回的 op 名是服务端写的中文,日志是服务端记录,不随界面语言切换 */
-    navJobs:'日志', jobQueued:'排队中', jobDone:'完成', jobFailed:'失败',
+    navJobs:'日志', jobQueued:'排队中', jobDone:'完成', jobFailed:'失败', jobPartial:'部分成功',
     jobsRunning:'进行中', jobsEmpty:'暂无记录', jobsFile:'日志文件', jobsCurrent:'本次运行',
     jobsOnlyFailed:'只看失败', jobsWorkers:n=>`并发上限 ${n}`,
     jobTime:'时间', jobOp:'操作', jobTarget:'目标', jobState:'状态', jobCost:'耗时', jobMsg:'消息',

@@ -8,10 +8,13 @@ let jobsOnlyFailed = false;
 let jobsExpanded = new Set();
 
 async function loadJobs(){
+  const gen = srvGen();
   try {
-    JOBS = await api('/api/jobs' + (jobsFile ? `?file=${encodeURIComponent(jobsFile)}` : ''));
+    const result = await api('/api/jobs' + (jobsFile ? `?file=${encodeURIComponent(jobsFile)}` : ''));
+    if (gen !== srvGen()) return;      // 切服后旧服的日志不能落地:job seq 在每个服都从 1 开始
+    JOBS = result;
     renderJobs();
-  } catch(e){ toast(t('loadFail') + e.message, 'bad'); }
+  } catch(e){ if (gen === srvGen()) toast(t('loadFail') + e.message, 'bad'); }
 }
 function setJobsFile(name){ jobsFile = name; jobsExpanded.clear(); loadJobs(); }
 function toggleJobsFailed(){ jobsOnlyFailed = !jobsOnlyFailed; renderJobs(); }
@@ -20,14 +23,30 @@ function toggleJobRow(seq){
   renderJobs();
 }
 
+/* 终态契约:'ok' 全部成功 / 'partial' 部分成功 / 'fail' 全部失败,由后端 outcome 字段直给。
+   历史日志文件里的旧记录没有这个字段,才回落到从前那套 state + message 解析 —— 那套把
+   "3 个全删失败"(message 是 0/3)当成绿色的完成,连"仅失败"筛选都找不到它。 */
+function jobOutcome(job){
+  if (job.outcome) return job.outcome;
+  if (job.state === 'failed') return 'fail';
+  const counted = /(?:^|\s)(\d+)\/(\d+)(?:\s|$)/.exec(job.message || '');
+  if (counted) {
+    const ok = Number(counted[1]), total = Number(counted[2]);
+    if (total > 0 && ok === 0) return 'fail';
+    if (ok < total) return 'partial';
+  }
+  return /failed=[1-9]/.test(job.message || '') ? 'partial' : 'ok';
+}
 function jobFailed(job){
-  return job.state === 'failed' || /failed=[1-9]/.test(job.message || '');
+  return job.state !== 'running' && job.state !== 'queued' && jobOutcome(job) !== 'ok';
 }
 function jobStateTag(job){
   if (job.state === 'running') return `<span class="tag busy"><i class="spin"></i>${esc(job.phase || t('jobsRunning'))}</span>`;
   if (job.state === 'queued') return `<span class="tag">${t('jobQueued')}</span>`;
-  return jobFailed(job) ? `<span class="tag bad">${t('jobFailed')}</span>`
-                        : `<span class="tag ok">${t('jobDone')}</span>`;
+  const outcome = jobOutcome(job);
+  if (outcome === 'fail') return `<span class="tag bad">${t('jobFailed')}</span>`;
+  if (outcome === 'partial') return `<span class="tag warn">${t('jobPartial')}</span>`;
+  return `<span class="tag ok">${t('jobDone')}</span>`;
 }
 function jobCost(job){
   if (job.ms === undefined) return '';
@@ -35,7 +54,13 @@ function jobCost(job){
 }
 
 function renderJobs(){
-  if (!JOBS || VIEW !== 'jobs') return;
+  if (VIEW !== 'jobs') return;
+  // JOBS 为空要显式画 loading:切服时把它清掉再重画,否则页面会一直挂着上一个服的记录
+  if (!JOBS) {
+    document.getElementById('jobsList').innerHTML = `<div id="listEmpty">${t('loading')}</div>`;
+    document.getElementById('jobsWorkers').textContent = '';
+    return;
+  }
   const files = JOBS.files || [];
   document.getElementById('jobsFileSel').innerHTML =
     `<option value="">${t('jobsCurrent')}</option>` + files.map(name =>

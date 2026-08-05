@@ -13,6 +13,10 @@ let COPY_SCAN = null, COPY_UUID = null, MANUAL_TAB = 'states';
 
 /* 集群:同机多服共用 apiPort,顶栏切换;CURSRV 为空表示"本机 HOST 自己" */
 let SERVERS = [], CURSRV = localStorage.getItem('spServer') || '';
+/* 服务器代次:每次切服 +1。所有异步加载在提交时捕获、落地时校验 —— 否则切到 B 之后
+   A 的慢响应回来会直接盖掉界面,而 job seq 在每个服务端都从 1 开始,还会张冠李戴 */
+let SRVGEN = 0;
+function srvGen(){ return SRVGEN; }
 
 /* 在线玩家(传送玩家用):选中体时拉取,15s 节流;切服作废 */
 let PLAYERS = [], playersFetchedAt = 0;
@@ -40,6 +44,9 @@ let REACH = {void_below:-64, sky_above:1000};
 /* 多选:跨页签/筛选保留,切服清空;BODY_BY_UUID 随 DATA 重建 */
 let SELECTED = new Set(), BODY_BY_UUID = new Map();
 let R_SELECTED = new Set(), RECYCLE_BY_ID = new Map();
+/* 回收站游标分页:服务端单页有组数和方块预算双重上限,这里记翻页状态。
+   RECYCLE.groups 是"已加载的页",不是全部;筛选和页签计数都只针对已加载部分 */
+let RECYCLE_CURSOR = '', RECYCLE_TOTAL = 0, RECYCLE_LOADING = false, RECYCLE_REQ = 0;
 
 /* 折叠记忆:用户显式展开/折叠过的组(gid → bool),优先于默认展开策略;切服清空 */
 let EXPAND_STATE = new Map();

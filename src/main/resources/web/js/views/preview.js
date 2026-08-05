@@ -163,7 +163,12 @@ async function loadMeshAt(endpoint, uuid, source, isCurrent) {
     hoverEnabled = n <= 80000;
     info.textContent = t('pvStat')(d.shell, d.total) + (d.truncated?t('pvTrunc'):'') + (hoverEnabled?'':' · '+t('pvHoverOff'));
     renderComposition();
-  } catch(e) { info.textContent = t('pvFail') + e.message; }
+  } catch(e) {
+    // 成功、空数据、失败三条出口都要过同一道 current 检查:少了这句,从 A 快切到 B 之后
+    // A 的延迟失败会把已经渲染好的 B 的提示文本改成 A 的报错
+    if (!isCurrent()) return;
+    info.textContent = t('pvFail') + e.message;
+  }
 }
 /* 注意:函数名不能叫 enterFullscreen/exitFullscreen —— inline on* 处理器的作用域链是
    元素 → document → window,document.exitFullscreen 是原生 API,会把调用吃掉。

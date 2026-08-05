@@ -59,9 +59,10 @@ async function doAdoptSelected(){
   const orphans = [...SELECTED].map(u => BODY_BY_UUID.get(u))
     .filter(e => e && e.b.state === 'orphan').map(e => e.b.uuid);
   if (!orphans.length) return;
+  if (orphans.length > 500) { toast(t('recTooMany'), 'bad'); return; }
   if (!await askModal(t('selAdoptT'), t('selAdoptMsg')(orphans.length), false)) return;
-  // 逐个入队;后端按体去重,同一个体的重复提交会被 409 挡掉
-  for (const u of orphans) await submitJob(`/api/body/${u}/adopt`, {method:'POST'}, t('adoptOp'));
+  // 整批一个作业。从前是逐个 POST:N 个体 = N 次提交 + N 次全量 bodies 刷新,选区一大就线性放大
+  await submitJob('/api/ops/batch_adopt', {method:'POST', body: JSON.stringify({uuids: orphans})}, t('adoptOp'));
   clearSel();
 }
 async function saveRecycleLimit(){

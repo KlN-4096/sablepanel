@@ -26,6 +26,8 @@ async function api(path, opts) {
 
 function showLogin(message){
   stopEventStream();
+  stopBusyPolling();
+  authSeq++;               // 作废在途的登录尝试,别让它稍后又把界面解锁
   authenticated = false;
   token = '';
   localStorage.removeItem(TOKEN_STORAGE_KEY);
@@ -43,14 +45,22 @@ function applyServersResponse(r){
   if (VIEW === 'dash') renderDashServer();
 }
 
+/* 登录代次:只有最后一次尝试可以写 token / 认证状态 / 界面。
+   从前没有它:输对口令 → 短暂成功 → 上一次输错的旧请求晚一步失败 → showLogin 把人踢回登录页,
+   而且 token 已经被清掉了。自动登录(记住的 token)和手动登录共用这个计数器,互相也不会盖。 */
+let authSeq = 0;
 async function authenticate(candidate, remembered){
   const value = String(candidate || '').trim();
   if (!value) { showLogin(''); return false; }
+  const seq = ++authSeq;
   try {
     if (gatewayMode === 'client') await connectGateway();
+    if (seq !== authSeq) return false;
     const r = await fetch('/api/servers', {headers:{'X-Token':value}});
+    if (seq !== authSeq) return false;
     if (!r.ok) throw new Error('unauthorized');
     const data = await r.json();
+    if (seq !== authSeq) return false;
     token = value;
     authenticated = true;
     localStorage.setItem(TOKEN_STORAGE_KEY, token);
@@ -59,9 +69,12 @@ async function authenticate(candidate, remembered){
     applyServersResponse(data);
     maybeWarnDefaultToken(data);
     await loadAll(true);
+    if (seq !== authSeq) return false;
     startEventStream();
     return true;
   } catch (e) {
+    // 旧尝试的失败不得清 token、不得重新锁页 —— 现在的状态属于更新的那次提交
+    if (seq !== authSeq) return false;
     showLogin(remembered ? t('loginChanged') : t('loginBad'));
     return false;
   }
@@ -110,7 +123,9 @@ async function disconnectGateway(){
   }).catch(()=>{});
   gatewayConnected = false;
   DATA = STATS = RECYCLE = null;
+  RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
   SERVERS = []; CURSRV = '';
+  SRVGEN++;                 // 断开等于换服:在途响应一律作废
   localStorage.removeItem('spServer');
   document.getElementById('gatewayDisconnect').style.display = 'none';
   showLogin('');

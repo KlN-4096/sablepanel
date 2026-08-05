@@ -93,7 +93,7 @@ function renderDash(){
       : !RECYCLE.groups.length ? `<div class="empty">${t('recycleEmpty')}</div>`
       : `<div class="mini"><table>${RECYCLE.groups.slice(0,7).map(g=>`<tr class="clickable" onclick="setView('recycle')">
           <td>${esc(g.name)||g.bodies[0].uuid.slice(0,8)}</td><td>${g.members} · ${new Date(g.deleted_at).toLocaleDateString()}</td></tr>`).join('')}</table></div>
-         ${RECYCLE.groups.length>7?`<div class="hint">… +${RECYCLE.groups.length-7}</div>`:''}`}
+         ${(RECYCLE_TOTAL||RECYCLE.groups.length)>7?`<div class="hint">… +${(RECYCLE_TOTAL||RECYCLE.groups.length)-7}</div>`:''}`}
     ${RECYCLE?`<div class="hint">${t('recycleUsage')(RECYCLE.file_count||0,RECYCLE.limit||500)}</div>`:''}
     <div class="hint">${t('recycleHint')}</div>`;
   document.getElementById('toolCard').innerHTML = `

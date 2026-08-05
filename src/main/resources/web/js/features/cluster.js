@@ -24,14 +24,23 @@ async function switchServer(id){
   const self = SERVERS.find(s => s.self);
   CURSRV = (self && id === self.id) ? '' : id;
   localStorage.setItem('spServer', CURSRV);
+  // 代次先自增:在途的 bodies/recycle/stats/players/jobs 响应从这一刻起全部作废,
+  // 否则旧服的慢响应回来会直接盖掉新服的界面
+  SRVGEN++;
+  // 作业状态按服务器隔离:JobService 的 seq 在每个服务端都从 1 开始,不清就会张冠李戴
+  stopBusyPolling();
+  JOBS = null; jobsFile = ''; jobsExpanded.clear();
   // 切服等于换了一整套数据,旧的一律作废
   DATA = STATS = RECYCLE = null; SEL = SELG = RSEL = RSELG = MESH_DATA = MESH_UUID = MESH_SOURCE = null;
   CLONE_SETS = new Map();
   CHART.live = true; CHART.span = 300; CHART.preset = 300; CHART.hoverIndex = -1;
   SELECTED = new Set(); BODY_BY_UUID = new Map();
   R_SELECTED = new Set(); RECYCLE_BY_ID = new Map();
+  RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
   EXPAND_STATE.clear(); tpFilledFor = null; loadFav();
-  PLAYERS = []; playersFetchedAt = 0; PAUSED = new Set();
+  PLAYERS = []; playersFetchedAt = 0; PAUSED = new Set(); FORCED = new Set();
+  // 日志页立刻进空态,不能留着上一个服的记录等 loadAll 回来
+  if (VIEW === 'jobs') renderJobs();
   document.getElementById('dbody').innerHTML =
     `<div id="detailEmpty"><span class="big">⬢</span><span>${t('pickBody')}</span></div>`;
   document.getElementById('ops').style.display = 'none';

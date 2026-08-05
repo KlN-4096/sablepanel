@@ -257,6 +257,9 @@ function render() {
 
 function renderToolbar(matched, tabTotal){
   const parts = [`<span>${t('filterBar')(matched, tabTotal)}</span>`];
+  // 服务端对单次响应有组数硬上限,超了只发体积最大的那批 —— 不说的话用户会以为体没了
+  if (DATA && DATA.truncated) parts.push(
+    `<span style="color:var(--warn)">· ${t('bodiesTruncated')(DATA.group_limit, DATA.total_groups)}</span>`);
   if (matched < tabTotal) parts.push(`<span style="color:var(--warn)">· ${t('filterActive')}</span>
     <button class="warnb" onclick="resetFilters()">${t('resetFilters')}</button>`);
   parts.push(`<button onclick="expandAll(true)">${t('expandAll')}</button>`);

@@ -78,10 +78,17 @@ function expandRecycle(open){
 function renderRecycleToolbar(visible, total){
   const selectedGroups=[...R_SELECTED].map(id=>RECYCLE_BY_ID.get(id)).filter(Boolean);
   const selectedBodies=selectedGroups.reduce((sum,group)=>sum+group.members,0);
+  // 列表是分页拉的,所以要同时告诉用户"已加载多少 / 服务端一共多少",筛选只作用在已加载部分
+  const loaded=(RECYCLE&&RECYCLE.groups.length)||0;
+  const more=RECYCLE_CURSOR
+    ? `<span class="muted">${t('rLoaded')(loaded,RECYCLE_TOTAL||loaded)}</span>
+       <button onclick="loadMoreRecycle()" ${RECYCLE_LOADING?'disabled':''}>${
+         RECYCLE_LOADING?t('rLoading'):t('rLoadMore')}</button>` : '';
   document.getElementById('rToolbar').innerHTML =
     `<span>${t('rShowing')(visible,total)}</span>
      <button onclick="expandRecycle(true)">${t('expandAll')}</button>
      <button onclick="expandRecycle(false)">${t('collapseAll')}</button>
+     ${more}
      ${selectedGroups.length?`<span id="rSelSeg"><span class="selInfo">${t('rSelectInfo')(selectedGroups.length,selectedBodies)}</span>
        <button class="primary" onclick="restoreSelectedGroups()">${t('restoreSelected')}</button>
        <button class="ghost" onclick="clearRecycleSelection()">${t('selClear')}</button></span>`:''}`;
