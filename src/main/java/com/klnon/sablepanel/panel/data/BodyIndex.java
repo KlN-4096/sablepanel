@@ -259,15 +259,6 @@ public final class BodyIndex {
         return null;
     }
 
-    /** 某 uuid 的全部磁盘条目(副本审查用) */
-    public List<DiskScanner.DiskEntry> allEntries(UUID uuid) {
-        List<DiskScanner.DiskEntry> out = new ArrayList<>();
-        for (DiskScanner.DiskEntry e : this.diskSnapshot) {
-            if (uuid.equals(e.uuid())) out.add(e);
-        }
-        return out;
-    }
-
     /** 全量视图 JSON:组聚合 + 体明细 + 方块调色板 */
     public JsonObject view() {
         List<DiskScanner.DiskEntry> disk = this.diskSnapshot;

@@ -65,11 +65,6 @@ public final class ForceLoadService {
         SablePanel.LOGGER.debug("sablepanel: force-load ticket type registered as {}", PANEL_FORCED.name());
     }
 
-    /** 运行时索引与 /api/bodies 输出用,并发安全 */
-    public static boolean isForced(UUID uuid) {
-        return MIRROR.contains(uuid);
-    }
-
     /** 当前常驻集合快照(HTTP 线程 /api/bodies 输出用) */
     public static Set<UUID> snapshot() {
         return Set.copyOf(MIRROR);

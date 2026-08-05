@@ -78,12 +78,12 @@ function pick(){
     const p = MESH_DATA.palette[MESH_DATA.voxels[vi*4+3]];
     const lx = MESH_DATA.voxels[vi*4], ly = MESH_DATA.voxels[vi*4+1], lz = MESH_DATA.voxels[vi*4+2];
     const tip = document.getElementById('hoverTip');
-    tip.innerHTML = `<b>${esc(LANG==='zh'?p.zh:p.en)}</b><div class="bid">${esc(p.id)} · (${lx}, ${ly}, ${lz})</div>`;
+    tip.innerHTML = `<b>${esc(p.zh)}</b><div class="bid">${esc(p.id)} · (${lx}, ${ly}, ${lz})</div>`;
     tip.style.display = 'block';
     tip.style.left = Math.min(pointer.cx + 14, innerWidth - 280) + 'px';
     tip.style.top = (pointer.cy + 14) + 'px';
     if (fsMode) document.getElementById('fsHover').innerHTML =
-      `<b style="color:var(--fg)">${esc(LANG==='zh'?p.zh:p.en)}</b> <span class="mono" style="font-size:10.5px">${esc(p.id)}</span> · (${lx}, ${ly}, ${lz})`;
+      `<b style="color:var(--fg)">${esc(p.zh)}</b> <span class="mono" style="font-size:10.5px">${esc(p.id)}</span> · (${lx}, ${ly}, ${lz})`;
   } else hideTip();
 }
 function hideTip(){ document.getElementById('hoverTip').style.display = 'none'; }

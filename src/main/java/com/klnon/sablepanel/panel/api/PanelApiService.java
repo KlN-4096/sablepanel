@@ -22,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.regex.Pattern;
 
 public final class PanelApiService {
@@ -207,7 +208,7 @@ public final class PanelApiService {
      * 几分钟,浏览器 30 秒就超时,用户看不到进展就会再点,从前正是这样把传输层
      * 4 个在飞槽位全占死、整个面板永久 503 的。
      */
-    private PanelResponse enqueue(String op, List<UUID> targets, String name, JobService.Work work) {
+    private PanelResponse enqueue(String op, List<UUID> targets, String name, Callable<JsonObject> work) {
         try {
             JobService.Job job = this.jobs.submit(op, targets, name, work);
             JsonObject out = new JsonObject();

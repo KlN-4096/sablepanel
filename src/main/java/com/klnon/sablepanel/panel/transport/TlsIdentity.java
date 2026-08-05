@@ -105,10 +105,6 @@ public final class TlsIdentity {
                 .protocols("TLSv1.3", "TLSv1.2").build();
     }
 
-    public X509Certificate certificate() {
-        return this.certificate;
-    }
-
     public String fingerprint() {
         return this.fingerprint;
     }

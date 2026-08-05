@@ -9,9 +9,6 @@ const R_TABS = [
 ];
 function recycleTabTest(group){ return (R_TABS.find(x=>x.k===R_TAB)||R_TABS[0]).test(group); }
 function setRecycleTab(tab){ R_TAB=tab; renderRecycle(); }
-function recycleSize(blocks){
-  return blocks>=10000?'huge':blocks>=1000?'large':blocks>=100?'mid':blocks>=10?'small':'frag';
-}
 function renderRecycleTabs(){
   if (!RECYCLE) return;
   document.getElementById('rTabs').innerHTML = R_TABS.map(tab=>
@@ -35,7 +32,7 @@ function renderRecycle(){
   const namedOnly = document.getElementById('rNamedOnly').checked;
   const tabGroups = RECYCLE.groups.filter(recycleTabTest);
   const visible = tabGroups.filter(group => {
-    if (!states.has(group.state || 'deleted') || !sizes.has(recycleSize(group.blocks || 0))) return false;
+    if (!states.has(group.state || 'deleted') || !sizes.has(sizeClass(group.blocks || 0))) return false;
     if (namedOnly && !group.name) return false;
     if (dimInputs.length && !group.bodies.some(body=>dims.has(body.dim || 'minecraft:overworld'))) return false;
     if (!needle) return true;

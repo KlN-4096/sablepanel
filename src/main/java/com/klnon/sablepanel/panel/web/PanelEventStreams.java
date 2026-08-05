@@ -50,7 +50,7 @@ final class PanelEventStreams implements AutoCloseable {
 
     void publish(PanelEvent event) {
         if (this.streams.isEmpty()) return;
-        byte[] payload = ("id: " + event.revision() + "\nevent: " + event.scope()
+        byte[] payload = ("id: " + event.revision() + "\nevent: bodies"
                 + "\ndata: " + event.toJson() + "\n\n").getBytes(StandardCharsets.UTF_8);
         this.streams.forEach(stream -> stream.offer(payload));
     }

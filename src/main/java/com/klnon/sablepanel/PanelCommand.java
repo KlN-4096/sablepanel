@@ -8,8 +8,6 @@ import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 
-import java.nio.file.Path;
-
 public final class PanelCommand {
 
     private PanelCommand() {
@@ -18,18 +16,6 @@ public final class PanelCommand {
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(Commands.literal("sablepanel")
                 .requires(source -> source.hasPermission(2))
-                .then(Commands.literal("dump").executes(ctx -> {
-                    try {
-                        Path file = SnapshotDumper.dump(ctx.getSource().getServer());
-                        ctx.getSource().sendSuccess(
-                                () -> Component.literal("sablepanel: snapshot -> " + file), true);
-                        return 1;
-                    } catch (Exception e) {
-                        SablePanel.LOGGER.error("sablepanel: dump failed", e);
-                        ctx.getSource().sendFailure(Component.literal("sablepanel: dump failed: " + e));
-                        return 0;
-                    }
-                }))
                 .then(Commands.literal("stats").executes(ctx -> {
                     StringBuilder sb = new StringBuilder("sablepanel stats:");
                     for (ServerLevel level : ctx.getSource().getServer().getAllLevels()) {

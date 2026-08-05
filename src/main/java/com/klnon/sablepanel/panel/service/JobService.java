@@ -63,11 +63,6 @@ public final class JobService implements AutoCloseable {
 
     public enum State { QUEUED, RUNNING, DONE, FAILED }
 
-    @FunctionalInterface
-    public interface Work {
-        JsonObject run() throws Exception;
-    }
-
     public static final class Job {
         public final long seq;
         public final String op;
@@ -103,10 +98,6 @@ public final class JobService implements AutoCloseable {
         /** 同一阶段内的实时计数(如 12/64),只影响界面显示,不进轨迹 */
         public void detail(String text) {
             this.detail = text == null ? "" : text;
-        }
-
-        public State state() {
-            return this.state;
         }
 
         String display() {
@@ -153,7 +144,7 @@ public final class JobService implements AutoCloseable {
      *
      * @param targets 受影响的体;空表示全局操作(如重扫),不参与去重
      */
-    public Job submit(String op, List<UUID> targets, String targetName, Work work) {
+    public Job submit(String op, List<UUID> targets, String targetName, Callable<JsonObject> work) {
         Job job;
         synchronized (this.lock) {
             for (UUID target : targets) {
@@ -172,12 +163,12 @@ public final class JobService implements AutoCloseable {
         return job;
     }
 
-    private void run(Job job, Work work) {
+    private void run(Job job, Callable<JsonObject> work) {
         CURRENT.set(job);
         job.state = State.RUNNING;
         job.startedAt = System.currentTimeMillis();
         try {
-            JsonObject result = work.run();
+            JsonObject result = work.call();
             job.state = State.DONE;
             job.message = summarize(result);
             if (result != null && result.has("warnings") && result.get("warnings").isJsonArray()) {

@@ -7,7 +7,7 @@ function openManual(){
 function closeManual(){ document.getElementById('manualBack').style.display = 'none'; }
 function setManualTab(key){ MANUAL_TAB = key; renderManual(); }
 function renderManual(){
-  const pages = MANUAL[LANG];
+  const pages = MANUAL.zh;
   const page = pages.find(item=>item.k===MANUAL_TAB) || pages[0];
   MANUAL_TAB = page.k;
   document.getElementById('manualTabs').innerHTML = pages.map(item=>

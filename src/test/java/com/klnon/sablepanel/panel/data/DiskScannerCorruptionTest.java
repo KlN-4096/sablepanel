@@ -239,10 +239,10 @@ class DiskScannerCorruptionTest {
                 "文件不存在必须返回 null");
     }
 
-    // ---- 批量定位必须与逐个定位等价(这是把 N 趟全盘扫描压成 1 趟的前提) ----
+    // ---- 批量定位必须返回 fixture 中的确切槽位与 holding chunk ----
 
     @Test
-    void batchLocateMatchesSingleLocate() throws Exception {
+    void batchLocateReturnsExpectedEntriesAndChunks() throws Exception {
         Path dir = dimDir();
         UUID a = UUID.randomUUID(), b = UUID.randomUUID(), missing = UUID.randomUUID();
         writeStorageFile(dir.resolve("r.0.0.0.slvls"), 4096,
@@ -252,14 +252,16 @@ class DiskScannerCorruptionTest {
 
         Map<UUID, DiskScanner.LocatedEntry> batch =
                 DiskScanner.locateEntries(DIM, dir, Set.of(a, b, missing));
-        assertEquals(DiskScanner.locateEntry(DIM, dir, a).key(), batch.get(a).key());
-        assertEquals(DiskScanner.locateEntry(DIM, dir, b).key(), batch.get(b).key());
+        DiskScanner.EntryKey keyA = new DiskScanner.EntryKey(DIM, 0, 0, 0, 0);
+        DiskScanner.EntryKey keyB = new DiskScanner.EntryKey(DIM, 0, 0, 0, 3);
+        assertEquals(keyA, batch.get(a).key());
+        assertEquals(keyB, batch.get(b).key());
         assertNull(batch.get(missing), "不存在的 uuid 不得出现在批量结果里");
 
         Map<UUID, DiskScanner.LiveLocation> live =
                 DiskScanner.locateLiveAll(DIM, dir, Set.of(a, b, missing));
-        assertEquals(DiskScanner.locateLive(DIM, dir, a), live.get(a));
-        assertEquals(DiskScanner.locateLive(DIM, dir, b), live.get(b));
+        assertEquals(new DiskScanner.LiveLocation(keyA, 1, 0), live.get(a));
+        assertEquals(new DiskScanner.LiveLocation(keyB, 1, 0), live.get(b));
         assertNull(live.get(missing));
     }
 }

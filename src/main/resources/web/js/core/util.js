@@ -1,12 +1,5 @@
 'use strict';
 /* 通用 UI 基础件:格式化 / toast / 模态框 / busy / 剪贴板(无业务状态) */
-/** 磁盘损坏跳过等后端非致命警告 → toast 尾注(最多展示 2 条) */
-function warnText(result){
-  const w=result&&result.warnings;
-  if(!w||!w.length) return '';
-  const shown=w.slice(0,2).join('; ');
-  return ` · ⚠ ${shown}${w.length>2?` ${t('opWarnMore')(w.length-2)}`:''}`;
-}
 function toast(msg, cls) {
   const box = document.getElementById('toasts');
   const d = document.createElement('div');

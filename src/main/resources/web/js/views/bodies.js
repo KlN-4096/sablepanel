@@ -4,7 +4,7 @@ let blockFilterIdx = -1;
 function refreshBlockList(){
   if (!DATA) return;
   document.getElementById('blockList').innerHTML = DATA.block_palette.map(p =>
-    `<option value="${esc(LANG==='zh'?p.zh:p.en)} (${esc(p.id)})"></option>`).join('');
+    `<option value="${esc(p.zh)} (${esc(p.id)})"></option>`).join('');
   onBlockFilter(true);
 }
 function onBlockFilter(skipRender){
@@ -19,7 +19,7 @@ function onBlockFilter(skipRender){
       p.id.includes(needle) || p.zh.toLowerCase().includes(needle) || p.en.toLowerCase().includes(needle));
     blockFilterIdx = hit;
     const p = hit >= 0 ? DATA.block_palette[hit] : null;
-    chip.innerHTML = p ? `<span class="tag acc">${esc(LANG==='zh'?p.zh:p.en)} · ${esc(p.id)}</span>` : '<span class="tag bad">?</span>';
+    chip.innerHTML = p ? `<span class="tag acc">${esc(p.zh)} · ${esc(p.id)}</span>` : '<span class="tag bad">?</span>';
     chip.style.display = 'block';
   } else chip.style.display = 'none';
   if (!skipRender) render();
@@ -469,7 +469,7 @@ function renderComposition(){
     box.innerHTML = (box.id==='compList'||box.id==='rCompList' ? `<h4>${t('composition')}${MESH_DATA.truncated?t('pvTrunc'):''}</h4>` : '') +
       shown.map(p => `<div class="compRow">
         <span class="chip" style="background:#${(p.color>>>0).toString(16).padStart(6,'0')}"></span>
-        <span class="cname" title="${esc(p.id)}">${esc(LANG==='zh'?p.zh:p.en)}</span>
+        <span class="cname" title="${esc(p.id)}">${esc(p.zh)}</span>
         <span class="cnum">${fmt(p.count)} · ${(p.count/total*100).toFixed(1)}%</span>
       </div>`).join('') +
       (rest > 0 ? `<div class="compRow compMore" onclick="toggleComp('${box.id}')">▾ ${t('compMore')(rest)}</div>`

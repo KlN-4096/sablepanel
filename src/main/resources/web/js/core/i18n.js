@@ -1,5 +1,5 @@
 'use strict';
-/* 词典与语言切换:I18N / MANUAL 文案、t()、applyI18n(fmt 为词条函数所依赖,随词典同文件) */
+/* 中文词典:I18N / MANUAL 文案、t()、applyI18n(fmt 为词条函数所依赖,随词典同文件) */
 /* ===================== i18n ===================== */
 const I18N = {
   zh: {
@@ -51,7 +51,7 @@ const I18N = {
     delOk:'已删除,回收站: ', delFail:'删除失败: ', delUnknownFail:'最终验收未通过',
     delGroup:(n)=>`删除整组(${n} 体)`, delGroupT:'删除整组',
     delGroupMsg:(n,b)=>`将删除该组全部 ${n} 个物理体,共 ${fmt(b)} 块。\n每个体都会先备份到回收站,可随时恢复。`,
-    delGroupDone:(o,n)=>`删除完成:成功 ${o}/${n}`, opWarnMore:(n)=>`等 ${n} 条警告`,
+    delGroupDone:(o,n)=>`删除完成:成功 ${o}/${n}`,
     adoptT:'收养孤儿物理体', adoptMsg:(n)=>`将把「${n}」重新接入 sable 加载管线(依赖体一并收养)。\n不修改任何磁盘数据,失败也无副作用。`,
     adoptOk:'收养成功,已重新加载', adoptPart:'收养完成(部分成员未能加载)', adoptFail:'收养失败: ',
     adoptTrunc:(n)=>`依赖链超过 ${n} 个成员上限,本次只收养了扫描到的前 ${n} 个`,
@@ -140,144 +140,6 @@ const I18N = {
     selAdoptT:'批量收养孤儿',
     selAdoptMsg:(n)=>`将逐个收养勾选中的 ${n} 个孤儿体(依赖一并接入,不修改磁盘数据)。`,
     selAdoptDone:(o,n)=>`收养完成:${o}/${n}`,
-  },
-  en: {
-    navDash:'Overview', navBodies:'Bodies', navRecycle:'Recycle bin', refresh:'Refresh',
-    pillCost:'body cost ms/t', pillLoaded:'loaded',
-    search:'Search', searchPh:'name / UUID', containsBlock:'Contains block', blockPh:'block name or id',
-    sort:'Sort (multi-key)', addSort:'Add key', state:'State',
-    stLoaded:'Loaded', stStored:'Stored', stHolding:'Holding', stOrphan:'Orphan',
-    dup:'Duplicates', dupAll:'Show all', dupOnly:'Multi-copy only', cloneOnly:'Clone suspects', dupAny:'Either',
-    scale:'Scale', szHuge:'Huge ≥10000', szLarge:'Large ≥1000', szMid:'Medium ≥100', szSmall:'Small ≥10', szFrag:'Fragment <10',
-    dims:'Dimensions', other:'Other', namedOnly:'Named only', groupOnly:'Groups only',
-    pickBody:'Select a body to view details', teleportTo:'Teleport body', adopt:'Adopt & recover (with deps)',
-    tpDest:'Target', tpUseCur:'Use current', tabFav:'Favorites', favTip:'Toggle favorite',
-    opMove:'Teleport', opPlayer:'Player', opPhysics:'Physics & recovery', opDanger:'Danger zone',
-    srvHost:'host', srvSwitched:(n)=>`Switched to ${n}`,
-    adoptHint:'Rebuilds load pointer, disk untouched', delBody:'Delete this body', delHint:'Only strictly verified deletions enter the recycle bin',
-    close:'Close', cancel:'Cancel', confirm:'Confirm', composition:'Block composition', reload:'Reload',
-    loginAddress:'Server address', loginToken:'Access token', loginEnter:'Enter', loginBad:'Invalid address or access token', loginChanged:'Connection or token expired. Enter it again.',
-    certConfirm:(f)=>`First connection or changed server certificate.\nConfirm TLS fingerprint:\n${f}`,
-    defaultTokenT:'Change the access token', defaultTokenMsg:'The default access token is still in use. Changing it from the Maintenance card is recommended.',
-    neverRemind:'Never remind me', later:'Not now', changeNow:'Change now',
-    compMore:(n)=>`Show ${n} more block types`, compLess:'Collapse',
-    dashServer:'Current server', dashServerOnly:'only panel on this machine', dashServerPeer:(n)=>`${n} servers in cluster`,
-    sNamed:'Named first', sBlocks:'Block count', sMembers:'Member count', sLoaded:'Loaded count', sAlpha:'Name A-Z',
-    sCost:'Perf cost', sRec:'Cleanup first', sOrphan:'Orphans first',
-    loading:'Working…', unnamed:'unnamed', bodies:'bodies', entries:'disk entries', scanAt:'scanned', groupsUnit:'groups',
-    stateLoaded:'Loaded', stateStored:'Stored (on disk)', stateHolding:'Holding (in memory, pending flush)', stateOrphan:'Orphan (entry on disk, no pointer)',
-    combo:'combined', loadedX:'loaded', holdingX:'holding', orphanX:'orphan', copiesX:'copies', cloneTag:'clone?', depsX:'deps',
-    blocksUnit:'blocks', name:'Name', dim:'Dimension', coord:'Position', rtLive:'live', rtSaved:'saved snapshot',
-    bbox:'Bounds', blockCount:'Blocks', copiesRow:'Disk copies', copiesShow:'(best shown)', mass:'Mass', vel:'Velocity', players:'Tracking players',
-    group:'Group', groupVal:(n,b)=>`${n} bodies / ${fmt(b)} blocks total`, entry:'Disk entry', deps:'Dependencies',
-    pvLoad:'Loading preview…', pvNone:'No block data', pvFail:'Preview failed: ', pvStat:(s,t)=>`shell ${fmt(s)} / total ${fmt(t)} voxels`, pvTrunc:' (truncated)',
-    pvHoverOff:'Too large, hover lookup disabled',
-    tpConfirmT:'Teleport body', tpConfirm:(n,x,y,z)=>`Teleport "${n}" to ${x}, ${y}, ${z}\nUnloaded bodies are force-loaded (orphans auto-adopted).`,
-    tpOk:'Teleported', tpFail:'Teleport failed: ',
-    tpPlayerBtn:'Teleport player', tpNoPlayers:'No players online', tpPlayerT:'Teleport player',
-    tpPlayerMsg:(p,n)=>`Teleport player "${p}" on top of "${n}".\nUnloaded bodies are force-loaded (orphans auto-adopted).`,
-    tpPlayerOk:(p)=>`Teleported ${p}`,
-    pauseBody:'⏸ Pause physics', resumeBody:'▶ Resume physics', pausedTag:'paused',
-    pauseOk:(n)=>`Paused ${n} bodies`, resumeOk:(n)=>`Resumed ${n} bodies`, pauseFail:'Pause failed: ',
-    selPause:(n)=>`Pause selected (${n})`, selResume:(n)=>`Resume selected (${n})`,
-    pauseHint:'Engine constraint lock (same as the physics staff); persists across restarts',
-    forceBody:'Keep loaded', unforceBody:'Release', forcedTag:'kept loaded by the panel', forcedBadge:'kept',
-    forceOk:(n)=>`Keeping ${n} bodies loaded`, unforceOk:(n)=>`Released ${n} bodies`,
-    forceFail:'Keep-loaded failed: ', forcePartial:(ok,bad)=>`${ok} succeeded, ${bad} failed to load (see server log)`,
-    selForce:(n)=>`Keep selected loaded (${n})`, selUnforce:(n)=>`Release selected (${n})`,
-    forceHint:'Sable force-load ticket: the body stays loaded and its chunk tickets follow it; survives restarts',
-    delConfirmT:'Delete body', delConfirm:(n,b)=>`Delete "${n}"? ${fmt(b)} blocks.\nBacked up to the recycle bin first — recoverable at any time.`,
-    delOk:'Deleted. Recycle: ', delFail:'Delete failed: ', delUnknownFail:'final verification failed',
-    delGroup:(n)=>`Delete group (${n})`, delGroupT:'Delete whole group',
-    delGroupMsg:(n,b)=>`Deletes all ${n} bodies of this group, ${fmt(b)} blocks.\nEach is backed up first — recoverable at any time.`,
-    delGroupDone:(o,n)=>`Done: ${o}/${n} ok`, opWarnMore:(n)=>`and ${n} warning(s)`,
-    adoptT:'Adopt orphan body', adoptMsg:(n)=>`Re-attach "${n}" into sable's loading pipeline (dependencies included).\nNo disk data is modified.`,
-    adoptOk:'Adopted and loaded', adoptPart:'Adopted (some members failed)', adoptFail:'Adoption failed: ',
-    adoptTrunc:(n)=>`Dependency chain exceeds the ${n}-member cap; only the first ${n} scanned members were adopted`,
-    recycleT:'Recycle bin', recycleEmpty:'Recycle bin is empty', recycleHint:'Shows verified deletions and complete backups retained after interrupted deletion.',
-    recycleState:'Restore state', recycleDeleted:'Ready to restore', recycleRecovery:'Recovery needed', recycleRestored:'Restored', recycleStorage:'Storage limit',
-    apply:'Apply', recycleUsage:(n,m)=>`${n} / ${m} backup files`, pickRecycle:'Select a backed-up body to inspect',
-    restoreGroup:'Restore dependency group', restoreHint:'Reloads the group at its saved position',
-    rTabAll:'All', rTabNamed:'Named', rTabUnnamed:'Unnamed', rTabRestored:'Restored',
-    rShowing:(n,m)=>`Showing ${n} / ${m} dependency groups`, rSelectInfo:(g,b)=>`${g} groups selected · ${b} bodies`,
-    restoreSelected:'Restore selected', restoreSelectedT:'Restore selected bodies',
-    restoreSelectedMsg:(g,b,blk)=>`Restores ${g} selected dependency groups: ${b} bodies and ${fmt(blk)} blocks.\nBodies reload at their saved positions.`,
-    restoreRecoveryWarn:(n)=>`\n${n} Recovery needed transaction(s) will remove same-UUID remnants before rebuilding the complete group.`,
-    restoreDone:(n,m)=>`Restore complete: ${n}/${m} groups`, restoreFail:'Restore failed: ',
-    deletedAt:'Deleted', restoredAt:'Restored', backupFiles:'Backup files', backupGroup:'Recycle group',
-    saveLimitOk:'Recycle limit updated', saveLimitFail:'Failed to update limit: ', rEmpty:'No recycle groups match',
-    limitConfirmT:'Change recycle limit',
-    limitConfirmMsg:(n,m)=>`There are ${n} backup files. Lowering the limit to ${m} immediately removes the oldest complete dependency groups.`,
-    copied:'Copied', showMore:(n)=>`Show remaining ${n} groups`, noMatch:'No bodies match',
-    loadFail:'Load failed: ',
-    statPhys:'Physics', statLoaded:'Loaded', statNone:'No data yet', confirmMismatch:'Input mismatch, cancelled',
-    costRow:'Perf cost', costVal:(ms)=>`${ms} ms/tick`,
-    costHint:'Java-side cost per tick for this body (block entities, forces, sync)',
-    topCost:'Most expensive bodies', bodyCostTotal:'All loaded bodies',
-    filterBar:(n,m)=>`Showing ${n} / ${m} groups`, filterActive:'Some content hidden by filters', resetFilters:'Reset filters',
-    expandAll:'Expand all', collapseAll:'Collapse all',
-    tabAll:'All', tabNamed:'Named', tabUnnamed:'Unnamed', tabRec:'Cleanup', tabAnom:'Anomalies',
-    tabVoid:'In the void', tabSky:'Far above',
-    voidTag:y=>`whole bounding box below y=${y}, unreachable (threshold is configurable)`, voidBadge:'void',
-    skyTag:y=>`whole bounding box above y=${y}, unreachable (threshold is configurable)`, skyBadge:'far above',
-    navJobs:'Log', jobQueued:'queued', jobDone:'done', jobFailed:'failed',
-    jobsRunning:'Running', jobsEmpty:'No entries yet', jobsFile:'Log file', jobsCurrent:'current run',
-    jobsOnlyFailed:'Failures only', jobsWorkers:n=>`max ${n} concurrent`,
-    jobTime:'Time', jobOp:'Operation', jobTarget:'Target', jobState:'State', jobCost:'Took', jobMsg:'Message',
-    jobTrail:'Steps', jobWarn:'Warnings',
-    rescanOp:'Rescan', adoptOp:'Adopt', restoreOp:'Restore', pauseOp:'Pause', resumeOp:'Resume',
-    forceOp:'Keep loaded', unforceOp:'Release', tpOp:'Teleport', tpPlayerOp:'Teleport player', delOp:'Delete',
-    recTag:'cleanup',
-    rEmpty:'Empty body (0 blocks)', rFragment:'Tiny fragment (<10 blocks)', rDebris:'Small debris',
-    rOrphan:'Whole group has no load pointer', rDup:'Redundant duplicate entries', rClone:'Clone suspect',
-    recWhy:'Reasons', protWhy:'Protected because', protTag:'not suggested',
-    pNamed:'has a name', pTracked:'has a rider', pUserdata:'third-party data',
-    pContents:'block entities hold items/text', pSize:'large enough', pVariety:'many block types', pMachinery:'dense machinery/furniture',
-    beRow:'Block entities', contentsRow:'Non-empty containers', typesRow:'Block types',
-    contentsHint:'Something is stored inside — treated as a player asset and never suggested for deletion',
-    recSafe:(p)=>`Only true leftovers are suggested: unnamed AND under ${p.blocks} blocks AND fewer than ${p.types} block types AND fewer than ${p.be} block entities AND all containers empty AND no rider AND no third-party data. Judged per group — one member worth keeping excludes the whole group (deleting a dependency breaks loading for the rest). Thresholds live in config/sablepanel-server.json.`,
-    recBatch:(g,b)=>`Delete all suggested (${g} groups / ${b} bodies)`,
-    recBatchT:'Batch delete suggestions', recBatchMsg:(g,b,blk)=>`Deletes ${g} groups: ${b} bodies, ${fmt(blk)} blocks.\nEach is backed up to the recycle bin — recoverable at any time.`,
-    recNone:'Nothing to clean up', recTooMany:'Max 500 bodies per call; nothing was deleted',
-    dashBodies:'Total bodies', dashBlocks:'Total blocks', dashLoaded:'Loaded', dashClean:'Cleanable',
-    dashState:'State breakdown', dashScale:'Size breakdown', dashDims:'Dimensions', dashAnom:'Anomalies',
-    physChartT:'Physics performance history',
-    physHint:'Dimension lines show whole physics-step time; the pink line is Java logic across loaded bodies. Other mods are excluded.',
-    dashGo:'View →', dashHealthy:'Save is clean', dashRecBlocks:'Reclaimable blocks', dashRecGroups:'Groups',
-    dashOrphans:'Orphans', dashDup:'Multi-copy', dashClone:'Clone suspects', dashHolding:'Holding',
-    tools:'Maintenance', rescan:'Rescan disk now', rescanOk:'Rescan triggered',
-    manualOpen:'User guide', manualTitle:'SablePanel user guide',
-    manualStates:'States & detection', manualCleanup:'Cleanup rules', manualOps:'Operations', manualRecycle:'Recycle bin',
-    manualPerformance:'Performance data', manualMaintenance:'Panel maintenance',
-    dedupe:'Deduplicate copies', dedupeTitle:'Inspect duplicate save entries', dedupeConfirm:'Deduplicate',
-    dedupeScanning:'Scanning every copy and holding pointer now…',
-    dedupeSafe:(n)=>`${n} copies have identical complete NBT. The marked primary entry will be kept.`,
-    dedupeUnsafe:'Complete NBT differs. Differences are shown, but automatic deletion is disabled.',
-    dedupeSingle:'The live scan found only one entry; no deduplication is needed.',
-    dedupeAsk:(n)=>`Remove ${n} identical extra entries through Sable's save path?\nThe primary copy remains and no recycle record is created.`,
-    dedupeDone:(n)=>`Deduplication complete: ${n} entries removed`, dedupeFail:'Deduplication failed: ',
-    copyEntry:'Entry ID', copyPointer:'Pointer', copyBlocks:'Blocks', copyPlace:'Position / size', copyCompare:'Compared with primary',
-    copyKeep:'Primary', copySame:'Identical', copyDifferent:'Different', copyReachable:(n)=>`valid ×${n}`, copyUnreachable:'no valid pointer',
-    cloneWith:(n)=>`Clone suspect with ${n} bodies`, cloneRelation:'Clone-suspect links', clonePeers:'Related bodies',
-    cloneNamedReason:'Same name, block count, and rounded bounds',
-    cloneUnnamedReason:'All unnamed with at least 50 blocks, same block count and rounded bounds',
-    chartLive:'Back to live', chartInvalid:'Invalid date range', chartRaw:'raw samples', chartPeak:'interval peaks',
-    chartMeta:(n,s,a)=>`${n} points · ${s} · ${a}`, chartInterval:(s)=>`represents ${s}`,
-    tokenChange:'Change access token', tokenChangeT:'Change access token',
-    tokenChangeMsg:'New token (letters, digits and . - _ ~, 1-64 chars).\nEvery server in the cluster is updated together; this page switches over automatically.',
-    tokenHint:'The access token is this panel\u2019s password, shared across the cluster; changes propagate to every member and are written to their config files.',
-    tokenOk:'Token changed and synced across the cluster', tokenSame:'Same as the current token',
-    tokenPartial:(n)=>`Token changed, but these servers did not sync: ${n} (they adopt it on their next heartbeat)`,
-    tokenFail:'Changing the token failed: ',
-    scanInfo:'Disk index refreshes every 120s; delete/teleport triggers it immediately',
-    physBodies:'Body logic', physEngine:'Physics engine',
-    selInfo:(n,b)=>`${n} selected · ${fmt(b)} blocks`, selDel:'Delete selected', selClear:'Clear',
-    selAdopt:(n)=>`Adopt selected orphans (${n})`,
-    selDelT:'Delete selected bodies',
-    selDelMsg:(n,b)=>`Deletes ${n} bodies from the selected dependency groups, ${fmt(b)} blocks total.\nVerified groups enter the recycle bin and remain recoverable.`,
-    selAdoptT:'Batch adopt orphans',
-    selAdoptMsg:(n)=>`Adopts the ${n} checked orphan bodies one by one (dependencies included, disk untouched).`,
-    selAdoptDone:(o,n)=>`Adopted ${o}/${n}`,
   }
 };
 const MANUAL = {
@@ -308,56 +170,17 @@ const MANUAL = {
       {h:'口令与监听',body:'<p>访问口令作为页面密码保存在浏览器当前设备中；维护卡片修改后会同步到当前集群。网页默认使用 <code>webPort=25580</code>，TLS 数据接口默认使用 <code>apiPort=25581</code>；配置位于 <code>config/sablepanel-server.json</code>。</p>'},
       {h:'集群',body:'<p>同机且使用同一 <code>apiPort</code> 的实例组成面板集群。先占用数据端口的实例成为 HOST 并按 <code>webPort</code> 托管页面，其它实例通过回环地址注册为 PEER 并采纳 HOST 口令；顶部服务器选择器只切换查看目标，不迁移物理体数据。</p>'}
     ]}
-  ],
-  en: [
-    {k:'states',label:'manualStates',sections:[
-      {h:'Runtime and storage states',body:'<ul><li><b>loaded</b>: active in the running world.</li><li><b>stored</b>: present on disk with a valid holding pointer but not loaded.</li><li><b>holding</b>: held in memory by a holding chunk and awaiting the normal save path.</li><li><b>orphan</b>: present on disk with no valid holding pointer.</li></ul>'},
-      {h:'Groups and anomalies',body:'<ul><li><b>Dependency group</b>: bodies joined by Sable dependencies; delete and restore operate on the whole group.</li><li><b>Copy</b>: multiple disk entries share one UUID; their contents may differ.</li><li><b>Clone suspect</b>: different UUIDs share an outline summary. This is a hint, not proof of duplication.</li></ul>'},
-      {h:'Clone-suspect rule',body:'<p>Named bodies compare exact name, block count, and rounded bounds. Unnamed bodies must also contain at least 50 blocks, then compare block count and rounded bounds. Voxels, block composition, dimension, and position are not compared, so false positives and false negatives are possible.</p>'}
-    ]},
-    {k:'cleanup',label:'manualCleanup',sections:[
-      {h:'Deletion recommendation',body:'<p>A group must be unnamed, below all dynamic block/type/block-entity thresholds, have empty containers, no rider, and no third-party data. Thresholds come from <code>config/sablepanel-server.json</code>.</p>'},
-      {h:'Protection',body:'<p>Any named member, rider, third-party data, non-empty container, or reached protection threshold excludes the whole dependency group. Copies and clone suspects alone never prove that data is safe to delete.</p>'}
-    ]},
-    {k:'operations',label:'manualOps',sections:[
-      {h:'Routine operations',body:'<ul><li><b>Rescan</b>: rebuilds the disk index immediately; an automatic scan also runs every 120 seconds.</li><li><b>Teleport</b>: coordinates refer to the <b>bottom-center</b> of the bounding box (target y=100 puts the structure base at y=100). Force-loads stored bodies; orphans are adopted with dependencies first.</li><li><b>Adopt</b>: rebuilds holding pointers and reconnects the load path without deleting the body entry.</li><li><b>Delete</b>: processes a complete dependency group and commits its backup only after strict verification.</li><li><b>Pause</b>: locks the structure in place with an engine fixed constraint (same mechanism as the creative physics staff). Persisted — survives restarts until resumed.</li><li><b>Batch actions</b>: selections survive filters; deletion still deduplicates and verifies dependency groups.</li></ul>'},
-      {h:'Copy deduplication',body:'<p>The scan rereads every slot and holding pointer. It keeps the active runtime entry first, then a reachable entry, then the stable lowest entry ID. Execution is allowed only when every complete CompoundTag is deeply equal. Extra slots are removed through Sable queueDeletion and saveAll, never by editing region files, and no recycle backup is created.</p>'}
-    ]},
-    {k:'recycle',label:'manualRecycle',sections:[
-      {h:'Admission',body:'<p>A complete dependency-group backup is staged before deletion. Verified deletion becomes Ready to restore. If deletion or automatic rollback is interrupted, the complete backup becomes Recovery needed instead of remaining hidden.</p>'},
-      {h:'Restore and capacity',body:'<ul><li>Restore always handles the whole dependency group at its saved dimension and position; data without a dimension uses the overworld.</li><li><b>Ready to restore</b> means deletion succeeded. <b>Recovery needed</b> removes same-UUID remnants before rebuilding the group and is exempt from automatic capacity eviction. <b>Restored</b> means a restore already succeeded.</li><li>The limit counts backup files. Overflow evicts the oldest ordinary complete groups; if protected recovery backups fill the limit, a new deletion is rejected before it starts.</li></ul>'}
-    ]},
-    {k:'performance',label:'manualPerformance',sections:[
-      {h:'Series',body:'<ul><li><b>Dimension physics</b>: physics-step time per dimension, normalized per server tick.</li><li><b>Body logic</b>: sampled Java logic total per tick across loaded bodies; other mods are excluded.</li><li>Tick count, average MSPT, and peak MSPT are also persisted for aggregation and API queries.</li></ul>'},
-      {h:'History controls',body:'<p>One-second samples are written asynchronously under <code>config/sablepanel/stats/</code>. Short ranges use raw seconds; long ranges use minute data and preserve peaks per bucket. Hover for time and values, use the wheel to zoom around the pointer time, or enter a fixed date range. Fixed history stops polling until “Back to live” is selected.</p>'},
-      {h:'Retention',body:'<p>The default is 30 days via <code>statsRetentionDays</code>. Completed days are compressed. Corrupt records and incomplete tail lines are skipped without breaking live data.</p>'}
-    ]},
-    {k:'maintenance',label:'manualMaintenance',sections:[
-      {h:'Token and listener',body:'<p>The access token acts as the page password and is remembered on this device. The web page defaults to <code>webPort=25580</code> and the TLS data endpoint to <code>apiPort=25581</code>; settings live in <code>config/sablepanel-server.json</code>.</p>'},
-      {h:'Cluster',body:'<p>Instances on the same machine using the same <code>apiPort</code> form a panel cluster. The first instance to bind the data port becomes HOST and serves the page on <code>webPort</code>; the others register over loopback as PEERs and adopt the HOST token. The header selector changes only the viewed server and never migrates body data.</p>'}
-    ]}
   ]
 };
-let LANG = localStorage.getItem('spLang') || 'zh';
-function t(k){ const v = I18N[LANG][k]; return v !== undefined ? v : (I18N.zh[k] ?? k); }
+function t(k){ const v = I18N.zh[k]; return v !== undefined ? v : k; }
 function fmt(n){ return Number(n).toLocaleString('en-US'); }
 function applyI18n(){
   document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
-  document.getElementById('langLabel').textContent = LANG === 'zh' ? 'EN' : '中文';
-  document.documentElement.lang = LANG;
   document.getElementById('physChartTitle').textContent = t('physChartT');
   renderChartPresets();
   updateChartControls();
   if (document.getElementById('manualBack').style.display === 'flex') renderManual();
   if (COPY_SCAN && document.getElementById('copyBack').style.display === 'flex') renderDedupe(COPY_SCAN);
   renderSortRows();
-}
-function toggleLang(){
-  LANG = LANG === 'zh' ? 'en' : 'zh';
-  localStorage.setItem('spLang', LANG);
-  applyI18n(); renderAll(); refreshBlockList();
-  if (SEL) renderDetail();
-  if (RSEL) renderRecycleDetail();
-  renderComposition();
 }

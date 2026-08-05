@@ -2,22 +2,14 @@
 /* 性能图表:预设/日期区间控件 + canvas 绘制 + 悬停/滚轮交互 */
 function chartDuration(seconds){
   const value = Math.max(1, Math.round(seconds));
-  if (LANG === 'zh') {
-    if (value < 60) return `${value} 秒`;
-    if (value < 3600) return `${Math.round(value/60)} 分钟`;
-    if (value < 86400) return `${Math.round(value/3600)} 小时`;
-    return `${Math.round(value/86400)} 天`;
-  }
-  if (value < 60) return `${value}s`;
-  if (value < 3600) return `${Math.round(value/60)} min`;
-  if (value < 86400) return `${Math.round(value/3600)} hr`;
-  return `${Math.round(value/86400)} d`;
+  if (value < 60) return `${value} 秒`;
+  if (value < 3600) return `${Math.round(value/60)} 分钟`;
+  if (value < 86400) return `${Math.round(value/3600)} 小时`;
+  return `${Math.round(value/86400)} 天`;
 }
 function chartPresetLabel(seconds){
-  const labels = LANG === 'zh'
-    ? {300:'5 分钟',900:'15 分钟',3600:'1 小时',21600:'6 小时',86400:'24 小时',604800:'7 天',2592000:'30 天'}
-    : {300:'5 min',900:'15 min',3600:'1 hr',21600:'6 hr',86400:'24 hr',604800:'7 d',2592000:'30 d'};
-  return labels[seconds];
+  return {300:'5 分钟',900:'15 分钟',3600:'1 小时',21600:'6 小时',
+    86400:'24 小时',604800:'7 天',2592000:'30 天'}[seconds];
 }
 function renderChartPresets(){
   const box = document.getElementById('chartPresets');

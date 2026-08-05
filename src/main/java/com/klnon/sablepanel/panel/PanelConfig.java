@@ -18,12 +18,6 @@ public final class PanelConfig {
     public static final String DEFAULT_TOKEN = "sablepanel";
 
     public boolean enabled = true;
-    /** 旧字段，仅用于读取 0.11.0 及更早配置。 */
-    @Deprecated
-    public transient String bind = "0.0.0.0";
-    /** 旧字段，仅用于读取 0.11.0 及更早配置。 */
-    @Deprecated
-    public transient int port = 25580;
     public boolean webEnabled = true;
     public String webBind = "0.0.0.0";
     public int webPort = 25580;

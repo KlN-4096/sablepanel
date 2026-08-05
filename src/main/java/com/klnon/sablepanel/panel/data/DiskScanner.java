@@ -341,10 +341,6 @@ public final class DiskScanner {
         return located;
     }
 
-    private interface StrictEntryConsumer {
-        void accept(int index, CompoundTag tag) throws IOException;
-    }
-
     /**
      * 全目录扫描的存储文件遍历。唯一的容错:头部截断(<4096 字节)按 sable 的
      * SubLevelStorageFile 同款语义处理 —— 零填充 buffer 读入可读前缀,缺失槽位视为空闲,
@@ -353,7 +349,7 @@ public final class DiskScanner {
      * 这些可能是权限/瞬态 IO/并发写,数据对 sable 依然可见,静默跳过会造成误报成功。
      */
     private static void forEachEntryStrict(Path file, Path dir, int rx, int rz, int sectorSize,
-                                           List<String> warnings, StrictEntryConsumer consumer)
+                                           List<String> warnings, EntryConsumer consumer)
             throws IOException {
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
             long fileSize = channel.size();
@@ -435,8 +431,9 @@ public final class DiskScanner {
         });
     }
 
+    /** 严格路径要能上抛 IO 错误;宽松路径的 lambda 不抛,由 forEachEntry 的 catch 兜住 */
     private interface EntryConsumer {
-        void accept(int index, CompoundTag tag);
+        void accept(int index, CompoundTag tag) throws IOException;
     }
 
     /** 后台扫描发现的截断文件,每个路径只告警一次,避免每轮扫描刷屏 */
@@ -502,55 +499,6 @@ public final class DiskScanner {
     public record LiveLocation(EntryKey key, int chunkX, int chunkZ) {
     }
 
-    /**
-     * 实时定位某 uuid 在盘上的最新条目及引用它的 holding chunk(强制加载用,不依赖快照)。
-     * 引用 chunk 必须来自 .slvlr 实际指针,snatchAndLoad 才能命中。
-     */
-    public static LiveLocation locateLive(String dim, Path dir, UUID uuid) {
-        try {
-            Map<String, int[]> refChunk = new HashMap<>();
-            List<Path> slvlsFiles = new ArrayList<>();
-            try (var stream = Files.list(dir)) {
-                for (Path p : stream.toList()) {
-                    String fn = p.getFileName().toString();
-                    Matcher mr = SLVLR.matcher(fn);
-                    if (mr.matches()) {
-                        int rx = Integer.parseInt(mr.group(1)), rz = Integer.parseInt(mr.group(2));
-                        forEachEntry(p, dir, rx, rz, 128, (idx, tag) -> {
-                            int cx = rx * 32 + (idx & 31), cz = rz * 32 + (idx >> 5);
-                            for (int pk : tag.getIntArray("pointers")) {
-                                refChunk.put(rx + "." + rz + "." + ((pk >> 16) & 0xFFFF) + ":" + (pk & 0xFFFF),
-                                        new int[]{cx, cz});
-                            }
-                        });
-                    } else if (SLVLS.matcher(fn).matches()) {
-                        slvlsFiles.add(p);
-                    }
-                }
-            }
-            LiveLocation[] found = new LiveLocation[1];
-            for (Path p : slvlsFiles) {
-                Matcher m = SLVLS.matcher(p.getFileName().toString());
-                if (!m.matches()) continue;
-                int rx = Integer.parseInt(m.group(1)), rz = Integer.parseInt(m.group(2)), si = Integer.parseInt(m.group(3));
-                forEachEntry(p, dir, rx, rz, 4096, (idx, tag) -> {
-                    try {
-                        if (!uuid.equals(tag.getUUID("uuid"))) return;
-                        int[] rc = refChunk.get(rx + "." + rz + "." + si + ":" + idx);
-                        if (rc == null) return; // 无指针引用的条目 snatch 不到,跳过
-                        found[0] = new LiveLocation(new EntryKey(dim, rx, rz, si, idx), rc[0], rc[1]);
-                    } catch (Exception ignored) {
-                    }
-                });
-                if (found[0] != null) return found[0];
-            }
-            return found[0];
-        } catch (Exception e) {
-            SablePanel.LOGGER.warn("sablepanel: live locate failed for {}", uuid, e);
-            return null;
-        }
-    }
-
     public record LocatedEntry(EntryKey key, CompoundTag tag) {
     }
 
@@ -559,35 +507,7 @@ public final class DiskScanner {
      * 同 uuid 多条目时取方块数最大的一份(资产安全:保最完整版本)。
      */
     public static LocatedEntry locateEntry(String dim, Path dir, UUID uuid) {
-        try {
-            List<LocatedEntry> hits = new ArrayList<>();
-            List<Path> slvlsFiles = new ArrayList<>();
-            try (var stream = Files.list(dir)) {
-                for (Path p : stream.toList()) {
-                    if (SLVLS.matcher(p.getFileName().toString()).matches()) slvlsFiles.add(p);
-                }
-            }
-            for (Path p : slvlsFiles) {
-                Matcher m = SLVLS.matcher(p.getFileName().toString());
-                if (!m.matches()) continue;
-                int rx = Integer.parseInt(m.group(1)), rz = Integer.parseInt(m.group(2)), si = Integer.parseInt(m.group(3));
-                forEachEntry(p, dir, rx, rz, 4096, (idx, tag) -> {
-                    try {
-                        if (uuid.equals(tag.getUUID("uuid"))) {
-                            hits.add(new LocatedEntry(new EntryKey(dim, rx, rz, si, idx), tag));
-                        }
-                    } catch (Exception ignored) {
-                    }
-                });
-            }
-            if (hits.isEmpty()) return null;
-            hits.sort((a, b) -> Integer.compare(
-                    countBlocks(b.tag().getCompound("plot"), null), countBlocks(a.tag().getCompound("plot"), null)));
-            return hits.get(0);
-        } catch (Exception e) {
-            SablePanel.LOGGER.warn("sablepanel: locate entry failed for {}", uuid, e);
-            return null;
-        }
+        return locateEntries(dim, dir, Set.of(uuid)).get(uuid);
     }
 
     /**
@@ -631,7 +551,7 @@ public final class DiskScanner {
     }
 
     /**
-     * 批量版 {@link #locateLive}:一趟建指针表 + 一趟扫条目,解出整批 uuid 的存活位置。
+     * 一趟建指针表 + 一趟扫条目,批量解出 uuid 的存活位置。
      * <p>
      * 逐个调用时这两趟对每个 uuid 各做一次,而它无条件跑在依赖链的<b>每个</b>成员上
      * (不像 locateEntry 只在快照失配时才走),是生产上那 16 分钟的主要来源。

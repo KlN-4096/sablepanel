@@ -90,7 +90,7 @@ class ClientPanelGatewayTest {
                  BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
                 assertTrue(readEvent(reader, "ready").contains("event: ready"));
                 CompletableFuture<String> pushed = CompletableFuture.supplyAsync(() -> readEvent(reader, "bodies"));
-                api.publishEvent(new PanelEvent("host", PanelEvent.BODIES, 12));
+                api.publishEvent(new PanelEvent("host", 12));
                 String event = pushed.get(5, TimeUnit.SECONDS);
                 assertTrue(event.contains("\"server\":\"host\""));
                 assertTrue(event.contains("\"revision\":12"));
@@ -108,7 +108,7 @@ class ClientPanelGatewayTest {
                     assertNull(awaitClosed(reader));
                     CompletableFuture<String> nextPushed = CompletableFuture.supplyAsync(
                             () -> readEvent(nextReader, "bodies"));
-                    api.publishEvent(new PanelEvent("host", PanelEvent.BODIES, 13));
+                    api.publishEvent(new PanelEvent("host", 13));
                     assertTrue(nextPushed.get(5, TimeUnit.SECONDS).contains("\"revision\":13"));
 
                     HttpRequest gzipRequest = HttpRequest.newBuilder(URI.create(base + "/api/large"))

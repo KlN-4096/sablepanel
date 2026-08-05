@@ -99,7 +99,7 @@ public final class PanelClusterNode implements AutoCloseable {
     public void publishBodiesChanged(long revision) {
         if (this.closed) return;
         long latestRevision = this.bodiesRevision.accumulateAndGet(revision, Math::max);
-        PanelEvent event = new PanelEvent(this.api.selfId(), PanelEvent.BODIES, latestRevision);
+        PanelEvent event = new PanelEvent(this.api.selfId(), latestRevision);
         PanelTcpServer currentHost = this.host;
         if (currentHost != null && currentHost.isActive()) {
             currentHost.publishEvent(event);
@@ -170,7 +170,7 @@ public final class PanelClusterNode implements AutoCloseable {
         }
         SablePanel.LOGGER.info("sablepanel: [{}] joined TLS API HOST on 127.0.0.1:{}",
                 this.api.selfId(), this.config.apiPort);
-        connected.publishEvent(new PanelEvent(this.api.selfId(), PanelEvent.BODIES, this.bodiesRevision.get()));
+        connected.publishEvent(new PanelEvent(this.api.selfId(), this.bodiesRevision.get()));
     }
 
     private void forwardPeerEvent(String peerId, PanelEvent event) {

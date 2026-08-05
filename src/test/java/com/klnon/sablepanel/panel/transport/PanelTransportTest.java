@@ -183,15 +183,15 @@ class PanelTransportTest {
             assertEquals(401, manager.subscribeEvents("wrong").get(5, TimeUnit.SECONDS).status());
             assertEquals(200, manager.subscribeEvents("secret").get(5, TimeUnit.SECONDS).status());
 
-            server.publishEvent(new PanelEvent("host", PanelEvent.BODIES, 4));
+            server.publishEvent(new PanelEvent("host", 4));
             peer = PanelTcpClient.connectPeer(endpoint, "peer-a", request ->
                     PanelResponse.json(200, "{}", false), token -> PanelResponse.json(200, "{}", false));
-            peer.publishEvent(new PanelEvent("forged", PanelEvent.BODIES, 7));
+            peer.publishEvent(new PanelEvent("forged", 7));
 
             assertTrue(received.await(5, TimeUnit.SECONDS));
             assertEquals(List.of(
-                    new PanelEvent("host", PanelEvent.BODIES, 4),
-                    new PanelEvent("peer-a", PanelEvent.BODIES, 7)), events);
+                    new PanelEvent("host", 4),
+                    new PanelEvent("peer-a", 7)), events);
         } finally {
             if (peer != null) peer.close();
             if (manager != null) manager.close();

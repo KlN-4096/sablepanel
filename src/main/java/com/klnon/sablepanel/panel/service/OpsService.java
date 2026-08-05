@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -682,7 +683,7 @@ public final class OpsService {
             }
             List<GlobalSavedSubLevelPointer> pointers = new ArrayList<>();
             if (copy.pointers().isEmpty()) {
-                pointers.add(fallbackPointer(copy));
+                pointers.add(fallbackPointer(copy.key(), copy.tag()));
             } else {
                 for (DiskScanner.LiveLocation location : copy.pointers()) pointers.add(toPointer(location));
             }
@@ -716,10 +717,6 @@ public final class OpsService {
     private static GlobalSavedSubLevelPointer toPointer(DiskScanner.LiveLocation location) {
         return new GlobalSavedSubLevelPointer(new ChunkPos(location.chunkX(), location.chunkZ()),
                 (short) location.key().storage(), (short) location.key().index());
-    }
-
-    private static GlobalSavedSubLevelPointer fallbackPointer(DeleteCopy copy) {
-        return fallbackPointer(copy.key(), copy.tag());
     }
 
     private static GlobalSavedSubLevelPointer fallbackPointer(DiskScanner.EntryKey key, CompoundTag tag) {
@@ -1707,23 +1704,19 @@ public final class OpsService {
         SablePanel.LOGGER.info("sablepanel: panel op {} {} ({})", op, uuid, name);
     }
 
-    private interface MainTask {
-        JsonObject run() throws Exception;
-    }
-
-    private JsonObject onMain(MainTask task) throws Exception {
+    private JsonObject onMain(Callable<JsonObject> task) throws Exception {
         return submitMain(task).get(20, TimeUnit.SECONDS);
     }
 
-    private JsonObject onMainUntilComplete(MainTask task) throws Exception {
+    private JsonObject onMainUntilComplete(Callable<JsonObject> task) throws Exception {
         return submitMain(task).get();
     }
 
-    private CompletableFuture<JsonObject> submitMain(MainTask task) {
+    private CompletableFuture<JsonObject> submitMain(Callable<JsonObject> task) {
         CompletableFuture<JsonObject> fut = new CompletableFuture<>();
         this.server.execute(() -> {
             try {
-                fut.complete(task.run());
+                fut.complete(task.call());
             } catch (Throwable t) {
                 fut.completeExceptionally(t);
             }
