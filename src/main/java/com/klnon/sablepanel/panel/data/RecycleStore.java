@@ -19,9 +19,13 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.FileVisitor;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -48,10 +52,26 @@ public final class RecycleStore {
     /** 单页组数上限与默认值:客户端可以要更少,但要不到更多 */
     public static final int PAGE_LIMIT_MAX = 200;
     private static final int PAGE_LIMIT_DEFAULT = 100;
-    /** 单页预算:条数之外再兜一层,防止少数超大组把一页撑爆。单位见 {@link #manifestCost} */
-    private static final int PAGE_BLOCK_BUDGET = 200_000;
-    /** 一个体的元数据(名称/坐标/包围盒/依赖链/备份名)折算成多少个方块索引当量 */
-    private static final int BODY_COST_UNITS = 128;
+    /**
+     * 单页字节预算,量的是候选组序列化之后的真实字节。
+     * <p>
+     * 从前按"体数 × 固定当量 + block_ids 条数"估:名称、维度、依赖链一个字节都没算,
+     * 而 display_name 单条就能有 65535 字节。清单本身允许到 64 MiB,估算看不见的部分
+     * 足够让一页越过 32 MiB 的协议上限。
+     */
+    private static final long PAGE_BYTE_BUDGET = 2L << 20;
+    /** 单页调色板条数上限,和 {@code BodyIndex} 同理:它是全表共享的,不封顶就随方块种类无限长 */
+    private static final int MAX_PALETTE = 20_000;
+    /** 摘要形态里名称截到这么长:摘要必须是固定尺寸的,否则它自己就是下一个漏洞 */
+    private static final int SUMMARY_NAME_CHARS = 200;
+    /** 组视图透传的字段白名单 —— 清单是磁盘上的结构,不该整份当响应发出去 */
+    private static final String[] GROUP_FIELDS = {
+            "id", "state", "deleted_at", "restored_at", "recovery_required_at",
+            "name", "members", "blocks", "dims", "file_count", "version_state"};
+    /** 体视图透传的字段白名单 */
+    private static final String[] BODY_FIELDS = {
+            "uuid", "dim", "name", "blocks", "pos", "size", "be", "contents",
+            "dependencies", "backup_count"};
     /** 单份清单读进堆的字节上限。取值远高于任何正常组(每体几百字节),只为兜住坏文件 */
     private static final long MANIFEST_MAX_BYTES = 64L << 20;
     /** 全盘统计缓存的存活时间,见 {@link #storageStatsCached} */
@@ -98,6 +118,9 @@ public final class RecycleStore {
     /** 全盘统计缓存,见 {@link #storageStatsCached} */
     private StorageStats stats;
     private long statsAt;
+    /** 分页目录清单缓存,见 {@link #pageIndex} */
+    private PageIndex index;
+    private long indexAt;
     private final Map<UUID, String> latestByUuid = new LinkedHashMap<>();
     private final Map<String, Set<UUID>> latestMembers = new LinkedHashMap<>();
     private final Set<String> pendingOldGroups = new LinkedHashSet<>();
@@ -176,7 +199,7 @@ public final class RecycleStore {
         } catch (Exception error) {
             SablePanel.LOGGER.warn("sablepanel: recycle retention cleanup failed", error);
         }
-        invalidateStats();
+        invalidateCaches();
         return stage.id;
     }
 
@@ -297,56 +320,60 @@ public final class RecycleStore {
         out.addProperty("total_groups", 0);
         JsonArray groups = new JsonArray();
         try {
-            List<Path> allDirectories = new ArrayList<>(committedDirectories());
-            int oldGroups = (int) allDirectories.stream().filter(this::isOldVersion).count();
-            out.addProperty("latest_groups", allDirectories.size() - oldGroups);
-            out.addProperty("old_groups", oldGroups);
-            List<Path> directories = allDirectories.stream()
-                    .filter(path -> isOldVersion(path) == oldVersion)
-                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
-            directories.sort(Comparator.comparing((Path path) -> path.getFileName().toString()).reversed());
+            PageIndex index = pageIndex();
+            out.addProperty("latest_groups", index.latest().size());
+            out.addProperty("old_groups", index.old().size());
+            List<Path> directories = index.of(oldVersion);
             out.addProperty("total_groups", directories.size());
-            List<JsonObject> manifests = new ArrayList<>();
+            PagePalette palette = new PagePalette();
             String nextCursor = "";
             boolean more = false;
-            int cost = 0;
+            long cost = 0;
             for (Path directory : directories) {
                 String id = directory.getFileName().toString();
                 if (!from.isEmpty() && id.compareTo(from) >= 0) continue;
-                if (manifests.size() >= pageLimit) {
+                if (groups.size() >= pageLimit) {
                     more = true;
                     break;
                 }
                 try {
                     JsonObject manifest = readManifest(directory);
-                    // 预算要连"这一条有多大"一起算。只看读取前的旧 cost 的话,小组先占了位,
-                    // 紧跟着的超大组照样整条进来 —— 而且此时页面已有两条,下面的 withBlocks
-                    // 判断不成立,完整调色板和索引仍会一起发出去
-                    int next = manifestCost(manifest);
-                    if (!manifests.isEmpty() && cost + next > PAGE_BLOCK_BUDGET) {
-                        more = true;
-                        break;
-                    }
                     manifest.addProperty("version_state", version);
-                    manifests.add(manifest);
-                    cost += next;
+                    // 量的是这一条真正会发出去的字节,连它新增的调色板条目一起算。
+                    // 只看读取前的旧 cost 的话,小组先占了位,紧跟着的超大组照样整条进来
+                    JsonObject candidate = toView(manifest, palette, true);
+                    long size = JsonSize.of(candidate) + palette.pendingBytes();
+                    if (cost + size > PAGE_BYTE_BUDGET) {
+                        palette.rollback();
+                        // 前面已经有组了就把这条留到下一页 —— 它自己一页装得下
+                        if (!groups.isEmpty()) {
+                            more = true;
+                            break;
+                        }
+                        // 单组自己就超预算:先退到只发元数据,还是装不下就发固定尺寸摘要,
+                        // 否则这一组永远翻不过去
+                        candidate = toView(manifest, palette, false);
+                        size = JsonSize.of(candidate);
+                        if (size > PAGE_BYTE_BUDGET) {
+                            candidate = summaryView(manifest);
+                            size = JsonSize.of(candidate);
+                        }
+                    }
+                    palette.commit();
+                    cost += size;
+                    groups.add(candidate);
                     nextCursor = id;
                 } catch (Exception error) {
                     SablePanel.LOGGER.warn("sablepanel: skipping unreadable recycle group {}", id, error);
                 }
             }
-            // 单个组自己就超过预算时(几百个体的巨型依赖组)只发它的元数据,不发方块构成 ——
-            // 强行整份放进去等于分页白做,一页照样能撑爆响应
-            boolean withBlocks = !(manifests.size() == 1 && cost > PAGE_BLOCK_BUDGET);
-            Map<String, Integer> palette = withBlocks ? collectPalette(manifests) : Map.of();
-            for (JsonObject manifest : manifests) groups.add(toView(manifest, palette, withBlocks));
             // 全盘统计要走一遍目录树,只在第一页算,翻页时前端沿用首页的值
             if (from.isEmpty()) {
                 StorageStats current = storageStatsCached();
                 out.addProperty("file_count", current.files);
                 out.addProperty("disk_bytes", current.bytes);
             }
-            out.add("block_palette", paletteJson(palette));
+            out.add("block_palette", palette.committedArr);
             out.addProperty("next_cursor", more ? nextCursor : "");
         } catch (Exception error) {
             SablePanel.LOGGER.warn("sablepanel: recycle view failed", error);
@@ -402,28 +429,56 @@ public final class RecycleStore {
         out.addProperty("files", removedFiles);
         out.addProperty("bytes", removedBytes);
         out.add("results", results);
-        invalidateStats();
+        invalidateCaches();
         return out;
     }
 
     /**
-     * 单页预算的记账当量:一个方块索引算 1。
-     * <p>
-     * 光算方块索引不够 —— 一个组几百个体、每个体带名称/坐标/包围盒/依赖链,这些元数据本身
-     * 就能顶满响应,所以每个体再记一份固定当量。
+     * 一页共享的方块调色板。候选组先往 pending 里放,被接受了才并入 committed ——
+     * 被拒的候选不能把自己的条目留在表里,那就成了没人引用又没记账的字节。
      */
-    private static int manifestCost(JsonObject manifest) {
-        JsonArray bodies = manifest.getAsJsonArray("bodies");
-        if (bodies == null) return 0;
-        int total = 0;
-        for (var bodyElement : bodies) {
-            JsonArray ids = bodyElement.getAsJsonObject().getAsJsonArray("block_ids");
-            total += BODY_COST_UNITS + (ids != null ? ids.size() : 0);
+    private static final class PagePalette {
+        private final Map<String, Integer> committed = new LinkedHashMap<>();
+        private final JsonArray committedArr = new JsonArray();
+        private final Map<String, Integer> pending = new LinkedHashMap<>();
+        private JsonArray pendingArr = new JsonArray();
+
+        /** @return 该方块在本页调色板里的下标;表满时返回 null(索引直接丢弃) */
+        Integer index(String id) {
+            Integer at = this.committed.get(id);
+            if (at == null) at = this.pending.get(id);
+            if (at != null) return at;
+            if (this.committed.size() + this.pending.size() >= MAX_PALETTE) return null;
+            at = this.committed.size() + this.pending.size();
+            this.pending.put(id, at);
+            String[] names = BlockNames.of(id);
+            JsonObject entry = new JsonObject();
+            entry.addProperty("id", id);
+            entry.addProperty("en", names[0]);
+            entry.addProperty("zh", names[1]);
+            this.pendingArr.add(entry);
+            return at;
         }
-        return total;
+
+        long pendingBytes() {
+            return this.pending.isEmpty() ? 0 : JsonSize.of(this.pendingArr);
+        }
+
+        void commit() {
+            this.committed.putAll(this.pending);
+            this.committedArr.addAll(this.pendingArr);
+            rollback();
+        }
+
+        void rollback() {
+            this.pending.clear();
+            this.pendingArr = new JsonArray();
+        }
     }
 
+    /** 恢复不改组集合,但 state 变了,列表要立刻反映 */
     public synchronized void markRestored(String id) throws IOException {
+        invalidateCaches();
         Path directory = groupDirectory(id);
         JsonObject manifest = readManifest(directory);
         manifest.addProperty("state", "restored");
@@ -609,14 +664,49 @@ public final class RecycleStore {
     private List<Path> committedDirectories() throws IOException {
         if (!Files.isDirectory(this.root)) return List.of();
         List<Path> directories = new ArrayList<>();
+        // 不 toList():只在迭代里判定,省一份全量路径
         try (var stream = Files.list(this.root)) {
-            for (Path path : stream.toList()) {
+            for (var iterator = stream.iterator(); iterator.hasNext(); ) {
+                Path path = iterator.next();
                 String id = path.getFileName().toString();
                 if (Files.isDirectory(path) && !path.equals(this.pendingRoot) && SAFE_ID.matcher(id).matches()
                         && Files.isRegularFile(path.resolve(MANIFEST))) directories.add(path);
             }
         }
         return directories;
+    }
+
+    /**
+     * 分页用的目录清单:已按 id 降序(即时间序)排好,并按版本分好组。
+     * <p>
+     * 每次翻页都重新 {@code Files.list} + 每组 4 次 stat + 全量排序,是 {@code O(总组数)} 的活,
+     * 而翻页本身只需要一页。列表只在提交/清理/恢复时才变,所以跟全盘统计共用同一套失效 + TTL。
+     * <p>
+     * ponytail: 内存缓存而不是持久索引。持久索引要跟每个写入点对账,漏一个就是永久错数据;
+     * 缓存最坏只是重扫一次。等到"一次全扫"本身都嫌慢,再上索引。
+     */
+    private PageIndex pageIndex() throws IOException {
+        long now = System.currentTimeMillis();
+        if (this.index != null && now - this.indexAt < STATS_TTL_MS) return this.index;
+        List<Path> latest = new ArrayList<>();
+        List<Path> old = new ArrayList<>();
+        for (Path directory : committedDirectories()) (isOldVersion(directory) ? old : latest).add(directory);
+        Comparator<Path> newestFirst = Comparator.comparing((Path path) -> path.getFileName().toString()).reversed();
+        latest.sort(newestFirst);
+        old.sort(newestFirst);
+        this.index = new PageIndex(List.copyOf(latest), List.copyOf(old));
+        this.indexAt = now;
+        return this.index;
+    }
+
+    private void invalidateIndex() {
+        this.index = null;
+    }
+
+    private record PageIndex(List<Path> latest, List<Path> old) {
+        List<Path> of(boolean oldVersion) {
+            return oldVersion ? this.old : this.latest;
+        }
     }
 
     /**
@@ -830,8 +920,10 @@ public final class RecycleStore {
         return this.stats;
     }
 
-    private void invalidateStats() {
+    /** 组集合变了就把两份缓存一起丢掉:全盘统计和分页目录清单的失效时机完全一致 */
+    private void invalidateCaches() {
         this.stats = null;
+        invalidateIndex();
     }
 
     private StorageStats storageStats() throws IOException {
@@ -850,56 +942,72 @@ public final class RecycleStore {
     }
 
     private static long directoryBytes(Path directory) throws IOException {
+        // 流式累加,不物化路径列表:一个组允许到百万个备份文件
         try (var stream = Files.walk(directory)) {
             long bytes = 0;
-            for (Path path : stream.filter(Files::isRegularFile).toList()) bytes += Files.size(path);
+            for (var iterator = stream.filter(Files::isRegularFile).iterator(); iterator.hasNext(); ) {
+                bytes += Files.size(iterator.next());
+            }
             return bytes;
         }
     }
 
-    private static Map<String, Integer> collectPalette(List<JsonObject> manifests) {
-        Map<String, Integer> palette = new LinkedHashMap<>();
-        for (JsonObject manifest : manifests) {
-            for (var bodyElement : manifest.getAsJsonArray("bodies")) {
-                JsonArray ids = bodyElement.getAsJsonObject().getAsJsonArray("block_ids");
-                if (ids == null) continue;
-                for (var id : ids) palette.putIfAbsent(id.getAsString(), palette.size());
-            }
-        }
-        return palette;
-    }
-
     /**
-     * @param withBlocks false 时丢掉方块构成(只留计数)。单个组自己就超过整页预算时用它 ——
-     *                   总得让这一页翻得过去,但也不能整份塞进来把响应撑爆;构成条前端会显示为空。
+     * 按字段白名单重建响应,而不是把磁盘上的清单整份转发出去。
+     * <p>
+     * 从前是就地摘掉 {@code block_ids}/{@code backups} 之后直接发原对象:清单里今后多出来的
+     * 任何字段都会自动跟着上线,而预算不知道它存在。白名单让"发什么"变成一处显式的清单。
+     *
+     * @param withBlocks false 时丢掉方块构成(只留计数)。单个组自己就超过整页预算时用它
      */
-    private static JsonObject toView(JsonObject manifest, Map<String, Integer> palette, boolean withBlocks) {
-        // 就地改。manifest 是 view() 刚从磁盘解析出来的临时对象,除了这里没人引用它,
-        // deepCopy 只是在超大组这个最不该翻倍的场景把峰值堆再翻一倍
-        JsonObject view = manifest;
-        for (var bodyElement : view.getAsJsonArray("bodies")) {
+    private static JsonObject toView(JsonObject manifest, PagePalette palette, boolean withBlocks) {
+        JsonObject view = new JsonObject();
+        copyFields(manifest, view, GROUP_FIELDS);
+        JsonArray bodies = new JsonArray();
+        JsonArray source = manifest.getAsJsonArray("bodies");
+        for (var bodyElement : source == null ? new JsonArray() : source) {
             JsonObject body = bodyElement.getAsJsonObject();
-            JsonArray ids = body.remove("block_ids") instanceof JsonArray array ? array : new JsonArray();
-            body.remove("backups");
+            JsonObject out = new JsonObject();
+            copyFields(body, out, BODY_FIELDS);
             JsonArray indexes = new JsonArray();
-            if (withBlocks) for (var id : ids) indexes.add(palette.get(id.getAsString()));
-            body.add("blk", indexes);
+            JsonArray ids = body.getAsJsonArray("block_ids");
+            if (withBlocks && ids != null) {
+                for (var id : ids) {
+                    Integer at = palette.index(id.getAsString());
+                    if (at != null) indexes.add(at);   // 表满之后的索引直接丢掉
+                }
+            }
+            out.add("blk", indexes);
+            bodies.add(out);
         }
+        view.add("bodies", bodies);
         if (!withBlocks) view.addProperty("blocks_omitted", true);
         return view;
     }
 
-    private static JsonArray paletteJson(Map<String, Integer> palette) {
-        JsonArray result = new JsonArray();
-        for (String id : palette.keySet()) {
-            String[] names = BlockNames.of(id);
-            JsonObject item = new JsonObject();
-            item.addProperty("id", id);
-            item.addProperty("en", names[0]);
-            item.addProperty("zh", names[1]);
-            result.add(item);
+    /**
+     * 固定尺寸摘要:连元数据都装不下的组用它。
+     * <p>
+     * 只留组级计数,名称截断,成员明细一个不发 —— 大小与组里有多少体、名字多长都无关,
+     * 这样"至少让这一组翻得过去"这条规则本身不会变成新的无界出口。
+     */
+    private static JsonObject summaryView(JsonObject manifest) {
+        JsonObject view = new JsonObject();
+        copyFields(manifest, view, GROUP_FIELDS);
+        if (view.has("name")) {
+            String name = view.get("name").getAsString();
+            if (name.length() > SUMMARY_NAME_CHARS) view.addProperty("name", name.substring(0, SUMMARY_NAME_CHARS));
         }
-        return result;
+        view.add("bodies", new JsonArray());
+        view.addProperty("blocks_omitted", true);
+        view.addProperty("bodies_omitted", true);
+        return view;
+    }
+
+    private static void copyFields(JsonObject from, JsonObject to, String[] fields) {
+        for (String field : fields) {
+            if (from.has(field)) to.add(field, from.get(field));
+        }
     }
 
     private Path groupDirectory(String id) throws IOException {
@@ -950,11 +1058,27 @@ public final class RecycleStore {
         }
     }
 
+    /**
+     * 后序遍历删除。从前是 {@code Files.walk().sorted(reverseOrder()).toList()} ——
+     * 为了拿到"子在前父在后"的顺序,先把整棵树的路径全排进内存排一遍;一个组允许到百万个
+     * 备份文件,那就是百万个 Path。{@link FileVisitor} 天然就是后序,不需要排序也不需要列表。
+     */
     private static void deleteTree(Path directory) throws IOException {
         if (!Files.exists(directory)) return;
-        try (var stream = Files.walk(directory)) {
-            for (Path path : stream.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
-        }
+        Files.walkFileTree(directory, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
+                Files.deleteIfExists(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path visited, IOException failure) throws IOException {
+                if (failure != null) throw failure;
+                Files.deleteIfExists(visited);
+                return FileVisitResult.CONTINUE;
+            }
+        });
     }
 
     private static int countBackupFiles(Path directory, boolean excludePending) throws IOException {

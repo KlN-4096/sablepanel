@@ -36,15 +36,26 @@ class RecycleStorePagingTest {
 
     /** 直接铺 manifest 文件:committedDirectories 只认「目录 + manifest.json」 */
     private String writeGroup(String stamp, int bodies, int blockTypes) throws Exception {
+        return writeGroup(stamp, bodies, blockTypes, 0);
+    }
+
+    /**
+     * @param nameChars 每个体的 display_name 长度。它来自 NBT,上限 65535 字节 ——
+     *                  从前按"体数 × 固定当量 + block_ids 条数"估预算时,这一段是完全隐形的
+     */
+    private String writeGroup(String stamp, int bodies, int blockTypes, int nameChars) throws Exception {
         String id = stamp + "-" + UUID.randomUUID().toString().substring(0, 8);
         Path dir = this.root.resolve(id);
         Files.createDirectories(dir);
+        String name = "N".repeat(nameChars);
         StringBuilder manifest = new StringBuilder();
         manifest.append("{\"version\":1,\"id\":\"").append(id).append("\",\"state\":\"deleted\"")
                 .append(",\"deleted_at\":").append(System.currentTimeMillis()).append(",\"bodies\":[");
         for (int b = 0; b < bodies; b++) {
             if (b > 0) manifest.append(',');
-            manifest.append("{\"uuid\":\"").append(UUID.randomUUID()).append("\",\"blocks\":1,\"block_ids\":[");
+            manifest.append("{\"uuid\":\"").append(UUID.randomUUID()).append("\",\"blocks\":1");
+            if (nameChars > 0) manifest.append(",\"name\":\"").append(name).append('"');
+            manifest.append(",\"block_ids\":[");
             for (int k = 0; k < blockTypes; k++) {
                 if (k > 0) manifest.append(',');
                 manifest.append("\"sp:t_").append(k).append('"');
@@ -54,6 +65,11 @@ class RecycleStorePagingTest {
         manifest.append("]}");
         Files.writeString(dir.resolve("manifest.json"), manifest, StandardCharsets.UTF_8);
         return id;
+    }
+
+    /** 一页发出去的真实字节数 —— 预算管的就是它 */
+    private static long pageBytes(JsonObject page) {
+        return page.toString().getBytes(StandardCharsets.UTF_8).length;
     }
 
     private static List<String> ids(JsonObject page) {
@@ -132,43 +148,98 @@ class RecycleStorePagingTest {
 
     @Test
     void oversizedSingleGroupStillMakesProgress() throws Exception {
-        // 一个组自己就超过整页的方块预算(20 万条索引),后面还有正常组
-        String huge = writeGroup("20260101-000009-000", 105, 2000);
+        // 方块构成占绝大部分:退到只发元数据就装得下,成员明细仍然要在
+        String huge = writeGroup("20260101-000009-000", 30, 20_000);
         String small = writeGroup("20260101-000001-000", 1, 2);
         RecycleStore store = store();
 
         JsonObject first = store.view("", 100);
-        assertEquals(List.of(huge), ids(first), "超预算的组必须单独成页,不能被挤到永远翻不到");
-        String cursor = first.get("next_cursor").getAsString();
-        assertEquals(huge, cursor);
-
-        JsonObject second = store.view(cursor, 100);
-        assertEquals(List.of(small), ids(second));
-        assertEquals("", second.get("next_cursor").getAsString());
+        assertTrue(ids(first).contains(huge), "超预算的组必须发得出去,不能被挤到永远翻不到");
+        assertTrue(pageBytes(first) < 4 * 1024 * 1024, "退让之后整页仍要受控,实际 " + pageBytes(first));
 
         // 超预算的那组只发元数据,而且必须显式说明 —— 前端据此提示,否则构成条空着像是「没有方块」
-        assertTrue(first.getAsJsonArray("groups").get(0).getAsJsonObject()
-                .get("blocks_omitted").getAsBoolean());
-        assertFalse(second.getAsJsonArray("groups").get(0).getAsJsonObject().has("blocks_omitted"));
+        JsonObject group = first.getAsJsonArray("groups").get(0).getAsJsonObject();
+        assertEquals(huge, group.get("id").getAsString());
+        assertTrue(group.get("blocks_omitted").getAsBoolean());
+        assertEquals(30, group.getAsJsonArray("bodies").size(), "元数据装得下时成员明细不该丢");
+        // 退成元数据之后它就不大了,同一页还装得下别的组;正常组不该被顺带打上省略标记
+        assertTrue(walkAllIds(store).contains(small), "后面的组仍要翻得到");
+        for (var element : first.getAsJsonArray("groups")) {
+            JsonObject each = element.getAsJsonObject();
+            if (!huge.equals(each.get("id").getAsString())) assertFalse(each.has("blocks_omitted"));
+        }
+    }
+
+    @Test
+    void theCachedPageIndexIsDroppedWhenGroupsAreRemoved() throws Exception {
+        // 分页目录清单现在带缓存(每页都重扫全库是 O(总组数) 的活)。缓存最容易出的问题是
+        // 删了组还照旧列出来 —— 用户点进去只会拿到"回收组不存在"
+        String kept = writeGroup("20260101-000009-000", 1, 2);
+        String gone = writeGroup("20260101-000001-000", 1, 2);
+        RecycleStore store = store();
+        assertEquals(2, store.view("", 100).getAsJsonArray("groups").size());
+
+        store.purgeGroups(List.of(gone));
+
+        JsonObject after = store.view("", 100);
+        assertEquals(List.of(kept), ids(after), "彻底删除必须让缓存立刻失效");
+        assertEquals(1, after.get("total_groups").getAsInt());
+        assertEquals(1, after.get("latest_groups").getAsInt());
+        assertFalse(Files.exists(this.root.resolve(gone)), "目录树要真的删干净");
+    }
+
+    /** 一路翻到底,收集所有翻得到的组 id */
+    private static Set<String> walkAllIds(RecycleStore store) {
+        Set<String> seen = new LinkedHashSet<>();
+        String cursor = "";
+        for (int page = 0; page < 20; page++) {
+            JsonObject view = store.view(cursor, 100);
+            seen.addAll(ids(view));
+            cursor = view.get("next_cursor").getAsString();
+            if (cursor.isEmpty()) break;
+        }
+        return seen;
+    }
+
+    @Test
+    void aGroupTooBigEvenWithoutBlocksFallsBackToAFixedSummary() throws Exception {
+        // 元数据自己就超预算:200 个体、每体 65000 字节的 display_name ≈ 13 MB。
+        // 「至少让这一组翻得过去」这条规则不能变成新的无界出口,所以退到固定尺寸摘要
+        String huge = writeGroup("20260101-000009-000", 200, 0, 65_000);
+        String small = writeGroup("20260101-000001-000", 1, 2);
+        RecycleStore store = store();
+
+        JsonObject first = store.view("", 100);
+        JsonObject group = first.getAsJsonArray("groups").get(0).getAsJsonObject();
+        assertEquals(huge, group.get("id").getAsString());
+        assertTrue(group.get("bodies_omitted").getAsBoolean(), "连元数据都装不下就只发摘要");
+        assertEquals(0, group.getAsJsonArray("bodies").size());
+        assertTrue(pageBytes(first) < 64 * 1024, "摘要必须是固定尺寸,实际 " + pageBytes(first));
+        assertTrue(walkAllIds(store).contains(small), "摘要之后仍要翻得到别的组");
     }
 
     @Test
     void bodyMetadataCountsTowardsThePageBudgetEvenWithoutBlockIds() throws Exception {
-        // 只按 block_ids 计预算的话,这三个组(每组 800 个体、零个方块索引)预算恒为 0,
-        // 会被一次性塞进同一页 —— 名称/坐标/包围盒/依赖链本身就够撑爆响应
-        for (int i = 1; i <= 3; i++) writeGroup(String.format("20260101-00000%d-000", i), 800, 0);
+        // 零个方块索引,全靠名称占字节。按"体数 × 固定当量 + block_ids 条数"估的话
+        // 这三个组的预算完全一样且与名称无关,会被一次性塞进同一页
+        for (int i = 1; i <= 3; i++) {
+            writeGroup(String.format("20260101-00000%d-000", i), 15, 0, 65_000);
+        }
         RecycleStore store = store();
 
-        // 每组 800 体 × 128 当量 = 102400,两组就越过 20 万预算,所以一页只能出一组
         int pages = 0;
+        int seen = 0;
         String cursor = "";
         do {
             JsonObject page = store.view(cursor, 100);
-            assertEquals(1, page.getAsJsonArray("groups").size(), "体的元数据必须记进预算");
+            seen += page.getAsJsonArray("groups").size();
+            assertTrue(pageBytes(page) < 4 * 1024 * 1024,
+                    "单页字节必须受控,实际 " + pageBytes(page));
             cursor = page.get("next_cursor").getAsString();
             assertTrue(++pages <= 5, "翻页必须收敛");
         } while (!cursor.isEmpty());
-        assertEquals(3, pages, "不记元数据时这 3 个组预算恒为 0,会被一次性塞进同一页");
+        assertEquals(3, seen, "所有组都要翻得到");
+        assertTrue(pages > 1, "名称记进预算之后这 3 个组装不进同一页");
     }
 
     @Test
@@ -176,12 +247,16 @@ class RecycleStorePagingTest {
         // 先一个小组占位,紧接着一个自己就超预算的大组。只检查读取前的旧 cost 时,大组会被整条
         // 加进来 —— 而且此时页面已有两条,blocks_omitted 的判断不成立,完整调色板照发
         String small = writeGroup("20260101-000009-000", 1, 2);
-        String huge = writeGroup("20260101-000001-000", 1600, 2);
+        String huge = writeGroup("20260101-000001-000", 30, 20_000);
         RecycleStore store = store();
 
         JsonObject first = store.view("", 100);
         assertEquals(List.of(small), ids(first), "超预算的大组必须留到下一页");
         assertFalse(first.getAsJsonArray("groups").get(0).getAsJsonObject().has("blocks_omitted"));
+        // 被拒的候选不能把自己的调色板条目留在表里 —— 那就是没人引用又没记账的字节。
+        // 小组自己用了 2 种方块,大组的 20000 种一条都不该留下
+        assertEquals(2, first.getAsJsonArray("block_palette").size(),
+                "第一页只该有小组用到的那两种方块");
 
         JsonObject second = store.view(first.get("next_cursor").getAsString(), 100);
         assertEquals(List.of(huge), ids(second), "大组单独成页");
