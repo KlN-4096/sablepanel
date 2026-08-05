@@ -3,11 +3,14 @@ package com.klnon.sablepanel;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -37,6 +40,37 @@ class EventLogRetentionTest {
                 "events-20260105-000000.jsonl",
                 "events-20260106-000000.jsonl",
                 "jobs-20260101-000000.jsonl"), left, "只留最新 3 个 events-,别的前缀不许动");
+    }
+
+    /**
+     * 单文件写满 16 MiB 就换文件,但文件名只精确到秒 —— 同一秒内写满时旧实现会以 APPEND
+     * 重开同一个路径,轮转等于没做。撞名要往后加分片号。
+     */
+    @Test
+    void nextFileSkipsFilesThatAreAlreadyFull() throws Exception {
+        Path first = EventLog.nextFile(this.dir, "events-");
+        // 没写满就继续用它,不能每调用一次就开一个新分片
+        assertEquals(first, EventLog.nextFile(this.dir, "events-"));
+
+        fill(first);
+        Path second = EventLog.nextFile(this.dir, "events-");
+        assertNotEquals(first, second, "同秒内写满必须换名字,否则会追加回同一个文件");
+        assertTrue(second.getFileName().toString().endsWith("-1.jsonl"), second.getFileName().toString());
+
+        fill(second);
+        assertTrue(EventLog.nextFile(this.dir, "events-").getFileName().toString().endsWith("-2.jsonl"));
+
+        // 分片名必须排在下一秒之前,prune 的字典序才仍然是时间序
+        assertTrue("events-20260101-120000-1.jsonl".compareTo("events-20260101-120001.jsonl") < 0);
+    }
+
+    /** 把文件撑到上限:只写最后一个字节,别为了测边界真往堆里塞 16 MiB */
+    private static void fill(Path file) throws Exception {
+        try (var channel = Files.newByteChannel(file,
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            channel.position(EventLog.MAX_LOG_BYTES - 1);
+            channel.write(ByteBuffer.wrap(new byte[]{'\n'}));
+        }
     }
 
     @Test

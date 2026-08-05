@@ -36,7 +36,7 @@ public final class EventLog {
             if (out == null) {
                 Path dir = logDir();
                 Files.createDirectories(dir);
-                Path file = dir.resolve("events-" + TS.format(LocalDateTime.now()) + ".jsonl");
+                Path file = nextFile(dir, "events-");
                 bytes = Files.exists(file) ? Files.size(file) : 0;
                 out = new PrintWriter(Files.newBufferedWriter(file, StandardCharsets.UTF_8,
                         StandardOpenOption.CREATE, StandardOpenOption.APPEND));
@@ -66,6 +66,22 @@ public final class EventLog {
 
     public static Path logDir() {
         return FMLPaths.GAMEDIR.get().resolve("logs").resolve("sablepanel");
+    }
+
+    /**
+     * 挑一个还没写满的日志文件名。
+     * <p>
+     * 文件名只精确到秒。单秒内写满 {@link #MAX_LOG_BYTES} 时,下一条会用同一个名字以 APPEND 重开,
+     * 分片就等于没做 —— 高频写入下文件会一路涨下去。撞上就往后加 {@code -1}、{@code -2}。
+     * 序号形式排在下一秒之前({@code -120000-1} < {@code -120001}),{@link #prune} 的字典序仍是时间序。
+     */
+    public static Path nextFile(Path dir, String prefix) throws IOException {
+        String stamp = prefix + TS.format(LocalDateTime.now());
+        Path file = dir.resolve(stamp + ".jsonl");
+        for (int n = 1; Files.exists(file) && Files.size(file) >= MAX_LOG_BYTES; n++) {
+            file = dir.resolve(stamp + "-" + n + ".jsonl");
+        }
+        return file;
     }
 
     /**

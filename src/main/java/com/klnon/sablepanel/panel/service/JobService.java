@@ -14,8 +14,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -51,9 +49,8 @@ import java.util.regex.Pattern;
  * </ul>
  */
 public final class JobService implements AutoCloseable {
-    /** 日志文件名白名单:客户端可指定读哪个文件,必须防路径穿越 */
-    public static final Pattern LOG_FILE = Pattern.compile("jobs-\\d{8}-\\d{6}\\.jsonl");
-    private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+    /** 日志文件名白名单:客户端可指定读哪个文件,必须防路径穿越。尾部 -N 是同秒内写满时的分片号 */
+    public static final Pattern LOG_FILE = Pattern.compile("jobs-\\d{8}-\\d{6}(-\\d+)?\\.jsonl");
     private static final Gson GSON = new Gson();
     private static final int HISTORY_MAX = 200;
     /** 终态作业在内存里多留一会儿,够前端轮询看到并弹一次 toast */
@@ -356,7 +353,7 @@ public final class JobService implements AutoCloseable {
             if (this.out == null) {
                 Path dir = EventLog.logDir();
                 Files.createDirectories(dir);
-                this.logFile = dir.resolve("jobs-" + TS.format(LocalDateTime.now()) + ".jsonl");
+                this.logFile = EventLog.nextFile(dir, "jobs-");
                 this.logBytes = Files.exists(this.logFile) ? Files.size(this.logFile) : 0;
                 this.out = new PrintWriter(Files.newBufferedWriter(this.logFile, StandardCharsets.UTF_8,
                         StandardOpenOption.CREATE, StandardOpenOption.APPEND));
