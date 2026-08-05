@@ -69,6 +69,7 @@ const I18N = {
     groupPartial:'不完整',
     groupPartialTip:(n)=>`还有 ${n} 个成员未下发,整组选择已禁用 —— 可逐个选中已显示的成员`,
     rBlocksOmitted:'该依赖组过大,已省略方块构成(其余信息完整)',
+    rBodiesOmitted:'该依赖组过大,成员明细已省略;恢复/彻底删除仍按整组执行',
     restoreSelected:'恢复所选', restoreSelectedT:'恢复所选物理体',
     restoreSelectedMsg:(g,b,blk)=>`将恢复勾选的 ${g} 个依赖组,共 ${b} 个物理体、${fmt(blk)} 块。\n恢复后会在原保存位置重新加载。`,
     restoreOldWarn:(n)=>`\n其中 ${n} 个是旧版本；不会覆盖世界中已有的同 UUID 物理体，当前版本仍存在时恢复会失败。`,

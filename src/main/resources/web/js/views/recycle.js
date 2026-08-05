@@ -35,10 +35,14 @@ function renderRecycle(){
   const visible = RECYCLE.groups.filter(group => {
     if (!states.has(group.state || 'deleted') || !sizes.has(sizeClass(group.blocks || 0))) return false;
     if (namedOnly && !group.name) return false;
-    if (dimInputs.length && !group.bodies.some(body=>dims.has(body.dim || 'minecraft:overworld'))) return false;
+    // 摘要组的 bodies 是空的(服务端连元数据都装不下时只发固定尺寸摘要),
+    // 按成员筛选一律放行 —— 否则它会被静默滤掉,用户连"这里还有一组"都看不见
+    const members = group.bodies || [];
+    if (dimInputs.length && members.length && !members.some(body=>dims.has(body.dim || 'minecraft:overworld'))) return false;
     if (!needle) return true;
     return String(group.name||'').toLowerCase().includes(needle)
-      || group.bodies.some(body=>String(body.name||'').toLowerCase().includes(needle)
+      || String(group.id||'').toLowerCase().includes(needle)
+      || members.some(body=>String(body.name||'').toLowerCase().includes(needle)
         || body.uuid.toLowerCase().includes(needle));
   }).sort((a,b)=>(b.deleted_at||0)-(a.deleted_at||0));
   if (!visible.length) {
@@ -47,9 +51,14 @@ function renderRecycle(){
     list.innerHTML=`<div class="listEmpty"><span class="big">♲</span>${emptyText}</div>`;
   } else {
     list.innerHTML = visible.map(group => {
-      const title = esc(group.name) || `${group.bodies[0].uuid.slice(0,8)}…`;
+      // 摘要组没有成员明细,标题只能回落到组 id —— 从前直接读 bodies[0].uuid,整页崩
+      const bodies = group.bodies || [];
+      const title = esc(group.name) || (bodies.length
+        ? `${bodies[0].uuid.slice(0,8)}…` : `${esc(group.id).slice(0,16)}…`);
       const state = recycleStateTag(group.state);
-      const members = group.bodies.map(body=>
+      const omitted = group.bodies_omitted
+        ? `<div class="member muted">${t('rBodiesOmitted')}</div>` : '';
+      const members = omitted + bodies.map(body=>
         `<div class="member ${RSEL&&RSELG&&RSELG.id===group.id&&RSEL.uuid===body.uuid?'sel':''}"
           data-rkey="${group.id}/${body.uuid}" onclick="selectRecycleBody('${group.id}','${body.uuid}')">
           <span class="mname">${esc(body.name)||`<span class="muted">${body.uuid.slice(0,8)}</span>`}</span>
@@ -103,7 +112,7 @@ function toggleRecycleGroup(id){
 }
 function clearRecycleSelection(){ R_SELECTED.clear(); renderRecycle(); }
 function selectRecycleBody(groupId, uuid){
-  const group=RECYCLE_BY_ID.get(groupId), body=group&&group.bodies.find(item=>item.uuid===uuid);
+  const group=RECYCLE_BY_ID.get(groupId), body=group&&(group.bodies||[]).find(item=>item.uuid===uuid);
   if (!body) return;
   if (!RSEL || RSEL.uuid!==uuid) compExpanded={compList:false,rCompList:false,fsComp:false};
   RSELG=group; RSEL=body; renderRecycleDetail(); renderRecycle();

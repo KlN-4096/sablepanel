@@ -647,6 +647,44 @@ test('UI-04 组被截断时成员复选框只切自己,完整组仍整组切', (
     '完整组是删除原子单位,整组选择的语义不变');
 });
 
+test('LIMIT-01 摘要组(bodies 为空)不能让回收站整页崩掉', () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    VIEW = 'recycle';
+    RECYCLE = {
+      groups: [
+        {id:'20260101-000009-000-aabbccdd', state:'deleted', deleted_at: 1, name:'',
+         members: 900, blocks: 12345, bodies: [], blocks_omitted: true, bodies_omitted: true},
+        {id:'20260101-000001-000-11223344', state:'deleted', deleted_at: 2, name:'飞艇',
+         members: 1, blocks: 7, bodies: [{uuid:'u1', name:'飞艇', dim:'minecraft:overworld', blocks:7}]},
+      ],
+      block_palette: [], latest_groups: 2, old_groups: 0, limit: 500, file_count: 2,
+    };
+    RECYCLE_BY_ID = new Map(RECYCLE.groups.map(g=>[g.id,g]));
+    RECYCLE_TOTAL = 2;
+  `);
+  // 筛选控件按"全选"接管:沙箱里的 DOM 是宽松代理,querySelectorAll 会返回空,
+  // 不接管的话所有组都会被筛掉,测不到渲染
+  evalIn(sandbox, `
+    globalThis.__els = {};
+    document.getElementById = id => __els[id] || (__els[id] =
+      {innerHTML:'', value:'', checked:false, textContent:'', style:{}, querySelectorAll:()=>[]});
+    document.querySelectorAll = sel =>
+      sel.startsWith('.rFState') ? [{value:'deleted'},{value:'restored'},{value:'recovery_required'}]
+      : sel.startsWith('.rFSize') ? ['huge','large','mid','small','frag'].map(v=>({value:v}))
+      : [];
+  `);
+  // 从前这里直接读 group.bodies[0].uuid 拼标题,摘要组一到就 TypeError,整个列表白屏
+  evalIn(sandbox, 'renderRecycleDims')();
+  evalIn(sandbox, 'renderRecycle')();
+  const html = evalIn(sandbox, "document.getElementById('rList')").innerHTML;
+  assert.ok(html.includes('20260101-000009'), '标题要回落到组 id:' + html.slice(0, 200));
+  assert.ok(html.includes('飞艇'), '正常组照常渲染');
+  assert.ok(html.includes(evalIn(sandbox, "t('rBodiesOmitted')")), '要说明成员明细被省略');
+  // 摘要组没有成员,按维度筛选时不能把它静默滤掉
+  assert.ok(evalIn(sandbox, 'RECYCLE.groups').length === 2);
+});
+
 /* ---------- 运行 ---------- */
 let failures = 0;
 for (const [name, fn] of tests) {

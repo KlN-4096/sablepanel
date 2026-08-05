@@ -204,7 +204,7 @@ async function loadRecycle(append){
     renderRecycleDims();
     if (RSEL) {
       const group = RECYCLE_BY_ID.get(RSELG && RSELG.id);
-      const body = group && group.bodies.find(b=>b.uuid===RSEL.uuid);
+      const body = group && (group.bodies||[]).find(b=>b.uuid===RSEL.uuid);
       if (body) { RSEL=body; RSELG=group; if (VIEW==='recycle') renderRecycleDetail(); }
       else if (!append) clearRecycleDetail();
     }
@@ -231,7 +231,7 @@ function mergePalette(store, palette, appended){
     if (!index.has(item.id)) { index.set(item.id, store.block_palette.length); store.block_palette.push(item); }
     return index.get(item.id);
   });
-  appended.forEach(group => group.bodies.forEach(body => {
+  appended.forEach(group => (group.bodies||[]).forEach(body => {
     body.blk = (body.blk || []).map(i => remap[i] ?? 0);
   }));
 }
@@ -241,7 +241,8 @@ function renderRecycleDims(){
   host.querySelectorAll('.rFDim').forEach(input => input.checked
     ? R_DIM_DISABLED.delete(input.value) : R_DIM_DISABLED.add(input.value));
   const dims = new Set();
-  RECYCLE.groups.forEach(g=>g.bodies.forEach(b=>dims.add(b.dim || 'minecraft:overworld')));
+  // 摘要组的 bodies 是空的,不能直接 forEach
+  RECYCLE.groups.forEach(g=>(g.bodies||[]).forEach(b=>dims.add(b.dim || 'minecraft:overworld')));
   host.innerHTML = [...dims].map(d=>
     `<label><input type="checkbox" class="rFDim" value="${esc(d)}" ${R_DIM_DISABLED.has(d)?'':'checked'} onchange="renderRecycle()"> ${esc(d.replace('minecraft:',''))}</label>`).join('');
 }
