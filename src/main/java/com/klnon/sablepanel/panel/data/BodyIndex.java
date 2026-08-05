@@ -63,6 +63,15 @@ public final class BodyIndex {
     /** 单个体最多列出这么多个冗余条目 id;真实数量由 copies 字段给出 */
     private static final int MAX_ENTRY_IDS = 50;
 
+    private static JsonObject paletteEntry(String id) {
+        String[] names = BlockNames.of(id);
+        JsonObject entry = new JsonObject();
+        entry.addProperty("id", id);
+        entry.addProperty("en", names[0]);
+        entry.addProperty("zh", names[1]);
+        return entry;
+    }
+
     private volatile List<DiskScanner.DiskEntry> diskSnapshot = List.of();
     private volatile long diskScanTime;
     /** 主线程周期刷新:uuid -> 运行时摘要 */
@@ -333,7 +342,7 @@ public final class BodyIndex {
                 .filter(en -> en.getValue().size() >= 2)
                 .sorted(Map.Entry.comparingByKey())
                 .toList();
-        long cloneBytes = 0;
+        ByteBudget cloneBudget = new ByteBudget(CLONE_BYTE_BUDGET);
         int cloneMembers = 0;
         for (int setId = 0; setId < Math.min(orderedCloneSets.size(), MAX_CLONE_SETS); setId++) {
             List<UUID> matches = new ArrayList<>(orderedCloneSets.get(setId).getValue());
@@ -355,9 +364,7 @@ public final class BodyIndex {
             for (UUID match : matches) setMembers.add(match.toString());
             set.add("members", setMembers);
             // 量真值再决定收不收。收不下就整个停掉:后面的集合只会更靠后,没有必要继续试
-            long size = JsonSize.of(set);
-            if (cloneBytes + size > CLONE_BYTE_BUDGET) break;
-            cloneBytes += size;
+            if (!cloneBudget.offer(set)) break;
             cloneMembers += matches.size();
             for (UUID match : matches) cloneSetByUuid.put(match, setId);
             cloneSetArr.add(set);
@@ -384,12 +391,13 @@ public final class BodyIndex {
         // 运行时存在但磁盘还没有条目的体(刚生成/未保存):单独成组显示,可传送不可预览
         JsonArray freshArr = new JsonArray();
         List<UUID> freshUuids = new ArrayList<>();
-        long freshBytes = 0;
+        // fresh 组先走一份自己的账本,最后并进总账
+        ByteBudget freshBudget = new ByteBudget(VIEW_BYTE_BUDGET);
         int freshTotal = 0;
         for (Map.Entry<UUID, JsonObject> en : rt.entrySet()) {
             if (byUuid.containsKey(en.getKey())) continue;
             freshTotal++;
-            if (freshArr.size() >= MAX_VIEW_GROUPS || freshBytes >= VIEW_BYTE_BUDGET) continue;
+            if (freshArr.size() >= MAX_VIEW_GROUPS || freshBudget.exhausted()) continue;
             JsonObject rto = en.getValue();
             JsonObject m = new JsonObject();
             m.addProperty("uuid", en.getKey().toString());
@@ -424,7 +432,7 @@ public final class BodyIndex {
             ma.add(m);
             go.add("bodies", ma);
             // runtime 是 sable 给的对象,字段随版本变;量真值就不必跟着它改估算
-            freshBytes += JsonSize.of(go);
+            if (!freshBudget.offer(go)) continue;
             freshUuids.add(en.getKey());
             freshArr.add(go);
         }
@@ -446,7 +454,9 @@ public final class BodyIndex {
         groupArr.addAll(freshArr);
         // 预算是一份运行总账,记的全是量出来的真实字节:已发出去的 fresh 组、clone_sets
         // 先记进去,组列表用剩下的额度,调色板边建边记
-        long budget = freshBytes + cloneBytes;
+        ByteBudget budget = new ByteBudget(VIEW_BYTE_BUDGET);
+        budget.charge(freshBudget.spent());
+        budget.charge(cloneBudget.spent());
         // 组数上限管的是"发出去多少组",fresh 组也占名额,分开计数就会一起超过 MAX_VIEW_GROUPS
         int shownGroups = freshArr.size();
         int omittedMembers = 0;
@@ -455,7 +465,7 @@ public final class BodyIndex {
         Set<UUID> emitted = new HashSet<>(freshUuids);
         for (Map.Entry<UUID, List<UUID>> g : ordered) {
             // 至少出一组:否则单个超预算的巨型组会让整个列表空着
-            if (shownGroups > 0 && (shownGroups >= MAX_VIEW_GROUPS || budget >= VIEW_BYTE_BUDGET)) break;
+            if (shownGroups > 0 && (shownGroups >= MAX_VIEW_GROUPS || budget.exhausted())) break;
             shownGroups++;
             List<UUID> members = g.getValue();
             long totalBlocks = 0;
@@ -496,9 +506,9 @@ public final class BodyIndex {
                     bestNameBlocks = e.blocks();
                 }
                 // 预算要按成员查,不能只在组的入口查:一条几万成员的依赖链就是一个单组的
-                // 超大响应,入口那次检查放它进来之后再无第二道闸。上面的聚合计数仍按全部成员算,
-                // 所以 members/blocks 是真值,只有 bodies 明细会少。
-                if (!memberArr.isEmpty() && budget >= VIEW_BYTE_BUDGET) {
+                // 超大响应。上面的聚合计数仍按全部成员算,所以 members/blocks 是真值,
+                // 只有 bodies 明细会少。真正的收/不收在下面 offer 那里,这里只是提前跳过构建
+                if (!memberArr.isEmpty() && budget.exhausted()) {
                     omittedMembers++;
                     continue;
                 }
@@ -534,28 +544,32 @@ public final class BodyIndex {
                 for (String id : e.blockIds()) {
                     Integer at = paletteIdx.get(id);
                     if (at == null) {
-                        // 表满就不再收:多出来的方块索引直接丢掉(前端当未知方块),
-                        // 这样 blk 每条也顺带被封在 MAX_PALETTE 之内
+                        // 条数和字节都要在"加入之前"判:预算只在进成员之前查一次的话,
+                        // 进来之后这个循环还能继续无限追加 —— 方块 id 直接来自 NBT,
+                        // 解析不出来时 BlockNames 会把原串同时放进 en/zh,一条就能有几十 KB
                         if (paletteIdx.size() >= MAX_PALETTE) {
+                            paletteFull = true;
+                            continue;
+                        }
+                        JsonObject p = paletteEntry(id);
+                        if (!budget.offer(p)) {
                             paletteFull = true;
                             continue;
                         }
                         at = paletteIdx.size();
                         paletteIdx.put(id, at);
-                        // 调色板条目建出来就量:方块名是本地化文本,长度随语言和整合包变
-                        String[] names = BlockNames.of(id);
-                        JsonObject p = new JsonObject();
-                        p.addProperty("id", id);
-                        p.addProperty("en", names[0]);
-                        p.addProperty("zh", names[1]);
                         paletteArr.add(p);
-                        budget += JsonSize.of(p);
                     }
                     blk.add(at);
                 }
                 m.add("blk", blk);
                 if (loaded) m.add("runtime", rto);
-                budget += JsonSize.of(m);
+                // 组内第一条必须发得出去(否则这个组就是个空壳),其余按预算收
+                if (memberArr.isEmpty()) budget.charge(m);
+                else if (!budget.offer(m)) {
+                    omittedMembers++;
+                    continue;
+                }
                 emitted.add(u);
                 memberArr.add(m);
             }
@@ -580,7 +594,7 @@ public final class BodyIndex {
             else go.add("prot", verdict.getAsJsonArray("protected_by"));
             // 趁 bodies 还没挂上去量组自身的开销 —— 成员的字节在上面已经逐个记过了。
             // 组名是某个成员名称的副本,同样可以有 65535 字节,不量就是又一个漏记的字段
-            budget += JsonSize.of(go);
+            budget.charge(go);
             go.add("bodies", memberArr);
             groupArr.add(go);
         }
@@ -623,7 +637,9 @@ public final class BodyIndex {
         out.add("block_palette", paletteArr);
         out.add("clone_sets", cloneSetArr);
         out.add("groups", groupArr);
-        return out;
+        // 上面每个发送点都记账了,但记账是靠人写对的。这道闸兜住"下一个还没被发现的口子":
+        // 它响就说明有字段没记进预算(要修的 bug),但页面还打得开,不至于整个列表发不出去
+        return ResponseGuard.enforce("/api/bodies", out, "groups", "clone_sets", "block_palette", "paused", "forced");
     }
 
     public void setConfig(PanelConfig config) {
