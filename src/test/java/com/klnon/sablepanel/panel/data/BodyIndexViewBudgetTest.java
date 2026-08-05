@@ -84,7 +84,7 @@ class BodyIndexViewBudgetTest {
 
     @Test
     void oneHugeDependencyGroupIsClampedByMembersNotJustByGroupCount() {
-        // 一条 4000 成员、每体 500 种方块的依赖链 = 一个组,估算 15 MB 已越过 12 MiB 预算。
+        // 一条 4000 成员、每体 1200 种方块的依赖链 = 一个组,实测已越过 12 MiB 预算。
         // 只在组入口查预算的话,它是"第一组"所以无条件整份发出去,
         // 3000 组上限和字节预算都拦不住 —— 组内成员数没有任何上限
         UUID head = UUID.randomUUID();
@@ -93,7 +93,7 @@ class BodyIndexViewBudgetTest {
         List<DiskScanner.DiskEntry> entries = new ArrayList<>();
         for (int i = 0; i < all.size(); i++) {
             // 全都依赖 head:并查集把它们并成同一个组
-            entries.add(entry(all.get(i), i, 500, i == 0 ? List.of() : List.of(head)));
+            entries.add(entry(all.get(i), i, 1200, i == 0 ? List.of() : List.of(head)));
         }
         JsonObject view = view(entries);
 
@@ -157,6 +157,31 @@ class BodyIndexViewBudgetTest {
         }
         for (var element : view.getAsJsonArray("paused")) assertTrue(shown.contains(element.getAsString()));
         for (var element : view.getAsJsonArray("forced")) assertTrue(shown.contains(element.getAsString()));
+    }
+
+    @Test
+    void hugeDisplayNamesCannotBlowUpCloneSetsOrGroups() {
+        // display_name 直接来自 NBT,单条上限 65535 字节。从前 clone_sets 的字节只按
+        // "集合数 × 固定开销 + 成员数 × 40" 估,名称一个字节都没算 —— 实测 500 个这样的集合
+        // 让响应到了 38.9 MiB,其中 clone_sets 独占 31.1 MiB。组名(某个成员名的副本)同理没记。
+        String longName = "N".repeat(65_000);
+        List<DiskScanner.DiskEntry> entries = new ArrayList<>();
+        int slot = 0;
+        for (int set = 0; set < 500; set++) {
+            String name = longName + set;   // 同名同块数同包围盒 = 一个 clone set
+            for (int i = 0; i < 2; i++) {
+                entries.add(new DiskScanner.DiskEntry(
+                        new DiskScanner.EntryKey("minecraft:overworld", 0, 0, 0, slot++),
+                        UUID.randomUUID(), name, new double[]{1, 2, 3}, new double[]{4, 5, 6},
+                        100, List.of(), true, 0, 0, List.of("sp:stone"), false, 0, 0));
+            }
+        }
+        JsonObject view = view(entries);
+        assertBounded(view);
+        assertTrue(view.getAsJsonArray("clone_sets").toString()
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8).length < 2 * 1024 * 1024,
+                "clone_sets 有自己的子预算,不能把组列表的额度吃光");
+        assertTrue(view.getAsJsonArray("groups").size() > 0, "组列表不能因此空掉");
     }
 
     /** 真正要防的是「先把整个对象建出来才发现发不出去」:序列化后必须落在 32 MiB 协议上限内 */

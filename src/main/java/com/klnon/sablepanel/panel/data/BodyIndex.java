@@ -40,43 +40,28 @@ public final class BodyIndex {
      */
     private static final int MAX_VIEW_GROUPS = 3000;
     /**
-     * 单次响应的估算字节预算。取值远低于 32 MiB 的协议上限:估算只能是上界近似,而且 JsonObject
-     * 在堆上比它的文本形态大好几倍,真正要防的是"先把整个对象建出来才发现发不出去"。
+     * 单次响应的字节预算。每个候选片段都用 {@link JsonSize} 量真实序列化字节后再决定收不收,
+     * 不再按字段类型估 —— 估算漏掉哪个字段是无声的,而名称类字段(NBT display_name 上限 65535
+     * 字节)一条就能顶穿协议上限。留给 32 MiB 协议上限的余量用来兜住"最后一条无条件收下的记录"。
      */
     private static final long VIEW_BYTE_BUDGET = 12L << 20;
-    /** 一条成员记录除 blk/name 之外的固定开销上界(uuid、条目 id、维度、pos/size、状态字段) */
-    private static final int MEMBER_BASE_BYTES = 320;
-    /** 一个 blk 索引的上界(五位数 + 逗号) */
-    private static final int BLOCK_INDEX_BYTES = 7;
-    /** 已加载体附带的 runtime 对象上界 */
-    private static final int RUNTIME_BYTES = 256;
     /** 克隆集合是去重提示,不是权威数据,超过这个数就不再往外发 */
     private static final int MAX_CLONE_SETS = 500;
     /** 克隆集合的总成员数上限:集合数封顶了,单个集合能有多少成员并没有封顶 */
     private static final int MAX_CLONE_MEMBERS = 20_000;
-    /** 一条组记录除成员之外的固定开销上界(gid、名称、各类计数、rec/prot) */
-    private static final int GROUP_BASE_BYTES = 512;
-    /** 一条调色板记录的上界(命名空间 id + 中英文名) */
-    private static final int PALETTE_ENTRY_BYTES = 160;
+    /**
+     * 克隆集合的字节子预算。它排在组列表之前构建,不给它单独划一块的话,
+     * 500 个带超长名称的集合能把整个预算吃光,组列表反而一个都发不出去。
+     */
+    private static final long CLONE_BYTE_BUDGET = 1L << 20;
     /**
      * 调色板条数上限。它是全局表,一个成员的 blockIds 有多少种就能往里塞多少条,而每条都带
      * 中英文名 —— 组和成员都封顶之后,单个成员仍能靠这张表把响应顶过协议上限。
      * 取值远高于任何整合包的方块注册表规模,正常存档碰不到。
      */
     private static final int MAX_PALETTE = 20_000;
-    /** 一个 UUID 文本加引号逗号 */
-    private static final int UUID_TEXT_BYTES = 40;
     /** 单个体最多列出这么多个冗余条目 id;真实数量由 copies 字段给出 */
     private static final int MAX_ENTRY_IDS = 50;
-    /** 一条条目 id 的上界(维度名 + 区域坐标 + 槽位 + "(无指针)") */
-    private static final int ENTRY_ID_BYTES = 96;
-
-    /** 成员记录的字节上界估算,用于 {@link #VIEW_BYTE_BUDGET} */
-    private static long memberBytes(DiskScanner.DiskEntry entry, boolean loaded) {
-        long name = entry.name() == null ? 0 : entry.name().length() * 3L;
-        return MEMBER_BASE_BYTES + name + (long) entry.blockIds().size() * BLOCK_INDEX_BYTES
-                + (loaded ? RUNTIME_BYTES : 0);
-    }
 
     private volatile List<DiskScanner.DiskEntry> diskSnapshot = List.of();
     private volatile long diskScanTime;
@@ -319,7 +304,10 @@ public final class BodyIndex {
         for (DiskScanner.DiskEntry e : disk) {
             if (e.uuid() == null) continue;
             copies.merge(e.uuid(), 1, Integer::sum);
-            entryIds.computeIfAbsent(e.uuid(), k -> new ArrayList<>()).add(e.key().id() + (e.reachable() ? "" : " (无指针)"));
+            // 采集阶段就封顶:输出只发前 MAX_ENTRY_IDS 条,为剩下那些永远不会显示的条目
+            // 拼字符串纯属白费堆和 CPU,而条目数是随存档损坏程度增长的
+            List<String> ids = entryIds.computeIfAbsent(e.uuid(), k -> new ArrayList<>());
+            if (ids.size() < MAX_ENTRY_IDS) ids.add(e.key().id() + (e.reachable() ? "" : " (无指针)"));
             DiskScanner.DiskEntry cur = byUuid.get(e.uuid());
             if (cur == null || (e.reachable() && !cur.reachable())
                     || (e.reachable() == cur.reachable() && e.blocks() > cur.blocks())) {
@@ -351,30 +339,34 @@ public final class BodyIndex {
             List<UUID> matches = new ArrayList<>(orderedCloneSets.get(setId).getValue());
             // 只封顶集合数不够:几万个同尺寸残骸会挤进同一个集合,一个集合就能撑爆响应
             if (cloneMembers + matches.size() > MAX_CLONE_MEMBERS) break;
-            cloneMembers += matches.size();
-            cloneBytes += GROUP_BASE_BYTES + (long) matches.size() * UUID_TEXT_BYTES;
             matches.sort(UUID::compareTo);
             DiskScanner.DiskEntry sample = byUuid.get(matches.get(0));
             JsonObject set = new JsonObject();
             set.addProperty("id", setId);
             set.addProperty("mode", sample.name() != null ? "named" : "unnamed");
+            // name 直接来自 NBT 的 display_name,单条上限 65535 字节 —— 500 个这样的集合
+            // 就是 31 MiB,光靠"集合数 × 固定开销"的估算完全看不见
             if (sample.name() != null) set.addProperty("name", sample.name());
             set.addProperty("blocks", sample.blocks());
             JsonArray roundedSize = new JsonArray();
             for (double axis : sample.size()) roundedSize.add(Math.round(axis));
             set.add("rounded_size", roundedSize);
             JsonArray setMembers = new JsonArray();
-            for (UUID match : matches) {
-                cloneSetByUuid.put(match, setId);
-                setMembers.add(match.toString());
-            }
+            for (UUID match : matches) setMembers.add(match.toString());
             set.add("members", setMembers);
+            // 量真值再决定收不收。收不下就整个停掉:后面的集合只会更靠后,没有必要继续试
+            long size = JsonSize.of(set);
+            if (cloneBytes + size > CLONE_BYTE_BUDGET) break;
+            cloneBytes += size;
+            cloneMembers += matches.size();
+            for (UUID match : matches) cloneSetByUuid.put(match, setId);
             cloneSetArr.add(set);
         }
 
         // 方块调色板(全局去重,body 引用索引)。只收真正输出出去的成员用到的方块 ——
         // 从前是先按全部磁盘条目建一张完整表,截断之后表里全是没人引用的条目,白占字节
         Map<String, Integer> paletteIdx = new LinkedHashMap<>();
+        JsonArray paletteArr = new JsonArray();
 
         // 并查集分组(按 deps,双向)
         Map<UUID, UUID> parent = new HashMap<>();
@@ -398,8 +390,6 @@ public final class BodyIndex {
             if (byUuid.containsKey(en.getKey())) continue;
             freshTotal++;
             if (freshArr.size() >= MAX_VIEW_GROUPS || freshBytes >= VIEW_BYTE_BUDGET) continue;
-            freshUuids.add(en.getKey());
-            freshBytes += MEMBER_BASE_BYTES + RUNTIME_BYTES;
             JsonObject rto = en.getValue();
             JsonObject m = new JsonObject();
             m.addProperty("uuid", en.getKey().toString());
@@ -433,6 +423,9 @@ public final class BodyIndex {
             JsonArray ma = new JsonArray();
             ma.add(m);
             go.add("bodies", ma);
+            // runtime 是 sable 给的对象,字段随版本变;量真值就不必跟着它改估算
+            freshBytes += JsonSize.of(go);
+            freshUuids.add(en.getKey());
             freshArr.add(go);
         }
 
@@ -451,8 +444,8 @@ public final class BodyIndex {
 
         JsonArray groupArr = new JsonArray();
         groupArr.addAll(freshArr);
-        // 预算是一份运行总账:整份发出去的 clone_sets 先记进去,组列表用剩下的额度,
-        // 调色板则边建边记。只算组成员的话,这几项加起来照样能把响应顶过协议上限。
+        // 预算是一份运行总账,记的全是量出来的真实字节:已发出去的 fresh 组、clone_sets
+        // 先记进去,组列表用剩下的额度,调色板边建边记
         long budget = freshBytes + cloneBytes;
         // 组数上限管的是"发出去多少组",fresh 组也占名额,分开计数就会一起超过 MAX_VIEW_GROUPS
         int shownGroups = freshArr.size();
@@ -464,7 +457,6 @@ public final class BodyIndex {
             // 至少出一组:否则单个超预算的巨型组会让整个列表空着
             if (shownGroups > 0 && (shownGroups >= MAX_VIEW_GROUPS || budget >= VIEW_BYTE_BUDGET)) break;
             shownGroups++;
-            budget += GROUP_BASE_BYTES;
             List<UUID> members = g.getValue();
             long totalBlocks = 0;
             String bestName = null;
@@ -510,8 +502,6 @@ public final class BodyIndex {
                     omittedMembers++;
                     continue;
                 }
-                budget += memberBytes(e, loaded);
-                emitted.add(u);
                 JsonObject m = new JsonObject();
                 m.addProperty("uuid", u.toString());
                 m.addProperty("entry", e.key().id());
@@ -528,13 +518,9 @@ public final class BodyIndex {
                     m.addProperty("copies", cp);
                     groupDup = true;
                     // 同 UUID 的冗余条目数没有上限(存档损坏/反复搬迁能刷出成千上万条),
-                    // 而 memberBytes 没算这一段。真实数量由 copies 带出去,列表只发前几条够看即可
+                    // 真实数量由 copies 带出去,列表只发前几条够看即可(采集阶段已经截过)
                     JsonArray ea = new JsonArray();
-                    for (String id : entryIds.getOrDefault(u, List.of())) {
-                        if (ea.size() >= MAX_ENTRY_IDS) break;
-                        ea.add(id);
-                    }
-                    budget += (long) ea.size() * ENTRY_ID_BYTES;
+                    for (String id : entryIds.getOrDefault(u, List.of())) ea.add(id);
                     m.add("entries", ea);
                 }
                 Integer cloneSet = cloneSetByUuid.get(u);
@@ -556,12 +542,21 @@ public final class BodyIndex {
                         }
                         at = paletteIdx.size();
                         paletteIdx.put(id, at);
-                        budget += PALETTE_ENTRY_BYTES;
+                        // 调色板条目建出来就量:方块名是本地化文本,长度随语言和整合包变
+                        String[] names = BlockNames.of(id);
+                        JsonObject p = new JsonObject();
+                        p.addProperty("id", id);
+                        p.addProperty("en", names[0]);
+                        p.addProperty("zh", names[1]);
+                        paletteArr.add(p);
+                        budget += JsonSize.of(p);
                     }
                     blk.add(at);
                 }
                 m.add("blk", blk);
                 if (loaded) m.add("runtime", rto);
+                budget += JsonSize.of(m);
+                emitted.add(u);
                 memberArr.add(m);
             }
             JsonObject go = new JsonObject();
@@ -583,18 +578,11 @@ public final class BodyIndex {
                     groupContents, anyNamed, anyTracked, anyUserData, orphanCount, nonOrphan, groupDup, groupClone));
             if (verdict.has("reasons")) go.add("rec", verdict);
             else go.add("prot", verdict.getAsJsonArray("protected_by"));
+            // 趁 bodies 还没挂上去量组自身的开销 —— 成员的字节在上面已经逐个记过了。
+            // 组名是某个成员名称的副本,同样可以有 65535 字节,不量就是又一个漏记的字段
+            budget += JsonSize.of(go);
             go.add("bodies", memberArr);
             groupArr.add(go);
-        }
-
-        JsonArray paletteArr = new JsonArray();
-        for (String id : paletteIdx.keySet()) {
-            String[] names = BlockNames.of(id);
-            JsonObject p = new JsonObject();
-            p.addProperty("id", id);
-            p.addProperty("en", names[0]);
-            p.addProperty("zh", names[1]);
-            paletteArr.add(p);
         }
 
         JsonObject out = new JsonObject();
