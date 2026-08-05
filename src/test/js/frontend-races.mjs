@@ -544,6 +544,40 @@ test('PERF-03 注销后不得补跑一次带空 token 的 bodies 请求', async 
   assert.equal(evalIn(sandbox, 'authenticated'), false, '注销状态不能被补跑翻回来');
 });
 
+test('UI-02 旧请求晚到的 401 不能注销已经重新登录的会话', async () => {
+  const slow401 = deferred();
+  let bodies = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async (url, opts) => {
+    const sent = opts && opts.headers && opts.headers['X-Token'];
+    // 第一次是旧 token 发出的那笔,回得慢;之后(重新登录触发的补跑)用新 token,正常成功
+    if (url.startsWith('/api/bodies')) return ++bodies === 1 ? slow401.promise : bodiesResponse();
+    if (url.startsWith('/api/servers')) {
+      return sent === 'new' ? jsonResponse({ servers: [], self: 'S' }) : errorResponse(401);
+    }
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({});
+  };
+  evalIn(sandbox, "token = 'old'; authenticated = true");
+  const pending = evalIn(sandbox, 'loadBodies')();
+  assert.equal(await evalIn(sandbox, 'authenticate')('new', false), true, '新口令要能登录成功');
+
+  slow401.resolve(errorResponse(401));   // 旧 token 的那次请求现在才失败
+  await pending;
+  await tick();
+
+  assert.equal(evalIn(sandbox, 'authenticated'), true, '旧凭据的 401 不能把刚登录成功的人踢回登录页');
+  assert.equal(evalIn(sandbox, 'token'), 'new', '更不能顺手清掉新 token');
+});
+
+test('UI-02 当前凭据的 401 仍然要注销', async () => {
+  const { sandbox, state } = setup();
+  state.fetch = async () => errorResponse(401);
+  evalIn(sandbox, "token = 'cur'; authenticated = true");
+  await evalIn(sandbox, 'loadBodies')();
+  assert.equal(evalIn(sandbox, 'authenticated'), false, '口令真被改掉时必须锁页,别把保护也一起关了');
+});
+
 /* ---------- 运行 ---------- */
 let failures = 0;
 for (const [name, fn] of tests) {

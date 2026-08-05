@@ -14,11 +14,17 @@ if (initialUrl.searchParams.has('token')) {
 async function api(path, opts) {
   const sep = path.includes('?') ? '&' : '?';
   const srv = CURSRV ? sep + 'server=' + encodeURIComponent(CURSRV) : '';
+  // 请求发出时的凭据。401 回来时得先确认它说的还是这一套 —— 见下面
+  const sent = token, seq = authSeq, gen = srvGen();
   const options = {...(opts || {}), headers:{...((opts && opts.headers) || {}), 'X-Token':token}};
   const r = await fetch(path + srv, options);
   if (!r.ok) {
     const e = (await r.json().catch(()=>({}))).error || r.status;
-    if (r.status === 401) showLogin(t('loginChanged'));
+    // 重新登录、改口令、切服之后,旧请求晚到的 401 说的是上一套凭据。拿它注销会把刚登录成功的
+    // 人直接踢回登录页,而且顺手清掉 token 和 JOB_WATCH —— 后台作业还在跑,用户却以为没执行
+    if (r.status === 401 && sent === token && seq === authSeq && gen === srvGen()) {
+      showLogin(t('loginChanged'));
+    }
     throw new Error(e);
   }
   return r.json();
