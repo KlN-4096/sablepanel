@@ -124,6 +124,8 @@ function renderRecycleDetail(){
   if (group.restored_at) rows.push([t('restoredAt'),new Date(group.restored_at).toLocaleString()]);
   rows.push([t('backupFiles'),`<span class="val">${body.backup_count||1}</span>`]);
   rows.push([t('backupGroup'),`<span class="val" style="font-size:10.5px">${group.id}</span>`]);
+  // 服务端对单页超预算的巨型组只发元数据。不说的话构成条就是空的,看起来像"这个体没有方块"
+  if (group.blocks_omitted) rows.push(['',`<span class="tag warn">${t('rBlocksOmitted')}</span>`]);
   document.getElementById('rBody').innerHTML=
     `<table>${rows.map(row=>`<tr><td>${row[0]}</td><td>${row[1]}</td></tr>`).join('')}</table><div id="rCompList"></div>`;
   document.getElementById('rOps').style.display='block';

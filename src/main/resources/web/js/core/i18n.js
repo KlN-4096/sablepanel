@@ -63,6 +63,7 @@ const I18N = {
     rShowing:(n,m)=>`显示 ${n} / ${m} 个依赖组`, rSelectInfo:(g,b)=>`已选 ${g} 组 · ${b} 个物理体`,
     rLoaded:(n,m)=>`已加载 ${n} / ${m}`, rLoadMore:'加载更多', rLoading:'加载中…',
     bodiesTruncated:(n,m)=>`依赖组过多,只显示体积最大的 ${n} / ${m} 组`,
+    rBlocksOmitted:'该依赖组过大,已省略方块构成(其余信息完整)',
     restoreSelected:'恢复所选', restoreSelectedT:'恢复所选物理体',
     restoreSelectedMsg:(g,b,blk)=>`将恢复勾选的 ${g} 个依赖组,共 ${b} 个物理体、${fmt(blk)} 块。\n恢复后会在原保存位置重新加载。`,
     restoreRecoveryWarn:(n)=>`\n其中 ${n} 个“需恢复”事务会先清除同 UUID 残留,再从备份重建整组。`,

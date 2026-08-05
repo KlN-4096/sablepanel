@@ -45,8 +45,10 @@ public final class RecycleStore {
     /** 单页组数上限与默认值:客户端可以要更少,但要不到更多 */
     public static final int PAGE_LIMIT_MAX = 200;
     private static final int PAGE_LIMIT_DEFAULT = 100;
-    /** 单页方块索引总数预算:条数之外再兜一层,防止少数超大组把一页撑爆 */
+    /** 单页预算:条数之外再兜一层,防止少数超大组把一页撑爆。单位见 {@link #manifestCost} */
     private static final int PAGE_BLOCK_BUDGET = 200_000;
+    /** 一个体的元数据(名称/坐标/包围盒/依赖链/备份名)折算成多少个方块索引当量 */
+    private static final int BODY_COST_UNITS = 128;
 
     public record Source(UUID uuid, String dimension, DiskScanner.EntryKey key, CompoundTag tag) {
     }
@@ -263,7 +265,7 @@ public final class RecycleStore {
                 try {
                     JsonObject manifest = readManifest(directory);
                     manifests.add(manifest);
-                    cost += blockIdCount(manifest);
+                    cost += manifestCost(manifest);
                     nextCursor = id;
                 } catch (Exception error) {
                     SablePanel.LOGGER.warn("sablepanel: skipping unreadable recycle group {}", id, error);
@@ -289,13 +291,19 @@ public final class RecycleStore {
         return out;
     }
 
-    private static int blockIdCount(JsonObject manifest) {
+    /**
+     * 单页预算的记账当量:一个方块索引算 1。
+     * <p>
+     * 光算方块索引不够 —— 一个组几百个体、每个体带名称/坐标/包围盒/依赖链,这些元数据本身
+     * 就能顶满响应,所以每个体再记一份固定当量。
+     */
+    private static int manifestCost(JsonObject manifest) {
         JsonArray bodies = manifest.getAsJsonArray("bodies");
         if (bodies == null) return 0;
         int total = 0;
         for (var bodyElement : bodies) {
             JsonArray ids = bodyElement.getAsJsonObject().getAsJsonArray("block_ids");
-            if (ids != null) total += ids.size();
+            total += BODY_COST_UNITS + (ids != null ? ids.size() : 0);
         }
         return total;
     }
@@ -507,7 +515,9 @@ public final class RecycleStore {
      *                   总得让这一页翻得过去,但也不能整份塞进来把响应撑爆;构成条前端会显示为空。
      */
     private static JsonObject toView(JsonObject manifest, Map<String, Integer> palette, boolean withBlocks) {
-        JsonObject view = manifest.deepCopy();
+        // 就地改。manifest 是 view() 刚从磁盘解析出来的临时对象,除了这里没人引用它,
+        // deepCopy 只是在超大组这个最不该翻倍的场景把峰值堆再翻一倍
+        JsonObject view = manifest;
         for (var bodyElement : view.getAsJsonArray("bodies")) {
             JsonObject body = bodyElement.getAsJsonObject();
             JsonArray ids = body.remove("block_ids") instanceof JsonArray array ? array : new JsonArray();

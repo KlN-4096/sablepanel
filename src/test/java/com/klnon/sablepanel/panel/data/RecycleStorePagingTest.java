@@ -16,6 +16,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -144,6 +145,25 @@ class RecycleStorePagingTest {
         JsonObject second = store.view(cursor, 100);
         assertEquals(List.of(small), ids(second));
         assertEquals("", second.get("next_cursor").getAsString());
+
+        // 超预算的那组只发元数据,而且必须显式说明 —— 前端据此提示,否则构成条空着像是「没有方块」
+        assertTrue(first.getAsJsonArray("groups").get(0).getAsJsonObject()
+                .get("blocks_omitted").getAsBoolean());
+        assertFalse(second.getAsJsonArray("groups").get(0).getAsJsonObject().has("blocks_omitted"));
+    }
+
+    @Test
+    void bodyMetadataCountsTowardsThePageBudgetEvenWithoutBlockIds() throws Exception {
+        // 只按 block_ids 计预算的话,这三个组(每组 800 个体、零个方块索引)预算恒为 0,
+        // 会被一次性塞进同一页 —— 名称/坐标/包围盒/依赖链本身就够撑爆响应
+        for (int i = 1; i <= 3; i++) writeGroup(String.format("20260101-00000%d-000", i), 800, 0);
+        RecycleStore store = store();
+
+        JsonObject first = store.view("", 100);
+        assertEquals(2, first.getAsJsonArray("groups").size(), "体的元数据必须记进预算");
+        assertNotEquals("", first.get("next_cursor").getAsString(), "翻不完就要给游标");
+        assertEquals(1, store.view(first.get("next_cursor").getAsString(), 100)
+                .getAsJsonArray("groups").size());
     }
 
     @Test
