@@ -14,6 +14,7 @@ import com.klnon.sablepanel.panel.web.PanelWebGateway;
 import net.minecraft.server.MinecraftServer;
 
 import java.util.Map;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -21,6 +22,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 /** Owns the panel service lifecycle independently from NeoForge event wiring. */
 public final class PanelRuntime implements AutoCloseable {
@@ -74,21 +76,8 @@ public final class PanelRuntime implements AutoCloseable {
             });
             ScheduledExecutorService executor = createdExecutor;
             Runnable scanOnce = scanTask(server, generation);
-            Runnable requestScan = () -> {
-                if (!isLifecycleCurrent(generation) || executor.isShutdown()) return;
-                if (!this.scanPending.compareAndSet(false, true)) return;
-                try {
-                    executor.execute(() -> {
-                        try {
-                            scanOnce.run();
-                        } finally {
-                            this.scanPending.set(false);
-                        }
-                    });
-                } catch (RejectedExecutionException rejected) {
-                    this.scanPending.set(false);
-                }
-            };
+            Runnable requestScan = mergedRunner(this.scanPending, executor,
+                    () -> isLifecycleCurrent(generation) && !executor.isShutdown(), scanOnce);
             OpsService ops = new OpsService(server, this.bodyIndex, requestScan, config);
             StatsCollector.INSTANCE.start(config);
             JobService jobs = new JobService(this::requestRuntimeRefresh);
@@ -100,7 +89,9 @@ public final class PanelRuntime implements AutoCloseable {
             createdNode.start();
 
             PanelClusterNode panel = createdNode;
-            executor.scheduleWithFixedDelay(scanOnce, 5, 120, TimeUnit.SECONDS);
+            // 周期扫描和手动重扫走同一道 scanPending 门闩:从前周期任务直接跑 scanOnce,
+            // 扫描期间点重扫就会有第二个线程把同一批磁盘数据再全量解压一遍
+            executor.scheduleWithFixedDelay(requestScan, 5, 120, TimeUnit.SECONDS);
             createdHeartbeat = executor.scheduleWithFixedDelay(() -> clusterTick(config, panel, generation),
                     PanelClusterNode.HEARTBEAT_SECONDS, PanelClusterNode.HEARTBEAT_SECONDS, TimeUnit.SECONDS);
             synchronized (this.lifecycleLock) {
@@ -181,6 +172,31 @@ public final class PanelRuntime implements AutoCloseable {
         this.scanPending.set(false);
         this.refreshRequested.set(false);
         this.ticksSinceRefresh = 0;
+    }
+
+    /**
+     * 周期扫描和手动重扫共用的合并门闩:任何时刻最多一次完整扫描在跑,扫描期间的额外请求
+     * 直接丢弃(不排队成后续扫描 —— 扫描本来就是拿全量快照,再跑一遍没有新信息)。
+     * <p>
+     * 从前周期任务直接调原始 scanOnce、只有手动入口过门闩,于是周期扫描进行时点一次重扫,
+     * 就会有第二个线程把同一批磁盘数据再全量解压一遍,还占着扫描/心跳共用的调度池。
+     */
+    static Runnable mergedRunner(AtomicBoolean pending, Executor executor, BooleanSupplier alive, Runnable work) {
+        return () -> {
+            if (!alive.getAsBoolean()) return;
+            if (!pending.compareAndSet(false, true)) return;
+            try {
+                executor.execute(() -> {
+                    try {
+                        work.run();
+                    } finally {
+                        pending.set(false);
+                    }
+                });
+            } catch (RejectedExecutionException rejected) {
+                pending.set(false);
+            }
+        };
     }
 
     private Runnable scanTask(MinecraftServer server, long generation) {

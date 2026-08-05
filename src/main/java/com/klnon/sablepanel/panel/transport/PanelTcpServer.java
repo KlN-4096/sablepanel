@@ -44,6 +44,8 @@ public final class PanelTcpServer implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(PanelTcpServer.class);
     private static final int CALLBACK_THREADS = 4;
     private static final int CALLBACK_QUEUE_CAPACITY = 64;
+    private static final int FORWARD_THREADS = 4;
+    private static final int FORWARD_QUEUE_CAPACITY = 64;
     private static final int MAX_IN_FLIGHT_PER_CONNECTION = 4;
     private static final int DEFAULT_READER_IDLE_SECONDS = 45;
     private static final int DEFAULT_WRITER_IDLE_SECONDS = 20;
@@ -57,6 +59,18 @@ public final class PanelTcpServer implements AutoCloseable {
             new ArrayBlockingQueue<>(CALLBACK_QUEUE_CAPACITY), runnable -> {
                 Thread thread = new Thread(runnable,
                         "sablepanel-tcp-server-callback-" + CALLBACK_THREAD_IDS.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+            }, new ThreadPoolExecutor.AbortPolicy());
+    /**
+     * 跨服转发专用池(bulkhead)。转发要在 PEER 上同步等最多 30 秒,和本地请求共用回调线程时,
+     * 4 个卡住的 PEER 请求就能让完全无关连接的本地请求一起排队 —— 那正是面板整体 503 的形状。
+     */
+    private final ExecutorService forwards = new ThreadPoolExecutor(
+            FORWARD_THREADS, FORWARD_THREADS, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(FORWARD_QUEUE_CAPACITY), runnable -> {
+                Thread thread = new Thread(runnable,
+                        "sablepanel-tcp-server-forward-" + CALLBACK_THREAD_IDS.incrementAndGet());
                 thread.setDaemon(true);
                 return thread;
             }, new ThreadPoolExecutor.AbortPolicy());
@@ -168,14 +182,19 @@ public final class PanelTcpServer implements AutoCloseable {
     }
 
     private void shutdownCallbacks() {
-        this.callbacks.shutdown();
+        shutdownPool(this.callbacks);
+        shutdownPool(this.forwards);
+    }
+
+    private static void shutdownPool(ExecutorService pool) {
+        pool.shutdown();
         try {
-            if (!this.callbacks.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                this.callbacks.shutdownNow();
-                this.callbacks.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (!pool.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                pool.shutdownNow();
+                pool.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             }
         } catch (InterruptedException interrupted) {
-            this.callbacks.shutdownNow();
+            pool.shutdownNow();
             Thread.currentThread().interrupt();
         }
     }
@@ -184,6 +203,7 @@ public final class PanelTcpServer implements AutoCloseable {
         private final Map<Long, CompletableFuture<PanelResponse>> pending = new ConcurrentHashMap<>();
         private final AtomicLong ids = new AtomicLong();
         private final AtomicInteger inFlight = new AtomicInteger();
+        private final AtomicInteger forwardInFlight = new AtomicInteger();
         private final AtomicReference<PanelEvent> pendingEvent = new AtomicReference<>();
         private final AtomicBoolean eventWriteScheduled = new AtomicBoolean();
         private volatile ChannelHandlerContext context;
@@ -244,7 +264,12 @@ public final class PanelTcpServer implements AutoCloseable {
         }
 
         private void submitRequest(ChannelHandlerContext context, PanelFrame frame) {
-            boolean accepted = submitCallback(() -> {
+            // meta 解析在事件循环上也无所谓:请求帧不压缩,这里只读一个字符串
+            String target = frame.meta().has("target") ? frame.meta().get("target").getAsString() : "";
+            boolean forwarded = !target.isEmpty() && !target.equals(selfId);
+            // 在途配额也要分开算,否则同一条网关连接上 4 个慢转发会把自己的本地请求也顶成 503
+            boolean accepted = submitCallback(forwarded ? this.forwardInFlight : this.inFlight,
+                    forwarded ? forwards : callbacks, () -> {
                 PanelRequest request;
                 try {
                     request = PanelWire.request(frame);
@@ -266,25 +291,25 @@ public final class PanelTcpServer implements AutoCloseable {
             }
         }
 
-        private boolean submitCallback(Runnable task) {
+        private boolean submitCallback(AtomicInteger slots, ExecutorService pool, Runnable task) {
             if (closed.get() || this.inactive || this.context == null || !this.context.channel().isActive()) {
                 return false;
             }
-            if (this.inFlight.incrementAndGet() > MAX_IN_FLIGHT_PER_CONNECTION) {
-                this.inFlight.decrementAndGet();
+            if (slots.incrementAndGet() > MAX_IN_FLIGHT_PER_CONNECTION) {
+                slots.decrementAndGet();
                 return false;
             }
             try {
-                callbacks.execute(() -> {
+                pool.execute(() -> {
                     try {
                         if (!this.inactive) task.run();
                     } finally {
-                        this.inFlight.decrementAndGet();
+                        slots.decrementAndGet();
                     }
                 });
                 return true;
             } catch (RejectedExecutionException rejected) {
-                this.inFlight.decrementAndGet();
+                slots.decrementAndGet();
                 return false;
             }
         }

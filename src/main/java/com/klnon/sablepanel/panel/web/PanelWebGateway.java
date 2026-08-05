@@ -33,6 +33,8 @@ public final class PanelWebGateway implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(PanelWebGateway.class);
     private static final int HTTP_THREADS = 4;
     private static final int HTTP_QUEUE_CAPACITY = 64;
+    private static final int FORWARD_THREADS = 4;
+    private static final int FORWARD_QUEUE_CAPACITY = 32;
     private static final int RECONNECT_SECONDS = 2;
     private static final int SHUTDOWN_TIMEOUT_SECONDS = 2;
     private static final long RECONNECT_LOG_INTERVAL_MS = 60_000L;
@@ -45,6 +47,7 @@ public final class PanelWebGateway implements AutoCloseable {
     private final String fixedFingerprint;
     private volatile HttpServer http;
     private volatile ExecutorService httpPool;
+    private volatile ExecutorService forwardPool;
     private volatile ScheduledExecutorService reconnectExecutor;
     private volatile PanelEventStreams eventStreams;
     private volatile PanelTcpClient upstream;
@@ -88,6 +91,15 @@ public final class PanelWebGateway implements AutoCloseable {
                         thread.setDaemon(true);
                         return thread;
                     }, new ThreadPoolExecutor.CallerRunsPolicy());
+            // 跨服转发单独一个池;满了直接 503,不用 CallerRunsPolicy —— 那等于又把 HTTP 线程还回去阻塞
+            this.forwardPool = new ThreadPoolExecutor(
+                    FORWARD_THREADS, FORWARD_THREADS, 0L, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<>(FORWARD_QUEUE_CAPACITY), runnable -> {
+                        Thread thread = new Thread(runnable,
+                                "sablepanel-web-forward-" + HTTP_THREAD_IDS.incrementAndGet());
+                        thread.setDaemon(true);
+                        return thread;
+                    }, new ThreadPoolExecutor.AbortPolicy());
             this.eventStreams = new PanelEventStreams();
         }
         try {
@@ -150,7 +162,7 @@ public final class PanelWebGateway implements AutoCloseable {
                 return;
             }
             if (path.startsWith("/api/")) {
-                proxyApi(exchange);
+                closeExchange = !offloadApi(exchange);
                 return;
             }
             HttpIo.send(exchange, 404, "application/json", "{\"error\":\"not found\"}".getBytes(StandardCharsets.UTF_8), false);
@@ -196,6 +208,40 @@ public final class PanelWebGateway implements AutoCloseable {
             return false;
         }
         return true;
+    }
+
+    /**
+     * 带 {@code server=} 的跨服请求交给独立池,返回 true 表示 exchange 的关闭由那个池负责。
+     * <p>
+     * 转发要在上游同步等最多 30 秒。HTTP 池只有 4 个线程,一个卡住的远端服务器可以让本机
+     * 自己的接口和网页请求一起排队 —— 快请求必须有自己的线程,不能和转发抢同一批。
+     */
+    private boolean offloadApi(HttpExchange exchange) throws Exception {
+        String target = HttpIo.query(exchange.getRequestURI()).getOrDefault("server", "");
+        ExecutorService pool = this.forwardPool;
+        if (target.isEmpty() || pool == null) {
+            proxyApi(exchange);
+            return false;
+        }
+        try {
+            pool.execute(() -> {
+                try {
+                    proxyApi(exchange);
+                } catch (Exception error) {
+                    LOGGER.warn("sablepanel: cross-server proxy failed {}", exchange.getRequestURI(), error);
+                    try {
+                        HttpIo.send(exchange, 502, "application/json", errorJson(messageOf(error)), false);
+                    } catch (IOException ignored) {
+                    }
+                } finally {
+                    exchange.close();
+                }
+            });
+            return true;
+        } catch (RejectedExecutionException rejected) {
+            HttpIo.send(exchange, 503, "application/json", errorJson("跨服请求排队已满,请稍后重试"), false);
+            return false;
+        }
     }
 
     private void proxyApi(HttpExchange exchange) throws Exception {
@@ -309,6 +355,7 @@ public final class PanelWebGateway implements AutoCloseable {
         HttpServer currentHttp;
         PanelTcpClient currentUpstream;
         ExecutorService currentHttpPool;
+        ExecutorService currentForwardPool;
         ScheduledExecutorService currentReconnect;
         PanelEventStreams currentStreams;
         synchronized (this) {
@@ -318,12 +365,14 @@ public final class PanelWebGateway implements AutoCloseable {
             currentHttp = this.http;
             currentUpstream = this.upstream;
             currentHttpPool = this.httpPool;
+            currentForwardPool = this.forwardPool;
             currentReconnect = this.reconnectExecutor;
             currentStreams = this.eventStreams;
             this.http = null;
             this.upstream = null;
             this.endpoint = null;
             this.httpPool = null;
+            this.forwardPool = null;
             this.reconnectExecutor = null;
             this.eventStreams = null;
             this.eventToken = null;
@@ -332,6 +381,7 @@ public final class PanelWebGateway implements AutoCloseable {
         if (currentStreams != null) currentStreams.close();
         shutdownExecutor(currentReconnect);
         if (currentUpstream != null) currentUpstream.close();
+        shutdownExecutor(currentForwardPool);
         shutdownExecutor(currentHttpPool);
     }
 
