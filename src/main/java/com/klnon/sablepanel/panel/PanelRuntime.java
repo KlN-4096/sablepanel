@@ -92,6 +92,10 @@ public final class PanelRuntime implements AutoCloseable {
             // 周期扫描和手动重扫走同一道 scanPending 门闩:从前周期任务直接跑 scanOnce,
             // 扫描期间点重扫就会有第二个线程把同一批磁盘数据再全量解压一遍
             executor.scheduleWithFixedDelay(requestScan, 5, 120, TimeUnit.SECONDS);
+            // 只读一致性分析每次面板启动只跑一次；发现问题由网页提示，绝不在这里自动修复。
+            executor.schedule(() -> {
+                if (isLifecycleCurrent(generation)) ops.analyzeConsistency(true);
+            }, 10, TimeUnit.SECONDS);
             createdHeartbeat = executor.scheduleWithFixedDelay(() -> clusterTick(config, panel, generation),
                     PanelClusterNode.HEARTBEAT_SECONDS, PanelClusterNode.HEARTBEAT_SECONDS, TimeUnit.SECONDS);
             synchronized (this.lifecycleLock) {

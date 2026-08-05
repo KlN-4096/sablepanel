@@ -311,6 +311,22 @@ public final class DiskScanner {
                                                                           List<String> warnings)
             throws IOException {
         Map<EntryKey, List<LiveLocation>> located = new HashMap<>();
+        for (PointerReference reference : scanPointersStrict(dims, warnings)) {
+            if (targets.contains(reference.key())) {
+                located.computeIfAbsent(reference.key(), ignored -> new ArrayList<>())
+                        .add(new LiveLocation(reference.key(), reference.chunkX(), reference.chunkZ()));
+            }
+        }
+        return located;
+    }
+
+    public record PointerReference(EntryKey key, int chunkX, int chunkZ) {
+    }
+
+    /** 严格读取全部 holding 指针；一致性检查据此识别目标槽为空的引用。 */
+    public static List<PointerReference> scanPointersStrict(Map<String, Path> dims,
+                                                             List<String> warnings) throws IOException {
+        List<PointerReference> references = new ArrayList<>();
         for (Map.Entry<String, Path> dimension : dims.entrySet()) {
             String dim = dimension.getKey();
             Path dir = dimension.getValue();
@@ -330,15 +346,12 @@ public final class DiskScanner {
                     for (int packed : tag.getIntArray("pointers")) {
                         EntryKey key = new EntryKey(dim, rx, rz,
                                 (packed >> 16) & 0xFFFF, packed & 0xFFFF);
-                        if (targets.contains(key)) {
-                            located.computeIfAbsent(key, ignored -> new ArrayList<>())
-                                    .add(new LiveLocation(key, chunkX, chunkZ));
-                        }
+                        references.add(new PointerReference(key, chunkX, chunkZ));
                     }
                 });
             }
         }
-        return located;
+        return List.copyOf(references);
     }
 
     /**

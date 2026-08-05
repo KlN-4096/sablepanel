@@ -33,8 +33,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * sable 的 {@code collectForceLoadedSubLevels()} 会把持票体的<b>运行时依赖闭包</b>(包围盒相交 +
  * 方块实体 actor 依赖)一并算作 force-loaded,所以相交/绳连的体自动受保护,无需逐个挂票。
  * <p>
- * 票由 sable 持久化到 {@code <world>/data/sable_sub_level_force_load_tickets.dat};体被 REMOVED
- * 时 sable 自动清票,不留孤票。但 sable 只在世界 {@code initialize()} 时按票加载一次
+ * 票由 sable 持久化到 {@code <world>/data/sable_sub_level_force_load_tickets.dat};删除体前必须由
+ * 面板显式摘票，Sable 的 {@code removeSubLevel(REMOVED)} 不会清理 {@code allTickets}。
+ * Sable 只在世界 {@code initialize()} 时按票加载一次
  * ({@code loadForceLoadedSubLevels}),体一旦被 UNLOADED 就不会自愈 —— 故本类带
  * {@link #guardOnMain} 守护:每次运行时刷新把掉线的常驻体按票中指针重新 snatch 回来。
  * <p>
@@ -68,6 +69,31 @@ public final class ForceLoadService {
     /** 当前常驻集合快照(HTTP 线程 /api/bodies 输出用) */
     public static Set<UUID> snapshot() {
         return Set.copyOf(MIRROR);
+    }
+
+    /** 主线程:直接读取 Sable 票表，删除/恢复事务不能依赖异步维护的镜像。 */
+    public static boolean isForcedOnMain(MinecraftServer server, UUID uuid) {
+        for (ServerLevel level : server.getAllLevels()) {
+            ServerSubLevelContainer c = container(level);
+            if (c == null) continue;
+            SubLevelTicketInfo info = c.getAllTickets().get(uuid);
+            if (info != null && info.tickets().stream().anyMatch(ForceLoadService::isPanelTicket)) return true;
+        }
+        return false;
+    }
+
+    public static Set<UUID> forcedOnMain(MinecraftServer server) {
+        Set<UUID> forced = new HashSet<>();
+        for (ServerLevel level : server.getAllLevels()) {
+            ServerSubLevelContainer c = container(level);
+            if (c == null) continue;
+            for (Map.Entry<UUID, SubLevelTicketInfo> entry : c.getAllTickets().entrySet()) {
+                if (entry.getValue().tickets().stream().anyMatch(ForceLoadService::isPanelTicket)) {
+                    forced.add(entry.getKey());
+                }
+            }
+        }
+        return Set.copyOf(forced);
     }
 
     /** 主线程:给已加载的体挂票 */

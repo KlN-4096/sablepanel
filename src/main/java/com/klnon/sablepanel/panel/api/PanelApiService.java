@@ -33,8 +33,10 @@ public final class PanelApiService {
     private static final Pattern RECYCLE_MESH = Pattern.compile(
             "/api/recycle/([0-9A-Za-z_-]{8,96})/body/([0-9a-fA-F-]{36})/mesh");
     private static final Pattern RECYCLE_ID = Pattern.compile("[0-9A-Za-z_-]{8,96}");
+    private static final Pattern COPY_MESH = Pattern.compile(
+            "/api/body/([0-9a-fA-F-]{36})/copy/([0-9a-f]{16})/mesh");
     private static final Pattern BODY_OP = Pattern.compile(
-            "/api/body/([0-9a-fA-F-]{36})/(mesh|copies|teleport_player|teleport|delete|adopt|deduplicate)");
+            "/api/body/([0-9a-fA-F-]{36})/(mesh|copies|teleport_player|teleport|delete|adopt|deduplicate|resolve_copies|quarantine_copies)");
 
     private final PanelConfig config;
     private final MinecraftServer server;
@@ -145,6 +147,26 @@ public final class PanelApiService {
                     return out;
                 });
             }
+            case "/api/consistency" -> {
+                return PanelResponse.json(200, this.ops.consistencyView(), true);
+            }
+            case "/api/consistency/scan" -> {
+                requirePost(request);
+                return enqueue("一致性检查", List.of(), "", () -> this.ops.analyzeConsistency(false));
+            }
+            case "/api/consistency/repair" -> {
+                requirePost(request);
+                JsonObject body = request.jsonBody();
+                String scanId = body.has("scan_id") ? body.get("scan_id").getAsString() : "";
+                if (!scanId.matches("[0-9a-z]+-[0-9a-f]{8}")) throw new IllegalArgumentException("scan_id 无效");
+                Set<String> pointers = readStrings(body, "pointers", "[0-9a-f]{16}");
+                Set<UUID> forced = readUuidSet(body, "forced");
+                Set<UUID> paused = readUuidSet(body, "paused");
+                int total = pointers.size() + forced.size() + paused.size();
+                if (total == 0 || total > 10_000) throw new IllegalArgumentException("修复项数量无效");
+                return enqueue("一致性修复", List.of(), total + " 项",
+                        () -> this.ops.repairConsistency(scanId, pointers, forced, paused));
+            }
             case "/api/ops/batch_delete" -> {
                 requirePost(request);
                 List<UUID> uuids = readUuids(request);
@@ -176,6 +198,13 @@ public final class PanelApiService {
         var recycleMesh = RECYCLE_MESH.matcher(path);
         if (recycleMesh.matches()) {
             JsonObject mesh = this.ops.recycleMesh(recycleMesh.group(1), UUID.fromString(recycleMesh.group(2)));
+            return PanelResponse.json(200, mesh, true);
+        }
+
+        var copyMesh = COPY_MESH.matcher(path);
+        if (copyMesh.matches()) {
+            JsonObject mesh = this.ops.copyVersionMesh(
+                    UUID.fromString(copyMesh.group(1)), copyMesh.group(2));
             return PanelResponse.json(200, mesh, true);
         }
 
@@ -214,6 +243,19 @@ public final class PanelApiService {
                 requirePost(request);
                 yield enqueue("去重", List.of(uuid), targetLabel(List.of(uuid)),
                         () -> this.ops.deduplicate(uuid));
+            }
+            case "resolve_copies" -> {
+                requirePost(request);
+                JsonObject body = request.jsonBody();
+                String version = body.has("version") ? body.get("version").getAsString() : "";
+                if (!version.matches("[0-9a-f]{16}")) throw new IllegalArgumentException("version 无效");
+                yield enqueue("处理副本", List.of(uuid), targetLabel(List.of(uuid)),
+                        () -> this.ops.resolveCopyVersion(uuid, version));
+            }
+            case "quarantine_copies" -> {
+                requirePost(request);
+                yield enqueue("隔离不完整副本", List.of(uuid), targetLabel(List.of(uuid)),
+                        () -> this.ops.quarantineIncompleteCopies(uuid));
             }
             default -> PanelResponse.error(404, "not found");
         };
@@ -373,6 +415,26 @@ public final class PanelApiService {
         Set<UUID> result = new LinkedHashSet<>();
         for (var value : values) result.add(UUID.fromString(value.getAsString()));
         return List.copyOf(result);
+    }
+
+    private static Set<String> readStrings(JsonObject body, String name, String pattern) {
+        JsonArray values = body.getAsJsonArray(name);
+        Set<String> result = new LinkedHashSet<>();
+        if (values == null) return result;
+        for (var value : values) {
+            String text = value.getAsString();
+            if (!text.matches(pattern)) throw new IllegalArgumentException(name + " 含无效值");
+            result.add(text);
+        }
+        return result;
+    }
+
+    private static Set<UUID> readUuidSet(JsonObject body, String name) {
+        JsonArray values = body.getAsJsonArray(name);
+        Set<UUID> result = new LinkedHashSet<>();
+        if (values == null) return result;
+        for (var value : values) result.add(UUID.fromString(value.getAsString()));
+        return result;
     }
 
     private static List<String> readRecycleIds(PanelRequest request) {

@@ -512,6 +512,13 @@ public final class JobService implements AutoCloseable {
         if (result.has("error") && result.get("error").isJsonPrimitive()) {
             text.append(text.length() > 0 ? " " : "").append(result.get("error").getAsString());
         }
+        if (result.has("warning") && result.get("warning").isJsonPrimitive()) {
+            text.append(text.length() > 0 ? " " : "").append(result.get("warning").getAsString());
+        }
+        if (result.has("backup") && result.get("backup").isJsonPrimitive()) {
+            text.append(text.length() > 0 ? " " : "").append("backup=")
+                    .append(result.get("backup").getAsString());
+        }
         // 布尔 ok:false 的单体操作(收养)没有任何可汇总的计数,别让日志行只有一个红标签没有话
         if (text.length() == 0 && "fail".equals(outcomeOf(result))) text.append("未成功");
         return text.toString();
