@@ -27,6 +27,7 @@ async function switchServer(id){
   // 代次先自增:在途的 bodies/recycle/stats/players/jobs 响应从这一刻起全部作废,
   // 否则旧服的慢响应回来会直接盖掉新服的界面
   SRVGEN++;
+  const gen = srvGen();
   // 作业状态按服务器隔离:JobService 的 seq 在每个服务端都从 1 开始,不清就会张冠李戴
   stopBusyPolling();
   JOBS = null; jobsFile = ''; jobsExpanded.clear();
@@ -49,5 +50,7 @@ async function switchServer(id){
   renderServerPicker(self ? self.id : id);
   renderDashServer();
   await loadAll(true);
-  toast(t('srvSwitched')(id));
+  // A→B 快速连切时,A 那次的慢请求回来后界面已经是 B 了,再弹"已切换到 A"就是骗人。
+  // 数据落地有代次保护,操作反馈也要有
+  if (gen === srvGen()) toast(t('srvSwitched')(id));
 }

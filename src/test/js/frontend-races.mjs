@@ -414,6 +414,54 @@ test('UI-04 旧预览请求的失败不得改写新选择的提示', async () =>
   assert.ok(!info.includes('A 读取失败'));
 });
 
+test('UI-03 快速连切时旧那次的成功 toast 不能弹出来', async () => {
+  const slowA = deferred();
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies')) return url.includes('server=') ? slowA.promise : bodiesResponse();
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ servers: [], self: 'S' });
+  };
+  evalIn(sandbox, 'authenticated = true');
+  evalIn(sandbox, 'toast = (msg) => globalThis.__toasts.push(msg)');
+  evalIn(sandbox, '__toasts = []');
+  evalIn(sandbox, "SERVERS = [{id:'S',self:true},{id:'A',self:false},{id:'B',self:false}]");
+
+  const pendingA = evalIn(sandbox, 'switchServer')('A');   // A 的 bodies 回得慢
+  await evalIn(sandbox, 'switchServer')('B');              // 界面已经是 B 了
+  slowA.resolve(bodiesResponse());
+  await pendingA;
+  await tick();
+
+  const toasts = evalIn(sandbox, '__toasts');
+  assert.ok(!toasts.some(msg => /切换到 A/.test(msg)),
+    '界面已经切到 B,再弹"已切换到 A"就是骗人:' + JSON.stringify(toasts));
+  assert.ok(toasts.some(msg => /切换到 B/.test(msg)), '当前那次的反馈还是要有');
+});
+
+test('PERF-03 注销后不得补跑一次带空 token 的 bodies 请求', async () => {
+  const slow = deferred();
+  const urls = [];
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies')) {
+      urls.push(url);
+      return urls.length === 1 ? slow.promise : bodiesResponse();
+    }
+    return jsonResponse({});
+  };
+  evalIn(sandbox, 'authenticated = true');
+  const pending = evalIn(sandbox, 'loadBodies')();
+  evalIn(sandbox, 'loadBodies')();      // 重叠,登记成"完事后再跑一次"
+  evalIn(sandbox, 'showLogin')('');     // 用户在这期间注销:token 已经清空
+  slow.resolve(bodiesResponse());
+  await pending;
+  await tick();
+
+  assert.equal(urls.length, 1, '注销后补跑的那次会带空 token 出去,白吃 401 再把人推进登录流程');
+  assert.equal(evalIn(sandbox, 'authenticated'), false, '注销状态不能被补跑翻回来');
+});
+
 /* ---------- 运行 ---------- */
 let failures = 0;
 for (const [name, fn] of tests) {

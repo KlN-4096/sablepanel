@@ -60,7 +60,9 @@ async function loadBodies() {
     if (request === bodiesRequest && gen === srvGen()) toast(t('loadFail') + e.message, 'bad');
   } finally {
     bodiesInFlight = false;
-    if (bodiesRerun) { bodiesRerun = false; loadBodies(); }
+    // 补跑要看认证状态:请求重叠期间用户注销的话,这一跑会带着空 token 发出去,
+    // 白吃一个 401 再把人往登录流程里推一次
+    if (bodiesRerun) { bodiesRerun = false; if (authenticated) loadBodies(); }
   }
 }
 /* 有作业在跑时把列表刷新加速到 2 秒,跑完自动停。
