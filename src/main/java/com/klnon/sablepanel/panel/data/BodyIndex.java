@@ -638,7 +638,7 @@ public final class BodyIndex {
         out.add("clone_sets", cloneSetArr);
         out.add("groups", groupArr);
         // 这里的字节预算是内容目标,只算这个方法自己产出的部分 —— 调用方还会往上追加
-        // busy/reach。真正不可绕过的上限在 PanelResponse.capped(),按最终序列化字节判
+        // busy/reach。真正不可绕过的上限在 PanelWire.response(),所有响应的必经之路
         return out;
     }
 

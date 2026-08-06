@@ -2,7 +2,6 @@ package com.klnon.sablepanel.panel.data;
 
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.panel.PanelConfig;
-import com.klnon.sablepanel.panel.api.PanelResponse;
 import com.klnon.sablepanel.panel.service.JobService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -17,8 +16,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -31,11 +28,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>
  * 上限的出处是 {@code PanelWire.MAX_FRAME_BYTES}(32 MiB):越过它传输层直接拒发,
  * 面板表现为列表永远打不开,而且每次刷新都重新制造一次同样的压力。
- * {@code PanelResponse.MAX_BODY_BYTES} 取 30 MiB,给帧头和 meta 留一档余量。
+ * 出口兜底在 {@code PanelWire.response},取 30 MiB;那是"漏了记账"时的最后一道,
+ * 本文件判的是构建阶段自己就该达标,见 {@link #assertUnderWireLimit}。
  */
 class ResponseLimitAdversarialTest {
 
-    /** 与 {@code PanelResponse.MAX_BODY_BYTES} 同源:最终出口的硬上限 */
+    /** 构建阶段自己要达标的量级;出口兜底的 {@code PanelWire.MAX_BODY_BYTES} 取的也是这个数 */
     private static final int WIRE_LIMIT = 30 << 20;
     /** 满容量的活动作业清单该有的量级:80 个作业 × 500 个 UUID ≈ 1.6 MiB */
     private static final long BUSY_BUDGET = 2L << 20;
@@ -143,23 +141,6 @@ class ResponseLimitAdversarialTest {
         } finally {
             release.countDown();
         }
-    }
-
-    /**
-     * 最终出口的兜底:构建阶段再怎么记账,也拦不住"守卫跑完之后又追加字段"这一类
-     * 结构性问题。所以真正不可绕过的上限只有一个 —— 按已序列化的 body 字节数判,
-     * 超了就返回小体积的 500,而不是发一个缺字段的 200 空壳。
-     */
-    @Test
-    void oversizedResponseBecomesASmallErrorNotATruncatedSuccess() {
-        JsonObject huge = new JsonObject();
-        huge.addProperty("payload", "x".repeat(31 << 20));
-        PanelResponse capped = PanelResponse.capped("/api/bodies", PanelResponse.json(200, huge, true));
-        assertEquals(500, capped.status(), "超过最终上限必须是错误,不能是成功");
-        assertTrue(capped.body().length < 4096, "错误响应本身必须是小的,实际 " + capped.body().length);
-
-        PanelResponse fine = PanelResponse.json(200, new JsonObject(), true);
-        assertSame(fine, PanelResponse.capped("/api/bodies", fine), "没超限的响应必须原样放行");
     }
 
     // ---------- /api/recycle ----------

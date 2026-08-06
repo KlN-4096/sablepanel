@@ -60,18 +60,17 @@ public final class PanelApiService {
     }
 
     /**
-     * 所有 API 响应的唯一出口:本节点自己处理的,以及 HOST 转发过来由本节点应答的
+     * 本节点的 API 入口:网关直连本机时走这里,HOST 转发过来由本节点应答时也走这里
      * ({@code PanelTcpClient.connectPeer} 拿的就是这个方法的引用)。
      * <p>
-     * 最终字节上限只在这里判一次。放在这里而不是各个构建点,是因为构建点算的是自己那部分:
-     * {@code /api/bodies} 的预算跑完之后调用方还会追加 busy 和 reach,而 {@code /api/consistency}
-     * 这类后加的端点压根没有预算。按已序列化的字节判,新增字段和新增端点都不用重新记账。
+     * 这里不判字节上限。集群节点自己应答的 {@code /api/servers}、转发、以及各处 catch 出来的
+     * 500 都不经过本方法,只有 {@code PanelWire.response} 是全部响应的必经之路,上限判在那儿。
      */
     public PanelResponse dispatch(PanelRequest request) {
         if (!authorized(request.token())) return PanelResponse.error(401, "token 无效");
         markActivity();
         try {
-            return PanelResponse.capped(request.path(), dispatchAuthorized(request));
+            return dispatchAuthorized(request);
         } catch (Exception error) {
             SablePanel.LOGGER.warn("sablepanel: api error {}", request.path(), error);
             return PanelResponse.error(500, messageOf(error));

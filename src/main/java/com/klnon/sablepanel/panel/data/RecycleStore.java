@@ -456,7 +456,7 @@ public final class RecycleStore {
             out.addProperty("next_cursor", "");
         }
         out.add("groups", groups);
-        // 同 BodyIndex.view():PAGE_BYTE_BUDGET 是内容目标,最终上限在 PanelResponse.capped()
+        // 同 BodyIndex.view():PAGE_BYTE_BUDGET 是内容目标,最终上限在 PanelWire.response()
         return out;
     }
 
