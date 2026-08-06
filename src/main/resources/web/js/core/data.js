@@ -212,12 +212,7 @@ function loadStats(){
     STATS = result;
     CHART.from = Number(STATS.range_from ?? CHART.from);
     CHART.to = Number(STATS.range_to ?? CHART.to);
-    const loaded = Object.values(STATS.loaded||{}).reduce((a,b)=>a+b,0);
-    document.getElementById('pillCost').textContent = (STATS.body_cost_total ?? 0).toFixed(2);
-    document.getElementById('pillLoaded').textContent = loaded;
-    updateChartControls();
-    drawPhysChart(document.getElementById('pillSpark'), false);
-    renderStatPop();
+    renderStats();   // 写完状态就交给它,顶栏那几块归它管
     if (VIEW === 'dash') renderDash();
   });
 }

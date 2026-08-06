@@ -21,6 +21,19 @@ function localDateInput(epochSecond){
   const date = new Date(epochSecond * 1000 - new Date(epochSecond * 1000).getTimezoneOffset() * 60000);
   return date.toISOString().slice(0,16);
 }
+/* STATS 派生的全部区域,一处写完:顶栏两个数字、迷你图、统计弹层、图表控件。
+   这些从前只在 loadStats 成功时更新,切服清空 STATS 时没有任何人重画 —— 顶栏一直挂着
+   上一个服的数字,统计弹层里还是上一个服的体,新服的统计请求要是失败就永远挂着。
+   顶栏和弹层在所有视图共享,所以这里不看 VIEW。 */
+function renderStats(){
+  document.getElementById('pillCost').textContent =
+    STATS ? (STATS.body_cost_total ?? 0).toFixed(2) : '--';
+  document.getElementById('pillLoaded').textContent =
+    STATS ? Object.values(STATS.loaded || {}).reduce((a, b) => a + b, 0) : '--';
+  updateChartControls();
+  drawPhysChart(document.getElementById('pillSpark'), false);
+  renderStatPop();
+}
 function updateChartControls(){
   const now = Math.floor(Date.now()/1000);
   const from = CHART.from || now - CHART.span;

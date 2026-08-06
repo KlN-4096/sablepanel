@@ -34,6 +34,7 @@ function setView(v, opts){
    从前这里挡着一句 if (!DATA) return —— 首屏加载失败时默认的总览页就是一片空白,
    用户只看到一闪而过的 toast,唯一的反应是继续刷新,把同样的压力再造一遍 */
 function renderAll(){
+  renderStats();   // 顶栏和统计弹层在所有视图共享,不属于任何一个视图分支
   if (VIEW === 'recycle') { renderRecycle(); return; }
   if (VIEW === 'jobs') { renderJobs(); return; }
   if (VIEW === 'dash') { renderDash(); return; }

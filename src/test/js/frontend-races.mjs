@@ -321,6 +321,38 @@ test('UI-03 切服后总览不得留着上一个服的图表和"最吃性能"', 
   await switching;
 });
 
+test('UI-03 切服后顶栏统计和统计弹层也要立刻清空', async () => {
+  // pillCost / pillLoaded / pillSpark / statPop / 图表控件从前只在 loadStats 成功时更新。
+  // switchServer 清了 STATS 却没人重画这些 —— 顶栏一直挂着上一个服的数字,
+  // 新服的统计请求要是失败,就一直挂到下一次成功为止
+  const slowStats = deferred();
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/stats')) {
+      return url.includes('server=B') ? slowStats.promise : jsonResponse({
+        t: [], phys: {}, phys_1m: {}, loaded: { 'minecraft:overworld': 3 }, body_cost_total: 9,
+        top_cost: [{ uuid: 'A_SERVER_BODY', name: 'A 的巨型体', cost: 9 }] });
+    }
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ self: 'A', servers: [{ id: 'A', self: true }, { id: 'B' }], running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; SERVERS = [{id:'A',self:true},{id:'B'}]; toast = () => {}");
+  await evalIn(sandbox, 'loadStats')();
+  assert.equal(evalIn(sandbox, "document.getElementById('pillCost').textContent"), '9.00');
+  assert.equal(evalIn(sandbox, "document.getElementById('pillLoaded').textContent"), 3);
+  assert.match(evalIn(sandbox, "document.getElementById('statPop').innerHTML"), /A_SERVER_BODY/);
+
+  evalIn(sandbox, 'switchServer')('B');   // B 的统计还在路上(而且可能永远不回来)
+  await tick();
+  assert.equal(evalIn(sandbox, "document.getElementById('pillCost').textContent"), '--',
+    '顶栏不能继续显示上一个服的开销');
+  assert.equal(evalIn(sandbox, "document.getElementById('pillLoaded').textContent"), '--');
+  assert.doesNotMatch(evalIn(sandbox, "document.getElementById('statPop').innerHTML"), /A_SERVER_BODY/,
+    '统计弹层同理');
+  slowStats.resolve(jsonResponse({ t: [], phys: {}, phys_1m: {}, loaded: {}, body_cost_total: 0, top_cost: [] }));
+});
+
 test('UI-03 切服清空作业 watch、忙碌定时器和日志页', async () => {
   const { sandbox, state } = setup();
   state.fetch = async (url) => {
