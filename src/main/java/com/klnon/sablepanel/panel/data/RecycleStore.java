@@ -59,6 +59,12 @@ public final class RecycleStore {
      * 足够让一页越过 32 MiB 的协议上限。
      */
     private static final long PAGE_BYTE_BUDGET = 2L << 20;
+    /**
+     * 循环跑完之后才追加的字段(file_count / disk_bytes / next_cursor / error)和两个数组的
+     * 括号键名。都是定长的小字段,与其逐个数标点,不如留一档余量 —— 那种"每个逗号几字节"的
+     * 账本正是前几轮反复出错的地方。
+     */
+    private static final long PAGE_SHELL_RESERVE = 512;
     /** 单页调色板条数上限,和 {@code BodyIndex} 同理:它是全表共享的,不封顶就随方块种类无限长 */
     private static final int MAX_PALETTE = 20_000;
     /** 摘要形态里名称截到这么长:摘要必须是固定尺寸的,否则它自己就是下一个漏洞 */
@@ -121,7 +127,6 @@ public final class RecycleStore {
     private long statsAt;
     /** 分页目录清单缓存,见 {@link #pageIndex} */
     private PageIndex index;
-    private long indexAt;
     private final Map<UUID, String> latestByUuid = new LinkedHashMap<>();
     private final Map<String, Set<UUID>> latestMembers = new LinkedHashMap<>();
     private final Set<String> pendingOldGroups = new LinkedHashSet<>();
@@ -383,7 +388,9 @@ public final class RecycleStore {
             PagePalette palette = new PagePalette();
             String nextCursor = "";
             boolean more = false;
-            long cost = 0;
+            // 外壳也占字节:上面那几个统计字段是真的会发出去的。从前只累计候选组和调色板,
+            // 于是"2 MiB 单页预算"其实是 2 MiB 加上一份没记账的外壳
+            long cost = JsonSize.of(out) + PAGE_SHELL_RESERVE;
             // 清单已按 id 降序排好,游标位置直接二分 —— 从头线性扫到游标的话,
             // 翻到第 N 页就要白扫前 N 页的全部条目
             for (Path directory : directories.subList(cursorOffset(directories, from), directories.size())) {
@@ -398,7 +405,7 @@ public final class RecycleStore {
                     // 量的是这一条真正会发出去的字节,连它新增的调色板条目一起算。
                     // 只看读取前的旧 cost 的话,小组先占了位,紧跟着的超大组照样整条进来
                     JsonObject candidate = toView(manifest, palette, true);
-                    long size = JsonSize.of(candidate) + palette.pendingBytes();
+                    long size = JsonSize.of(candidate) + palette.pendingBytes() + 1;   // +1 是数组分隔符
                     if (cost + size > PAGE_BYTE_BUDGET) {
                         palette.rollback();
                         // 前面已经有组了就把这条留到下一页 —— 它自己一页装得下
@@ -689,14 +696,20 @@ public final class RecycleStore {
      * 分页用的目录清单:已按 id 降序(即时间序)排好,并按版本分好组。
      * <p>
      * 每次翻页都重新 {@code Files.list} + 每组 4 次 stat + 全量排序,是 {@code O(总组数)} 的活,
-     * 而翻页本身只需要一页。列表只在提交/清理/恢复时才变,所以跟全盘统计共用同一套失效 + TTL。
+     * 而翻页本身只需要一页。
+     * <p>
+     * 只按写入失效,不带 TTL。目录集合只有本类会改,而且每个改动点都在 synchronized 里紧跟一次
+     * {@link #invalidateCaches}:提交(含版本事务里的 markOld)、彻底删除、恢复;两处恢复流程
+     * 只在构造函数里跑,那时缓存还没建。绑 30 秒 TTL 的话,一个没有任何写入的回收站也会因为
+     * "两次请求隔得久"就重扫全盘 —— 百万文件规模下 {@code view()} 是同步的,查看、恢复、清理
+     * 会一起卡住。全盘统计({@link #storageStatsCached})另算:它数的是磁盘文件,服主手动删目录时
+     * TTL 是唯一的自愈路径,而它过期只是显示数字偏一点。
      * <p>
      * ponytail: 内存缓存而不是持久索引。持久索引要跟每个写入点对账,漏一个就是永久错数据;
-     * 缓存最坏只是重扫一次。等到"一次全扫"本身都嫌慢,再上索引。
+     * 缓存最坏只是重扫一次。等到"进程内首次全扫"本身都嫌慢,再上索引。
      */
     private PageIndex pageIndex() throws IOException {
-        long now = System.currentTimeMillis();
-        if (this.index != null && now - this.indexAt < STATS_TTL_MS) return this.index;
+        if (this.index != null) return this.index;
         List<Path> latest = new ArrayList<>();
         List<Path> old = new ArrayList<>();
         for (Path directory : committedDirectories()) (isOldVersion(directory) ? old : latest).add(directory);
@@ -704,7 +717,6 @@ public final class RecycleStore {
         latest.sort(newestFirst);
         old.sort(newestFirst);
         this.index = new PageIndex(List.copyOf(latest), List.copyOf(old));
-        this.indexAt = now;
         return this.index;
     }
 
