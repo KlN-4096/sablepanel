@@ -325,7 +325,6 @@ button.favStar{border:none;background:none;padding:0 6px;font-size:16px;vertical
   font-size:12.5px;box-shadow:0 8px 24px rgba(0,0,0,.55);animation:tIn .2s cubic-bezier(.2,.8,.3,1);line-height:1.5;word-break:break-all}
 .toast.bad{border-color:var(--bad)}
 .toast.ok{border-color:var(--ok)}
-.toast.warn{border-color:var(--warn)}
 @keyframes tIn{from{transform:translateX(24px);opacity:0}to{transform:none;opacity:1}}
 #modalBack{position:fixed;inset:0;z-index:85;background:rgba(5,7,10,.7);display:none;align-items:center;
   justify-content:center;backdrop-filter:blur(2px)}
@@ -381,7 +380,6 @@ button.favStar{border:none;background:none;padding:0 6px;font-size:16px;vertical
 .copyMemberRow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:6px 2px;border-top:1px solid var(--line)}
 .copyMemberRow small{color:var(--dim);overflow-wrap:anywhere}.copyMemberRow span:last-child{white-space:nowrap;color:var(--dim)}
 .copyTable{width:100%;border-collapse:collapse;font-size:12px}
-.copyTable th{text-align:left;color:var(--dim);font-weight:500;border-bottom:1px solid var(--line2);padding:6px}
 .copyTable td{border-bottom:1px solid var(--line);padding:7px 6px;vertical-align:top}
 .copyTable .entry{font-family:var(--mono);font-size:10.5px;word-break:break-all}
 .copyPanelFoot{display:flex;align-items:center;gap:9px;padding:12px 18px;border-top:1px solid var(--line);flex:none}
