@@ -33,27 +33,38 @@ public final class BlockNames {
 
     /** @return [en, zh](zh 缺失时回退 en) */
     public static String[] of(String blockId) {
-        return CACHE.computeIfAbsent(blockId, BlockNames::resolve);
-    }
-
-    private static String[] resolve(String blockId) {
-        String descId = null;
-        try {
-            ResourceLocation rl = ResourceLocation.parse(blockId);
-            Block b = net.minecraft.core.registries.BuiltInRegistries.BLOCK.get(rl);
-            if (b != net.minecraft.world.level.block.Blocks.AIR || rl.getPath().equals("air")) {
-                descId = b.getDescriptionId();
-            }
-        } catch (Throwable ignored) {
-        }
+        String[] hit = CACHE.get(blockId);
+        if (hit != null) return hit;
+        String descId = descriptionId(blockId);
         if (descId == null) {
-            // 未注册的方块(理论上不会发生):用 path 兜底
+            // 未注册的方块:id 直接来自 NBT 的方块调色板,长度和取值都没有上限,
+            // 缓存它等于给一张静态 Map 开了个无界入口 —— 一份构造过或损坏的存档就能把
+            // 65,535 字符的键连同两份副本永久钉在堆里。注册表里的那些天然有上界(注册表大小)
             String pretty = prettify(blockId);
             return new String[]{pretty, pretty};
         }
         String en = Language.getInstance().getOrDefault(descId, prettify(blockId));
-        String zh = zhMap().getOrDefault(descId, en);
-        return new String[]{en, zh};
+        String[] names = {en, zhMap().getOrDefault(descId, en)};
+        CACHE.put(blockId, names);
+        return names;
+    }
+
+    /** 注册表里查不到就返回 null */
+    private static String descriptionId(String blockId) {
+        try {
+            ResourceLocation rl = ResourceLocation.parse(blockId);
+            Block b = net.minecraft.core.registries.BuiltInRegistries.BLOCK.get(rl);
+            if (b != net.minecraft.world.level.block.Blocks.AIR || rl.getPath().equals("air")) {
+                return b.getDescriptionId();
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /** 缓存条目数,只给测试判"未注册的 id 不进缓存" */
+    static int cachedCount() {
+        return CACHE.size();
     }
 
     private static String prettify(String id) {
