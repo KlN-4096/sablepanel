@@ -5,11 +5,9 @@ import com.klnon.sablepanel.panel.client.ClientPanelBootstrap;
 import com.klnon.sablepanel.panel.PanelRuntime;
 import com.mojang.logging.LogUtils;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
-import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.neoforge.event.ForgeSablePostPhysicsTickEvent;
 import dev.ryanhcode.sable.neoforge.event.ForgeSablePrePhysicsTickEvent;
 import dev.ryanhcode.sable.neoforge.event.ForgeSableSubLevelContainerReadyEvent;
-import net.minecraft.server.level.ServerLevel;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.api.distmarker.Dist;
@@ -20,16 +18,11 @@ import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.slf4j.Logger;
 
-import java.util.Map;
-
 @Mod(SablePanel.MOD_ID)
 public class SablePanel {
     public static final String MOD_ID = "sablepanel";
     public static final Logger LOGGER = LogUtils.getLogger();
 
-    /** stats 汇总输出周期(tick),1200 = 60s */
-    private static final int STATS_INTERVAL_TICKS = 1200;
-    private int tickCounter;
     private final PanelRuntime panelRuntime = new PanelRuntime();
 
     private long tickStartNanos;
@@ -87,54 +80,14 @@ public class SablePanel {
     }
 
     private void onPostPhysics(ForgeSablePostPhysicsTickEvent event) {
-        PhysicsTimer.end(event.getPhysicsSystem(), event.getTimeStep());
+        PhysicsTimer.end(event.getPhysicsSystem());
     }
 
     private void onServerTick(ServerTickEvent.Post event) {
-        this.tickCounter++;
         long durationNanos = this.panelRuntime.isRunning() && this.tickStartNanos != 0
                 ? System.nanoTime() - this.tickStartNanos : 0;
         this.tickStartNanos = 0;
         this.panelRuntime.onServerTick(event.getServer(), durationNanos);
-        if (this.tickCounter % STATS_INTERVAL_TICKS != 0) {
-            return;
-        }
-        try {
-            Map<String, PhysicsTimer.Snapshot> phys = PhysicsTimer.drain();
-            for (ServerLevel level : event.getServer().getAllLevels()) {
-                String dim = level.dimension().location().toString();
-                ServerSubLevelContainer container;
-                try {
-                    container = SubLevelContainer.getContainer(level);
-                } catch (Throwable t) {
-                    continue;
-                }
-                PhysicsTimer.Snapshot ps = phys.remove(dim);
-                if (container == null) {
-                    continue;
-                }
-                int loaded = container.getLoadedCount();
-                int occupancy = container.getOccupancy().cardinality();
-                // 无任何 sable 活动的维度不刷日志
-                if (loaded == 0 && occupancy == 0 && ps == null) {
-                    continue;
-                }
-                JsonObject o = new JsonObject();
-                o.addProperty("ev", "stats");
-                o.addProperty("dim", dim);
-                o.addProperty("loaded", loaded);
-                o.addProperty("occupancy", occupancy);
-                o.addProperty("tickets", container.getAllTickets().size());
-                if (ps != null) {
-                    o.addProperty("phys_steps", ps.count());
-                    o.addProperty("phys_avg_ms", ps.avgMs());
-                    o.addProperty("phys_max_ms", ps.maxMs());
-                }
-                EventLog.write(o);
-            }
-        } catch (Throwable t) {
-            LOGGER.warn("sablepanel: stats tick failed", t);
-        }
     }
 
     private void onRegisterCommands(RegisterCommandsEvent event) {

@@ -1,18 +1,16 @@
 package com.klnon.sablepanel;
 
+import com.klnon.sablepanel.panel.data.StatsCollector;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 
-import java.util.HashMap;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 物理 tick 计时:Pre/Post 事件按 physicsSystem 配对,按维度聚合。
+ * 物理 tick 计时:Pre/Post 事件按 physicsSystem 配对,喂给 StatsCollector 按维度聚合。
  * 事件可能来自非主线程,全部走并发安全结构。
  */
 public final class PhysicsTimer {
     private static final ConcurrentHashMap<SubLevelPhysicsSystem, Long> BEGIN = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<SubLevelPhysicsSystem, Stat> STATS = new ConcurrentHashMap<>();
 
     private PhysicsTimer() {
     }
@@ -24,78 +22,18 @@ public final class PhysicsTimer {
         }
     }
 
-    public static void end(SubLevelPhysicsSystem system, double timeStep) {
+    public static void end(SubLevelPhysicsSystem system) {
         try {
             Long t0 = BEGIN.remove(system);
             if (t0 == null) {
                 return;
             }
             long dur = System.nanoTime() - t0;
-            STATS.computeIfAbsent(system, k -> new Stat()).add(dur);
             try {
-                com.klnon.sablepanel.panel.data.StatsCollector.INSTANCE.physics(
-                        system.getLevel().dimension().location().toString(), dur);
+                StatsCollector.INSTANCE.physics(system.getLevel().dimension().location().toString(), dur);
             } catch (Throwable ignored) {
             }
         } catch (Throwable ignored) {
-        }
-    }
-
-    /** 取出并重置所有统计,key = 维度 id */
-    public static Map<String, Snapshot> drain() {
-        Map<String, Snapshot> result = new HashMap<>();
-        for (var it = STATS.entrySet().iterator(); it.hasNext(); ) {
-            Map.Entry<SubLevelPhysicsSystem, Stat> entry = it.next();
-            Snapshot snap = entry.getValue().drain();
-            if (snap.count() == 0) {
-                // 整个周期无活动:顺手移除,防止 map 囤积已废弃物理系统的强引用
-                it.remove();
-                continue;
-            }
-            String dim;
-            try {
-                dim = entry.getKey().getLevel().dimension().location().toString();
-            } catch (Throwable t) {
-                dim = "unknown@" + Integer.toHexString(System.identityHashCode(entry.getKey()));
-            }
-            result.merge(dim, snap, Snapshot::merge);
-        }
-        return result;
-    }
-
-    public record Snapshot(long count, long sumNanos, long maxNanos) {
-        public double avgMs() {
-            return this.count == 0 ? 0 : Math.round(this.sumNanos / (double) this.count / 1000.0) / 1000.0;
-        }
-
-        public double maxMs() {
-            return Math.round(this.maxNanos / 1000.0) / 1000.0;
-        }
-
-        static Snapshot merge(Snapshot a, Snapshot b) {
-            return new Snapshot(a.count + b.count, a.sumNanos + b.sumNanos, Math.max(a.maxNanos, b.maxNanos));
-        }
-    }
-
-    private static final class Stat {
-        private long count;
-        private long sumNanos;
-        private long maxNanos;
-
-        synchronized void add(long nanos) {
-            this.count++;
-            this.sumNanos += nanos;
-            if (nanos > this.maxNanos) {
-                this.maxNanos = nanos;
-            }
-        }
-
-        synchronized Snapshot drain() {
-            Snapshot snap = new Snapshot(this.count, this.sumNanos, this.maxNanos);
-            this.count = 0;
-            this.sumNanos = 0;
-            this.maxNanos = 0;
-            return snap;
         }
     }
 }
