@@ -43,22 +43,28 @@ public final class CopyVersionScanner {
                        List<DiskScanner.LiveLocation> pointers) {
     }
 
-    public record Version(String id, boolean complete, boolean active, List<Copy> copies,
+    public enum CurrentState {
+        KNOWN, UNKNOWN, MIXED
+    }
+
+    public record Version(String id, boolean complete, int activeMembers, List<Copy> copies,
                           List<Copy> redundant, List<Location> locations, Set<UUID> missingDependencies) {
+        public boolean active() {
+            return this.activeMembers > 0;
+        }
+
         public int blocks() {
             return this.copies.stream().mapToInt(Copy::blocks).sum();
         }
     }
 
     public record Scan(UUID target, Set<UUID> members, List<Version> versions,
-                       List<Copy> incomplete, String currentVersion) {
+                       List<Copy> incomplete, String currentVersion, CurrentState currentState, int activeMembers) {
     }
 
     public static Scan scan(Map<String, Path> dimensions, Map<UUID, List<DiskScanner.EntryMeta>> metadata,
-                            UUID target, String activeEntry, List<String> warnings) throws IOException {
-        List<Set<UUID>> groups = DiskScanner.selectedDependencyComponents(metadata, List.of(target));
-        Set<UUID> members = groups.isEmpty() ? Set.of(target) : groups.get(0);
-        if (members.size() > MAX_MEMBERS) throw new IOException("副本依赖组超过 " + MAX_MEMBERS + " 个成员");
+                            UUID target, Map<UUID, String> activeEntries, List<String> warnings) throws IOException {
+        Set<UUID> members = members(metadata, target);
 
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         for (UUID member : members) {
@@ -82,10 +88,19 @@ public final class CopyVersionScanner {
                         List.copyOf(pointers.getOrDefault(entry.key(), List.of()))));
             }
         }
-        return assemble(target, members, copies, activeEntry);
+        return assemble(target, members, copies, activeEntries);
     }
 
-    static Scan assemble(UUID target, Set<UUID> members, Collection<Copy> copies, String activeEntry) {
+    public static Set<UUID> members(Map<UUID, List<DiskScanner.EntryMeta>> metadata, UUID target)
+            throws IOException {
+        List<Set<UUID>> groups = DiskScanner.selectedDependencyComponents(metadata, List.of(target));
+        Set<UUID> members = groups.isEmpty() ? Set.of(target) : groups.get(0);
+        if (members.size() > MAX_MEMBERS) throw new IOException("副本依赖组超过 " + MAX_MEMBERS + " 个成员");
+        return Set.copyOf(members);
+    }
+
+    public static Scan assemble(UUID target, Set<UUID> members, Collection<Copy> copies,
+                                Map<UUID, String> activeEntries) {
         Map<Location, LinkedHashMap<DiskScanner.EntryKey, Copy>> byLocation = new LinkedHashMap<>();
         for (Copy copy : copies) {
             for (DiskScanner.LiveLocation pointer : copy.pointers()) {
@@ -96,11 +111,11 @@ public final class CopyVersionScanner {
 
         Map<String, MutableVersion> versions = new LinkedHashMap<>();
         for (Map.Entry<Location, LinkedHashMap<DiskScanner.EntryKey, Copy>> entry : byLocation.entrySet()) {
-            Version candidate = atLocation(target, entry.getKey(), entry.getValue().values(), activeEntry);
+            Version candidate = atLocation(target, entry.getKey(), entry.getValue().values(), activeEntries);
             if (candidate == null) continue;
             MutableVersion known = versions.get(candidate.id());
             if (known == null) versions.put(candidate.id(), new MutableVersion(candidate));
-            else known.locations.add(entry.getKey());
+            else known.merge(candidate, entry.getKey());
         }
 
         List<Version> result = versions.values().stream().map(MutableVersion::freeze)
@@ -116,13 +131,13 @@ public final class CopyVersionScanner {
         }
         List<Copy> incomplete = copies.stream().filter(copy -> !assigned.contains(copy.key()))
                 .sorted(Comparator.comparing(copy -> copy.key().id())).toList();
-        String current = result.stream().filter(version -> version.active() && version.complete())
-                .map(Version::id).findFirst().orElse(null);
-        return new Scan(target, Set.copyOf(members), result, incomplete, current);
+        Current current = resolveCurrent(result, activeEntries);
+        return new Scan(target, Set.copyOf(members), result, incomplete, current.version(), current.state(),
+                activeEntries.size());
     }
 
     private static Version atLocation(UUID target, Location location, Collection<Copy> locationCopies,
-                                      String activeEntry) {
+                                      Map<UUID, String> activeEntries) {
         Map<UUID, List<Copy>> byUuid = new LinkedHashMap<>();
         for (Copy copy : locationCopies) byUuid.computeIfAbsent(copy.uuid(), ignored -> new ArrayList<>()).add(copy);
         if (!byUuid.containsKey(target)) return null;
@@ -152,10 +167,14 @@ public final class CopyVersionScanner {
         List<Copy> redundant = new ArrayList<>();
         Set<UUID> missing = new LinkedHashSet<>();
         boolean duplicateMember = false;
+        int activeMembers = 0;
         for (UUID uuid : connected) {
             List<Copy> values = new ArrayList<>(byUuid.getOrDefault(uuid, List.of()));
-            values.sort(Comparator.comparing((Copy copy) -> !copy.key().id().equals(activeEntry))
-                    .thenComparing(copy -> copy.key().id()));
+            String activeEntry = activeEntries.get(uuid);
+            values.sort(Comparator.comparing(copy -> copy.key().id()));
+            if (activeEntry != null && values.stream().anyMatch(copy -> copy.key().id().equals(activeEntry))) {
+                activeMembers++;
+            }
             if (values.size() > 1) {
                 CompoundTag first = values.get(0).tag();
                 if (values.stream().allMatch(copy -> copy.tag().equals(first))) {
@@ -176,11 +195,39 @@ public final class CopyVersionScanner {
         }
         selected.sort(Comparator.comparing(copy -> copy.key().id()));
         redundant.sort(Comparator.comparing(copy -> copy.key().id()));
-        boolean active = activeEntry != null
-                && java.util.stream.Stream.concat(selected.stream(), redundant.stream())
-                .anyMatch(copy -> copy.key().id().equals(activeEntry));
-        return new Version(versionId(selected), !duplicateMember && missing.isEmpty(), active,
+        return new Version(versionId(selected), !duplicateMember && missing.isEmpty(), activeMembers,
                 List.copyOf(selected), List.copyOf(redundant), List.of(location), Set.copyOf(missing));
+    }
+
+    private static Current resolveCurrent(List<Version> versions, Map<UUID, String> activeEntries) {
+        if (activeEntries.isEmpty()) return new Current(null, CurrentState.UNKNOWN);
+        List<Version> complete = versions.stream().filter(Version::complete).toList();
+        Set<String> compatible = null;
+        boolean unmatched = false;
+        for (Map.Entry<UUID, String> evidence : activeEntries.entrySet()) {
+            Set<String> matching = complete.stream()
+                    .filter(version -> containsEntry(version, evidence.getKey(), evidence.getValue()))
+                    .map(Version::id).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+            if (matching.isEmpty()) {
+                unmatched = true;
+                continue;
+            }
+            if (compatible == null) compatible = matching;
+            else compatible.retainAll(matching);
+        }
+        if (compatible != null && compatible.isEmpty()) return new Current(null, CurrentState.MIXED);
+        if (!unmatched && compatible != null && compatible.size() == 1) {
+            return new Current(compatible.iterator().next(), CurrentState.KNOWN);
+        }
+        return new Current(null, CurrentState.UNKNOWN);
+    }
+
+    private static boolean containsEntry(Version version, UUID uuid, String entryId) {
+        return java.util.stream.Stream.concat(version.copies().stream(), version.redundant().stream())
+                .anyMatch(copy -> copy.uuid().equals(uuid) && copy.key().id().equals(entryId));
+    }
+
+    private record Current(String version, CurrentState state) {
     }
 
     private static Set<UUID> dependencies(CompoundTag tag) {
@@ -219,15 +266,22 @@ public final class CopyVersionScanner {
     private static final class MutableVersion {
         private final Version version;
         private final Set<Location> locations = new LinkedHashSet<>();
+        private int activeMembers;
 
         private MutableVersion(Version version) {
             this.version = version;
             this.locations.addAll(version.locations());
+            this.activeMembers = version.activeMembers();
+        }
+
+        private void merge(Version candidate, Location location) {
+            this.locations.add(location);
+            this.activeMembers = Math.max(this.activeMembers, candidate.activeMembers());
         }
 
         private Version freeze() {
             List<Location> ordered = this.locations.stream().sorted().toList();
-            return new Version(this.version.id(), this.version.complete(), this.version.active(),
+            return new Version(this.version.id(), this.version.complete(), this.activeMembers,
                     this.version.copies(), this.version.redundant(), ordered, this.version.missingDependencies());
         }
     }

@@ -106,11 +106,27 @@ public final class OpsService {
                                   CopyCandidate keep, boolean identical) {
     }
 
+    record CopyResolutionPlan(CopyVersionScanner.Version selected,
+                              CopyVersionScanner.Version rollback) {
+    }
+
+    private record PreparedCopyResolution(DeleteComponent component, CopyVersionScanner.Scan scan,
+                                          Map<UUID, RecycleStore.OperationalState> states) {
+    }
+
+    record CopySnapshot(Set<UUID> members,
+                        Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>> entries,
+                        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers,
+                        Map<UUID, String> active,
+                        Map<UUID, RecycleStore.OperationalState> states) {
+    }
+
     private static final class DeleteComponent {
         private final Set<UUID> targets = new LinkedHashSet<>();
         private final Map<UUID, List<DeleteCopy>> copies = new LinkedHashMap<>();
         private final Map<UUID, DeleteCopy> canonical = new LinkedHashMap<>();
         private final Map<UUID, RecycleStore.OperationalState> states = new LinkedHashMap<>();
+        private Map<UUID, String> activeSnapshot;
         private RecycleStore.Stage stage;
         private boolean stateCleared;
 
@@ -450,16 +466,26 @@ public final class OpsService {
     private JsonObject readOperationalMetadata(Set<UUID> targets) throws Exception {
         return onMain(() -> {
             JsonObject out = new JsonObject();
+            Map<UUID, String> activeEntries = activeEntriesOnMain(targets);
             for (UUID uuid : targets) {
                 JsonObject state = new JsonObject();
                 state.addProperty("paused", PauseService.isPaused(uuid));
                 state.addProperty("forced", ForceLoadService.isForcedOnMain(this.server, uuid));
-                String active = activePointerEntryId(uuid);
+                String active = activeEntries.get(uuid);
                 if (active != null) state.addProperty("active", active);
                 out.add(uuid.toString(), state);
             }
             return out;
         });
+    }
+
+    private Map<UUID, String> activeEntriesOnMain(Collection<UUID> targets) {
+        Map<UUID, String> active = new LinkedHashMap<>();
+        for (UUID uuid : targets) {
+            String entry = activePointerEntryId(uuid);
+            if (entry != null) active.put(uuid, entry);
+        }
+        return active;
     }
 
     /** 只为指定成员重读完整 NBT；重读时验 UUID，避免准备期间槽位被 Sable 复用。 */
@@ -524,6 +550,23 @@ public final class OpsService {
         return result.get("flushed").getAsInt() > 0;
     }
 
+    private void flushLoadedTargets(Collection<UUID> targets) throws Exception {
+        onMainUntilComplete(() -> {
+            Set<ServerLevel> touched = new LinkedHashSet<>();
+            for (UUID uuid : targets) {
+                ServerSubLevel body = resolveLoaded(uuid);
+                if (body != null) touched.add(body.getLevel());
+            }
+            for (ServerLevel level : touched) {
+                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+                if (container == null) throw new IllegalStateException("物理体容器不存在");
+                container.getHoldingChunkMap().saveAll();
+            }
+            return new JsonObject();
+        });
+        DiskScanner.invalidateCache();
+    }
+
     private static UUID tagUuid(CompoundTag tag) {
         try {
             return tag.getUUID("uuid");
@@ -566,7 +609,8 @@ public final class OpsService {
     }
 
     private void processDeleteComponent(DeleteComponent component, Map<UUID, DeleteStatus> statuses,
-                                        DeleteFlush flush) {
+                                        DeleteFlush flush) throws Exception {
+        if (component.activeSnapshot != null) validatePreparedSnapshotOnMain(component);
         for (UUID uuid : component.targets) {
             for (DeleteCopy copy : component.copies.getOrDefault(uuid, List.of())) {
                 statuses.get(uuid).entryKeys.add(copy.key());
@@ -589,6 +633,97 @@ public final class OpsService {
         component.stateCleared = true;
         clearOperationalStateOnMain(component.targets);
         removeTargetCopies(new DeleteExecution(component, statuses, flush));
+    }
+
+    private void validatePreparedSnapshotOnMain(DeleteComponent component) throws Exception {
+        DiskScanner.invalidateCache();
+        List<String> warnings = new ArrayList<>();
+        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
+        Map<UUID, List<DiskScanner.EntryMeta>> metadata =
+                DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        if (!warnings.isEmpty()) {
+            throw new IOException("删除前存储校验失败: " + String.join("; ", warnings));
+        }
+        UUID seed = component.targets.iterator().next();
+        Set<UUID> currentMembers = CopyVersionScanner.members(metadata, seed);
+        Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>> expectedEntries = new LinkedHashMap<>();
+        Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>> currentEntries = new LinkedHashMap<>();
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> expectedPointers = new LinkedHashMap<>();
+        Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
+        for (UUID uuid : component.targets) {
+            Map<DiskScanner.EntryKey, CompoundTag> expected = new LinkedHashMap<>();
+            for (DeleteCopy copy : component.copies.getOrDefault(uuid, List.of())) {
+                expected.put(copy.key(), copy.tag());
+                expectedPointers.put(copy.key(), copy.pointers());
+                keys.add(copy.key());
+            }
+            expectedEntries.put(uuid, expected);
+            Map<DiskScanner.EntryKey, CompoundTag> current = new LinkedHashMap<>();
+            for (DiskScanner.EntryMeta entry : metadata.getOrDefault(uuid, List.of())) {
+                current.put(entry.key(), readVerifiedTag(dimensions, uuid, entry.key()));
+                keys.add(entry.key());
+            }
+            currentEntries.put(uuid, current);
+        }
+
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> currentPointers =
+                DiskScanner.locatePointersStrict(dimensions, keys, warnings);
+        if (!warnings.isEmpty()) {
+            throw new IOException("删除前指针校验失败: " + String.join("; ", warnings));
+        }
+        Map<UUID, RecycleStore.OperationalState> currentStates = new LinkedHashMap<>();
+        for (UUID uuid : component.targets) {
+            currentStates.put(uuid, new RecycleStore.OperationalState(
+                    PauseService.isPaused(uuid), ForceLoadService.isForcedOnMain(this.server, uuid)));
+        }
+        requireUnchangedCopySnapshot(
+                new CopySnapshot(component.targets, expectedEntries, expectedPointers,
+                        component.activeSnapshot, component.states),
+                new CopySnapshot(currentMembers, currentEntries, currentPointers,
+                        activeEntriesOnMain(component.targets), currentStates));
+    }
+
+    static void requireUnchangedCopySnapshot(CopySnapshot expected, CopySnapshot current) {
+        if (!expected.members().equals(current.members())) {
+            throw new IllegalStateException("副本依赖组在确认期间发生变化，请重新扫描");
+        }
+        if (!expected.entries().keySet().equals(current.entries().keySet())) {
+            throw new IllegalStateException("副本成员在确认期间发生变化，请重新扫描");
+        }
+        for (UUID uuid : expected.entries().keySet()) {
+            Map<DiskScanner.EntryKey, CompoundTag> expectedEntries = expected.entries().get(uuid);
+            Map<DiskScanner.EntryKey, CompoundTag> currentEntries = current.entries().get(uuid);
+            if (!expectedEntries.keySet().equals(currentEntries.keySet())) {
+                throw new IllegalStateException("物理结构 " + uuid + " 的副本槽位在确认期间发生变化，请重新扫描");
+            }
+            for (Map.Entry<DiskScanner.EntryKey, CompoundTag> entry : expectedEntries.entrySet()) {
+                if (!entry.getValue().equals(currentEntries.get(entry.getKey()))) {
+                    throw new IllegalStateException("条目 " + entry.getKey().id() + " 在确认期间发生变化，请重新扫描");
+                }
+                List<DiskScanner.LiveLocation> expectedValues =
+                        expected.pointers().getOrDefault(entry.getKey(), List.of());
+                List<DiskScanner.LiveLocation> currentValues =
+                        current.pointers().getOrDefault(entry.getKey(), List.of());
+                if (!orderedPointers(expectedValues).equals(orderedPointers(currentValues))) {
+                    throw new IllegalStateException("条目 " + entry.getKey().id()
+                            + " 的 holding 指针在确认期间发生变化，请重新扫描");
+                }
+            }
+        }
+        if (!expected.active().equals(current.active())) {
+            throw new IllegalStateException("当前运行版本在确认期间发生变化，请重新扫描");
+        }
+        if (!expected.states().equals(current.states())) {
+            throw new IllegalStateException("运行状态在确认期间发生变化，请重新扫描");
+        }
+    }
+
+    private static List<DiskScanner.LiveLocation> orderedPointers(
+            Collection<DiskScanner.LiveLocation> pointers) {
+        return pointers.stream().sorted(Comparator
+                .comparing((DiskScanner.LiveLocation pointer) -> pointer.key().id())
+                .thenComparingInt(DiskScanner.LiveLocation::chunkX)
+                .thenComparingInt(DiskScanner.LiveLocation::chunkZ)).toList();
     }
 
     private void clearOperationalStateOnMain(Collection<UUID> targets) {
@@ -772,6 +907,11 @@ public final class OpsService {
     }
 
     private void verifyDeletedTargets(Map<UUID, DeleteStatus> statuses, List<String> warnings) {
+        verifyDeletedTargets(statuses, warnings, true);
+    }
+
+    private void verifyDeletedTargets(Map<UUID, DeleteStatus> statuses, List<String> warnings,
+                                      boolean triggerRescan) {
         DiskVerification disk;
         JsonObject runtime;
         try {
@@ -780,7 +920,7 @@ public final class OpsService {
         } catch (Exception error) {
             String message = "删除后验收失败: " + messageOf(error);
             for (DeleteStatus status : statuses.values()) status.fail(message);
-            this.rescan.run();
+            if (triggerRescan) this.rescan.run();
             return;
         }
 
@@ -804,7 +944,7 @@ public final class OpsService {
             if (!status.removed && !status.alreadyAbsent) status.fail("未执行删除");
             status.ok = status.errors.isEmpty();
         }
-        this.rescan.run();
+        if (triggerRescan) this.rescan.run();
     }
 
     private DiskVerification scanRemainingEntries(Map<UUID, DeleteStatus> statuses, List<String> warnings)
@@ -1428,10 +1568,9 @@ public final class OpsService {
     private CopyVersionScanner.Scan inspectVersionState(UUID uuid, List<String> warnings) throws Exception {
         Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
         Map<UUID, List<DiskScanner.EntryMeta>> metadata = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
-        JsonObject runtime = readOperationalMetadata(Set.of(uuid));
-        JsonObject state = runtime.getAsJsonObject(uuid.toString());
-        String active = state.has("active") ? state.get("active").getAsString() : null;
-        return CopyVersionScanner.scan(dimensions, metadata, uuid, active, warnings);
+        Set<UUID> members = CopyVersionScanner.members(metadata, uuid);
+        JsonObject runtime = readOperationalMetadata(members);
+        return CopyVersionScanner.scan(dimensions, metadata, uuid, activeEntries(runtime, members), warnings);
     }
 
     private static CopyVersionScanner.Version requireVersion(CopyVersionScanner.Scan scan, String versionId,
@@ -1443,10 +1582,32 @@ public final class OpsService {
         return version;
     }
 
+    static CopyResolutionPlan requireCopyResolution(CopyVersionScanner.Scan scan, String versionId) {
+        if (scan.currentState() != CopyVersionScanner.CurrentState.KNOWN || scan.currentVersion() == null) {
+            String reason = scan.currentState() == CopyVersionScanner.CurrentState.MIXED
+                    ? "运行态证据横跨多个副本版本" : "没有足够运行态证据判定当前版本";
+            throw new IllegalStateException(reason + "，未执行副本处理");
+        }
+        CopyVersionScanner.Version selected = requireVersion(scan, versionId, true);
+        CopyVersionScanner.Version rollback = requireVersion(scan, scan.currentVersion(), true);
+        return new CopyResolutionPlan(selected, rollback);
+    }
+
+    private static Map<UUID, String> activeEntries(JsonObject runtime, Collection<UUID> members) {
+        Map<UUID, String> active = new LinkedHashMap<>();
+        for (UUID member : members) {
+            JsonObject state = runtime.getAsJsonObject(member.toString());
+            if (state != null && state.has("active")) active.put(member, state.get("active").getAsString());
+        }
+        return active;
+    }
+
     private JsonObject copyVersionsJson(CopyVersionScanner.Scan scan) {
         JsonObject out = new JsonObject();
         out.addProperty("uuid", scan.target().toString());
         if (scan.currentVersion() != null) out.addProperty("current_version", scan.currentVersion());
+        out.addProperty("current_state", scan.currentState().name().toLowerCase(java.util.Locale.ROOT));
+        out.addProperty("active_members", scan.activeMembers());
         out.addProperty("members", scan.members().size());
         JsonArray versions = new JsonArray();
         for (CopyVersionScanner.Version version : scan.versions()) {
@@ -1454,6 +1615,7 @@ public final class OpsService {
             item.addProperty("id", version.id());
             item.addProperty("complete", version.complete());
             item.addProperty("active", version.active());
+            item.addProperty("active_members", version.activeMembers());
             item.addProperty("current", version.id().equals(scan.currentVersion()));
             item.addProperty("members", version.copies().size());
             item.addProperty("blocks", version.blocks());
@@ -1494,23 +1656,64 @@ public final class OpsService {
         item.addProperty("redundant", redundant);
         DiskScanner.DiskEntry summary = DiskScanner.summarize(copy.key(), copy.tag());
         if (summary != null) {
+            if (summary.name() != null && !summary.name().isBlank()) item.addProperty("name", summary.name());
             item.add("pos", numberArray(summary.pos()));
             item.add("size", numberArray(summary.size()));
         }
         return item;
     }
 
+    private PreparedCopyResolution prepareCopyResolution(UUID uuid, List<String> warnings) throws Exception {
+        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
+        Map<UUID, List<DiskScanner.EntryMeta>> metadata =
+                DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        Set<UUID> members = CopyVersionScanner.members(metadata, uuid);
+        flushLoadedTargets(members);
+        dimensions = DiskScanner.sublevelDirsStrict(this.server);
+        metadata = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        members = CopyVersionScanner.members(metadata, uuid);
+        DeleteComponent component = prepareExactDeleteComponent(members, warnings);
+        if (!component.targets.equals(members)) {
+            throw new IllegalStateException("副本依赖组缺少可读取的磁盘条目，未执行副本处理");
+        }
+
+        JsonObject runtime = readOperationalMetadata(members);
+        Map<UUID, String> active = activeEntries(runtime, members);
+        Map<UUID, RecycleStore.OperationalState> states = operationalStates(runtime, members);
+        component.activeSnapshot = Map.copyOf(active);
+        component.states.putAll(states);
+
+        List<CopyVersionScanner.Copy> copies = new ArrayList<>();
+        for (UUID member : members) {
+            List<DeleteCopy> prepared = component.copies.getOrDefault(member, List.of());
+            String activeEntry = active.get(member);
+            component.canonical.put(member, prepared.stream().min(Comparator
+                    .comparing((DeleteCopy copy) -> !copy.key().id().equals(activeEntry))
+                    .thenComparing(copy -> copy.pointers().isEmpty())
+                    .thenComparing(copy -> copy.key().id())).orElseThrow());
+            for (DeleteCopy copy : prepared) {
+                copies.add(new CopyVersionScanner.Copy(member, copy.key(), copy.tag(), copy.blocks(),
+                        copy.pointers()));
+            }
+        }
+        CopyVersionScanner.Scan scan = CopyVersionScanner.assemble(uuid, members, copies, active);
+        return new PreparedCopyResolution(component, scan, states);
+    }
+
     public synchronized JsonObject resolveCopyVersion(UUID uuid, String versionId) throws Exception {
         List<String> warnings = new ArrayList<>();
-        CopyVersionScanner.Scan scan = inspectVersionState(uuid, warnings);
-        CopyVersionScanner.Version selected = requireVersion(scan, versionId, true);
-        CopyVersionScanner.Version current = scan.currentVersion() == null ? null
-                : requireVersion(scan, scan.currentVersion(), true);
-        CopyVersionScanner.Version rollbackVersion = current == null ? selected : current;
-        Map<UUID, RecycleStore.OperationalState> states = operationalStates(scan.members());
+        PreparedCopyResolution prepared = prepareCopyResolution(uuid, warnings);
+        CopyVersionScanner.Scan scan = prepared.scan();
+        CopyResolutionPlan plan = requireCopyResolution(scan, versionId);
+        CopyVersionScanner.Version selected = plan.selected();
+        CopyVersionScanner.Version rollbackVersion = plan.rollback();
+        DeleteComponent component = prepared.component();
+        Map<UUID, RecycleStore.OperationalState> states = prepared.states();
         Map<String, RecycleStore.Stage> stages = new LinkedHashMap<>();
         Map<String, RecycleStore.Stage> incompleteStages = new LinkedHashMap<>();
-        boolean changed = false;
+        Map<UUID, DeleteStatus> statuses = new LinkedHashMap<>();
+        for (UUID target : component.targets) statuses.put(target, new DeleteStatus(target));
+        JsonObject out;
         try {
             for (CopyVersionScanner.Version version : scan.versions()) {
                 if (!version.complete()) continue;
@@ -1523,12 +1726,8 @@ public final class OpsService {
                         states, "incomplete"));
             }
 
-            DeleteComponent component = prepareExactDeleteComponent(scan.members(), warnings);
-            Map<UUID, DeleteStatus> statuses = new LinkedHashMap<>();
-            for (UUID target : component.targets) statuses.put(target, new DeleteStatus(target));
-            changed = true;
             executeDeleteComponents(List.of(component), statuses);
-            verifyDeletedTargets(statuses, warnings);
+            verifyDeletedTargets(statuses, warnings, false);
             List<String> failures = statuses.values().stream().filter(status -> !status.ok)
                     .map(status -> status.uuid + ": " + String.join("; ", status.errors)).toList();
             if (!failures.isEmpty()) throw new IllegalStateException("副本切换清理失败: " + String.join(" | ", failures));
@@ -1547,20 +1746,15 @@ public final class OpsService {
                 this.recycle.commitOld(stages.get(rollbackVersion.id()));
             }
             this.recycle.discard(stages.get(selected.id()));
-            JsonObject detail = new JsonObject();
-            detail.addProperty("version", selected.id());
-            detail.addProperty("archived", Math.max(0, stages.size() - 1));
-            audit("resolve_copies", uuid, null, detail.toString());
-            this.rescan.run();
-            JsonObject out = new JsonObject();
+            out = new JsonObject();
             out.addProperty("ok", true);
             out.addProperty("version", selected.id());
             out.addProperty("archived", Math.max(0, stages.size() - 1));
             out.addProperty("quarantined", incompleteStages.size());
             out.addProperty("removed_redundant", selected.redundant().size());
-            attachWarnings(out, warnings);
-            return out;
         } catch (Exception error) {
+            boolean changed = component.stateCleared
+                    || statuses.values().stream().anyMatch(status -> status.removed);
             if (!changed) {
                 for (RecycleStore.Stage stage : stages.values()) this.recycle.discard(stage);
                 for (RecycleStore.Stage stage : incompleteStages.values()) this.recycle.discard(stage);
@@ -1568,8 +1762,10 @@ public final class OpsService {
             }
             RecycleStore.Stage rollback = stages.get(rollbackVersion.id());
             try {
-                restoreGroupData(this.recycle.loadStage(rollback), true, warnings);
-                this.recycle.discard(rollback);
+                RecycleStore.RestoreGroup rollbackGroup = rollback.committed()
+                        ? this.recycle.loadGroup(rollback.id()) : this.recycle.loadStage(rollback);
+                restoreGroupData(rollbackGroup, true, warnings);
+                if (!rollback.committed()) this.recycle.discard(rollback);
                 for (Map.Entry<String, RecycleStore.Stage> entry : stages.entrySet()) {
                     if (entry.getKey().equals(rollbackVersion.id()) || entry.getValue().committed()) continue;
                     try {
@@ -1596,6 +1792,24 @@ public final class OpsService {
             }
             throw error;
         }
+
+        JsonObject detail = new JsonObject();
+        detail.addProperty("version", selected.id());
+        detail.addProperty("archived", Math.max(0, stages.size() - 1));
+        try {
+            audit("resolve_copies", uuid, null, detail.toString());
+        } catch (Throwable error) {
+            warnings.add("副本处理已完成，但审计日志写入失败: " + messageOf(error));
+            SablePanel.LOGGER.warn("sablepanel: copy resolution audit failed after commit", error);
+        }
+        try {
+            this.rescan.run();
+        } catch (Throwable error) {
+            warnings.add("副本处理已完成，但磁盘索引重扫触发失败: " + messageOf(error));
+            SablePanel.LOGGER.warn("sablepanel: copy resolution rescan failed after commit", error);
+        }
+        attachWarnings(out, warnings);
+        return out;
     }
 
     public synchronized JsonObject quarantineIncompleteCopies(UUID uuid) throws Exception {
@@ -1642,7 +1856,11 @@ public final class OpsService {
     }
 
     private Map<UUID, RecycleStore.OperationalState> operationalStates(Set<UUID> targets) throws Exception {
-        JsonObject metadata = readOperationalMetadata(targets);
+        return operationalStates(readOperationalMetadata(targets), targets);
+    }
+
+    private static Map<UUID, RecycleStore.OperationalState> operationalStates(
+            JsonObject metadata, Collection<UUID> targets) {
         Map<UUID, RecycleStore.OperationalState> states = new LinkedHashMap<>();
         for (UUID uuid : targets) {
             JsonObject state = metadata.getAsJsonObject(uuid.toString());
