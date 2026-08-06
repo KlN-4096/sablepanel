@@ -21,7 +21,9 @@ function toggleSrvPop(){
 /* 关掉属于当前服务器的弹层。必须在改 CURSRV 之前调:closeConsistency 会按
    consistencyDismissKey() 记"已读",而那个键是按服务器隔离的 —— 改完再关就记到新服头上了 */
 function closeServerModals(){
-  closeDedupe();
+  // 只在真的开着时关。closeDedupe 会把预览恢复成 SEL 的 mesh —— 弹层没开时白调一次,
+  // 等于对着马上要作废的旧服再发一个 mesh 请求
+  if (document.getElementById('copyBack').style.display==='flex') closeDedupe(false);
   if (document.getElementById('consistencyBack').style.display==='flex') closeConsistency();
 }
 /* 服务器上下文归零。切服和断开远端共用 —— 两个入口各自手写一份的话总有一份漏:
@@ -37,8 +39,15 @@ function resetServerContext(){
   JOBS = null; JOBS_ERROR = ''; jobsFile = ''; jobsExpanded.clear();
   CONSISTENCY = null; CONSISTENCY_POLL_GEN++;   // 作废还在等新报告的那个循环
   // 换了一整套数据,旧的一律作废
-  DATA = STATS = RECYCLE = null; SEL = SELG = RSEL = RSELG = MESH_DATA = MESH_UUID = MESH_SOURCE = null;
+  DATA = STATS = RECYCLE = null; SEL = SELG = RSEL = RSELG = null;
   BODIES_ERROR = RECYCLE_ERROR = '';   // 旧服的失败提示不能挂在新服界面上
+  // 3D 预览也是服务器级的:只把 MESH_* 置空的话,场景里的几何体还在(GPU 资源不释放),
+  // 全屏层还开着并显示旧服的体名,pvInfo 还停在上一次的文字
+  if (fsMode) closePreviewFs();
+  disposeMesh();
+  MESH_DATA = MESH_UUID = MESH_SOURCE = null;
+  hideTip();
+  document.getElementById('pvInfo').textContent = '';
   CLONE_SETS = new Map();
   // from/to 也要清:updateChartControls 优先用非零区间,不清的话页面写着"实时 5 分钟",
   // 日期输入框里还是上一个服的自定义区间

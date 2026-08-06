@@ -288,6 +288,42 @@ test('UI-03 切服后旧服的 recycle/jobs 慢响应都不落地', async () => 
   assert.equal(evalIn(sandbox, 'CURSRV'), '');
 });
 
+test('UI-03 切服要收掉 3D 预览:关全屏、释放网格、不再请求旧服的 mesh', async () => {
+  // reset 从前只把 MESH_* 置空:几何体还在场景里(GPU 资源不释放),全屏层还开着并显示
+  // 旧服的体名,pvInfo 还停在上一次的文字。closeServerModals 还会无条件调 closeDedupe,
+  // 那个函数末尾 `if (SEL) loadMesh(SEL.uuid)` —— 弹层根本没开也白发一次旧服的 mesh 请求
+  let meshHits = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.includes('/mesh')) { meshHits++; return jsonResponse({ shell: 0, total: 0, voxels: [], palette: [] }); }
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ self: 'A', servers: [{ id: 'A', self: true }, { id: 'B' }], running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; VIEW = 'bodies'; SERVERS = [{id:'A',self:true},{id:'B'}]; toast = () => {}");
+  // A 服:选了一个体,开着全屏
+  evalIn(sandbox, `
+    renderer = { domElement: {} };
+    SEL = { uuid: 'u-old', name: 'OLD_FS', blocks: 1, dim: 'minecraft:overworld' };
+    MESH_DATA = {}; MESH_UUID = 'u-old'; MESH_SOURCE = 'body';
+    fsMode = true;
+    document.getElementById('fsOverlay').style.display = 'block';
+    document.getElementById('fsName').textContent = 'OLD_FS';
+    document.getElementById('pvInfo').textContent = '加载预览…';
+    __disposed = 0; disposeMesh = () => { __disposed++; };
+  `);
+  meshHits = 0;
+
+  const switching = evalIn(sandbox, 'switchServer')('B');
+  assert.equal(meshHits, 0, '切服过程中不该再对旧服发 mesh 请求');
+  assert.equal(evalIn(sandbox, 'fsMode'), false, '全屏必须关掉');
+  assert.equal(evalIn(sandbox, "document.getElementById('fsOverlay').style.display"), 'none');
+  assert.ok(evalIn(sandbox, '__disposed') > 0, '网格要真的释放,不能只把 MESH_* 置空');
+  assert.equal(evalIn(sandbox, 'MESH_UUID'), null);
+  assert.equal(evalIn(sandbox, "document.getElementById('pvInfo').textContent"), '');
+  await switching;
+});
+
 test('UI-03 切服后列表元数据和回收站配置不得留着上一个服的', async () => {
   // 这些区域从前只有加载成功那条路写:维度筛选、方块清单、扫描信息、页签、工具条,
   // 以及回收站的上限输入框/磁盘用量/维度。切服后全都留着 A 的内容 ——

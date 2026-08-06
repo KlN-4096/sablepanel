@@ -96,7 +96,9 @@ function selectCopyVersion(versionId){
     target?.name || SEL?.name || COPY_UUID.slice(0,8));
   loadCopyVersionMesh(COPY_UUID, versionId);
 }
-function closeDedupe(){
+/* restorePreview=false 用于切服/断开:那时旧服的 SEL 马上就要作废,再去拉一次它的
+   mesh 是白跑一趟旧服,而且会把 pvInfo 写成"加载预览…"挂在那儿 */
+function closeDedupe(restorePreview = true){
   document.getElementById('copyBack').style.display = 'none';
   const preview = document.getElementById('previewWrap');
   const host = document.getElementById('bodyPreviewHost');
@@ -106,7 +108,7 @@ function closeDedupe(){
   document.getElementById('copyPreviewNote').textContent = '';
   document.getElementById('copyComp').innerHTML = '';
   resizeGL();
-  if (SEL) loadMesh(SEL.uuid);
+  if (restorePreview && SEL) loadMesh(SEL.uuid);
 }
 async function confirmDedupe(){
   if (!COPY_SCAN || !COPY_UUID) return;
