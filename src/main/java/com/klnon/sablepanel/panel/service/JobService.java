@@ -292,13 +292,20 @@ public final class JobService implements AutoCloseable {
      * 每 2 秒扫一遍磁盘目录,只有日志页需要它。
      */
     public JsonObject view(boolean poll) {
+        // 锁内只复制引用。Job 的字段都是 volatile,warnings 在收尾时一次性赋值,trail 是
+        // synchronizedList 且 toJson 自己再同步一次 —— 都不需要 this.lock。在锁里建 JSON 的话,
+        // 日志页那一份(200 条 × 每条最多 500 个 uuid 和整份 trail)会把提交和收尾一起挡住
+        List<Job> activeJobs;
+        List<Job> recentJobs;
+        synchronized (this.lock) {
+            activeJobs = new ArrayList<>(this.active.values());
+            recentJobs = new ArrayList<>(this.history);
+        }
         JsonObject out = new JsonObject();
         JsonArray running = new JsonArray();
         JsonArray log = new JsonArray();
-        synchronized (this.lock) {
-            for (Job job : this.active.values()) running.add(toJson(job));
-            for (Job job : this.history) log.add(poll ? toPollJson(job) : toJson(job));
-        }
+        for (Job job : activeJobs) running.add(toJson(job));
+        for (Job job : recentJobs) log.add(toJson(job, poll));
         out.add("running", running);
         out.add("log", log);
         out.addProperty("workers", this.maxWorkers);
@@ -310,15 +317,17 @@ public final class JobService implements AutoCloseable {
         return out;
     }
 
-    /** 轮询版的历史条目:去掉只有日志页展开行才看的两个大字段 */
-    private static JsonObject toPollJson(Job job) {
-        JsonObject o = toJson(job);
-        o.remove("targets");
-        o.remove("trail");
-        return o;
+    private static JsonObject toJson(Job job) {
+        return toJson(job, false);
     }
 
-    private static JsonObject toJson(Job job) {
+    /**
+     * {@code compact} 跳过 targets 和 trail,给每 2 秒一次的轮询用。
+     * <p>
+     * 是压根不构造,不是构造完再 {@code remove()} —— 后者字节数确实小了,但每 2 秒仍然要
+     * 分配最多 500 个 uuid 字符串和整份 trail 数组,服务端的开销一点没省。
+     */
+    private static JsonObject toJson(Job job, boolean compact) {
         JsonObject o = new JsonObject();
         o.addProperty("seq", job.seq);
         o.addProperty("op", job.op);
@@ -333,14 +342,16 @@ public final class JobService implements AutoCloseable {
         if (!job.message.isEmpty()) o.addProperty("message", clip(job.message));
         if (!job.outcome.isEmpty()) o.addProperty("outcome", job.outcome);
         o.addProperty("phase", clip(job.display()));
-        JsonArray targets = new JsonArray();
-        for (UUID target : job.targets) targets.add(target.toString());
-        o.add("targets", targets);
-        JsonArray trail = new JsonArray();
-        synchronized (job.trail) {
-            for (String step : job.trail) trail.add(clip(step));
+        if (!compact) {
+            JsonArray targets = new JsonArray();
+            for (UUID target : job.targets) targets.add(target.toString());
+            o.add("targets", targets);
+            JsonArray trail = new JsonArray();
+            synchronized (job.trail) {
+                for (String step : job.trail) trail.add(clip(step));
+            }
+            o.add("trail", trail);
         }
-        o.add("trail", trail);
         if (job.warnings != null && !job.warnings.isEmpty()) o.add("warnings", clipAll(job.warnings));
         return o;
     }
