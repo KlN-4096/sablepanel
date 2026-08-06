@@ -227,13 +227,9 @@ function reselect(uuid){
 /* 统计失败不影响主体操作,保留上一次的数值但记录错误,由 renderStats() 常驻标记过期状态。
    不能只弹 toast:轮询失败时 toast 会消失,用户会把旧服/旧时间段的数字当成实时值。 */
 function loadStats(){
-  const now = Math.floor(Date.now()/1000);
-  if (CHART.live) { CHART.to = now; CHART.from = now - CHART.span; }
-  return load('stats', () => api(`/api/stats?from=${CHART.from}&to=${CHART.to}&max_points=2000`), result => {
+  return load('stats', () => api('/api/stats'), result => {
     STATS = result;
     STATS_ERROR = '';
-    CHART.from = Number(STATS.range_from ?? CHART.from);
-    CHART.to = Number(STATS.range_to ?? CHART.to);
     renderStats();   // 写完状态就交给它,顶栏那几块归它管
     if (VIEW === 'dash') renderDash();
   }, message => {

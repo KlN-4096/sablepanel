@@ -30,7 +30,7 @@ loadGatewayState().then(() => {
 // 成员表会变(有服启动/停服/接管),定期重拉。
 // 后台标签页一律停止轮询:页面没人看就别打请求,服务端才能进入空闲态(扫描全停)
 setInterval(() => { if (authenticated && !document.hidden) loadServers(); }, 20000);
-setInterval(() => { if (authenticated && !document.hidden && CHART.live) loadStats(); }, 15000);
+setInterval(() => { if (authenticated && !document.hidden) loadStats(); }, 15000);
 setInterval(() => {
   if (!authenticated || document.hidden) return;
   refreshTimer--;
@@ -41,7 +41,7 @@ setInterval(() => {
 document.addEventListener('visibilitychange', () => {
   if (!authenticated) return;
   if (document.hidden) { stopEventStream(); return; }
-  if (CHART.live) loadStats();
+  loadStats();
   loadBodies().finally(startEventStream);
   pollJobs();   // 后台期间别的客户端可能起了作业,回前台要立刻看到
 });

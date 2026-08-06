@@ -551,7 +551,7 @@ test('UI-03 断开远端再登录时,旧远端的界面不能再露出来', asyn
   await login;
 });
 
-test('UI-03 切服要清掉图表区间和悬浮提示', async () => {
+test('UI-03 切服要清掉图表窗口和悬浮提示', async () => {
   const { sandbox, state } = setup();
   state.fetch = async (url) => {
     if (url.startsWith('/api/bodies')) return bodiesResponse();
@@ -560,20 +560,14 @@ test('UI-03 切服要清掉图表区间和悬浮提示', async () => {
   };
   evalIn(sandbox, "authenticated = true; SERVERS = [{id:'A',self:true},{id:'B'}]; toast = () => {}");
   evalIn(sandbox, "STATS = {t:[], loaded:{}, body_cost_total:1, top_cost:[]}");
-  // A 服上用户拖过时间轴、鼠标停在某个点上
-  evalIn(sandbox, "CHART.from = 1000; CHART.to = 2000; CHART.live = false; CHART.preset = null; CHART.hoverIndex = 5");
+  // A 服上用户切到 15 分钟窗口、鼠标停在某个点上
+  evalIn(sandbox, "CHART.span = 900; CHART.hoverIndex = 5");
   evalIn(sandbox, "const tip = document.getElementById('chartTip'); tip.style.display = 'block'; tip.innerHTML = 'A 服的悬浮'");
 
-  // 断言点是"重置完成、新数据还没到"这一段:loadStats 一旦回来就会按 live 重设区间,
-  // 那时 from/to 非零是对的。switchServer 的重置是同步的,所以这里不 await
+  // 断言点是"重置完成、新数据还没到"这一段:switchServer 的重置是同步的,所以这里不 await
   const switching = evalIn(sandbox, 'switchServer')('B');
-  assert.equal(evalIn(sandbox, 'CHART.from'), 0,
-    '不清 from/to 的话,页面写着"实时 5 分钟",日期输入框还是上一个服的自定义区间');
-  assert.equal(evalIn(sandbox, 'CHART.to'), 0);
+  assert.equal(evalIn(sandbox, 'CHART.span'), 300, '窗口预设要回到默认,不能带着上一个服的选择');
   assert.equal(evalIn(sandbox, 'CHART.hoverIndex'), -1);
-  // 用户看见的是输入框,不是变量:1000 秒会被画成 1970-01-01
-  assert.doesNotMatch(evalIn(sandbox, "document.getElementById('chartFrom').value"), /^1970/,
-    '日期输入框必须跟着回到实时窗口');
   assert.equal(evalIn(sandbox, "document.getElementById('chartTip').style.display"), 'none',
     '空图上不该还挂着上一个服的悬浮提示');
   assert.equal(evalIn(sandbox, "document.getElementById('chartTip').innerHTML"), '');
@@ -1704,7 +1698,7 @@ test('UI-02 注销要立即清空旧快照、忙碌层和延迟警告', async ()
   const { sandbox } = setup();
   evalIn(sandbox, `
     authenticated = true; DATA = {groups:[],block_palette:[]}; STATS = {marker:'old'};
-    RECYCLE = {groups:[],block_palette:[]}; CHART.fetchTimer = 77;
+    RECYCLE = {groups:[],block_palette:[]};
     busy('旧会话写入中');
     __timers = []; setTimeout = fn => { __timers.push(fn); return __timers.length; };
     clearTimeout = () => {};
@@ -1716,7 +1710,6 @@ test('UI-02 注销要立即清空旧快照、忙碌层和延迟警告', async ()
   assert.equal(evalIn(sandbox, 'DATA'), null, '登录门打开后不能还保留上一会话的服务器快照');
   assert.equal(evalIn(sandbox, 'STATS'), null);
   assert.equal(evalIn(sandbox, 'RECYCLE'), null);
-  assert.equal(evalIn(sandbox, 'CHART.fetchTimer'), null, '旧图表防抖不能在新会话发请求');
   assert.equal(evalIn(sandbox, "document.getElementById('busy').style.display"), 'none',
     '旧写入未返回时也不能用 busy 层盖住登录门');
   assert.notEqual(evalIn(sandbox, "document.getElementById('modalBack').style.display"), 'flex',

@@ -11,8 +11,8 @@ let VIEW = localStorage.getItem('spView') || 'dash';
 let TAB = 'all';
 let R_TAB = 'latest';
 let refreshTimer = 60;
-const CHART_PRESETS = [300,900,3600,21600,86400,604800,2592000];
-let CHART = {from:0,to:0,span:300,live:true,preset:300,hoverIndex:-1,fetchTimer:null};
+const CHART_PRESETS = [300,900];
+let CHART = {span:300,hoverIndex:-1};
 let COPY_SCAN = null, COPY_UUID = null, COPY_VERSION = null, MANUAL_TAB = 'states';
 
 /* 集群:同机多服共用 apiPort,顶栏切换;CURSRV 为空表示"本机 HOST 自己" */

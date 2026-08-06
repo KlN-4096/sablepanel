@@ -161,8 +161,7 @@ const I18N = {
     cloneWith:(n)=>`与 ${n} 个物理体疑似克隆`, cloneRelation:'疑似克隆关联', clonePeers:'关联物理结构',
     cloneNamedReason:'名称、方块数和取整包围盒相同',
     cloneUnnamedReason:'均未命名且不少于 50 块,方块数和取整包围盒相同',
-    chartLive:'回到实时', chartInvalid:'起止时间无效', chartRaw:'原始采样', chartPeak:'区间峰值',
-    chartMeta:(n,s,a)=>`${n} 点 · ${s} · ${a}`, chartInterval:(s)=>`代表 ${s}`,
+    chartMeta:(n)=>`${n} 点 · 秒级采样`,
     tokenChange:'修改访问口令', tokenChangeT:'修改访问口令',
     tokenChangeMsg:'新口令(字母、数字和 . - _ ~,1~64 位)。\n集群内所有服务器会一起改,改完本页会自动换用新口令。',
     tokenHint:'访问口令即本面板的密码,集群内共用一个;改动会同步到所有成员并写入各自的配置文件。',
@@ -200,9 +199,8 @@ const MANUAL = {
       {h:'恢复与容量',body:'<ul><li>恢复始终恢复完整依赖组，并在保存的维度和位置重新加载；旧版本不会覆盖世界中已有的同 UUID 物理体。</li><li><b>待恢复</b>表示删除成功且备份可用；最新版本的<b>需恢复</b>会先清除同 UUID 残留再从快照重建整组；<b>已恢复</b>表示该记录已经成功执行过恢复。</li><li>容量按实际备份文件计数。面板不会自动淘汰任何回收组；达到或超过上限时，新删除会在执行前被拒绝，需人工多选并彻底删除。</li></ul>'}
     ]},
     {k:'performance',label:'manualPerformance',sections:[
-      {h:'曲线口径',body:'<ul><li><b>各维度物理引擎</b>：该维度物理步进耗时按服务器 tick 折算的毫秒值。</li><li><b>物理体逻辑</b>：所有已加载物理体 Java 逻辑每 tick 的采样合计，不包含服务器其它 mod。</li><li>历史同时保存 tick 数、平均 MSPT 与峰值 MSPT，供区间聚合和接口查询。</li></ul>'},
-      {h:'查询与交互',body:'<p>每秒采样异步写入 <code>config/sablepanel/stats/</code>。短范围读取秒级原始数据，长范围读取分钟数据并按时间桶保留峰值。悬停查看精确时间和各曲线值；滚轮以指针所在时间为锚点缩放；日期输入查看固定历史区间，此时停止自动刷新，点击“回到实时”恢复。</p>'},
-      {h:'保留时间',body:'<p>默认保留 30 天，由 <code>statsRetentionDays</code> 控制。跨日文件会压缩，损坏行或未写完整的末行会跳过，不影响实时面板。</p>'}
+      {h:'曲线口径',body:'<ul><li><b>各维度物理引擎</b>：该维度物理步进耗时按服务器 tick 折算的毫秒值。</li><li><b>物理体逻辑</b>：所有已加载物理体 Java 逻辑每 tick 的采样合计，不包含服务器其它 mod。</li></ul>'},
+      {h:'窗口与交互',body:'<p>数据保存在服务端内存里，窗口固定为最近 15 分钟、每秒一个点，重启后从零开始。预设按钮只切换本地显示的窗口长度；悬停查看精确时间和各曲线值。</p>'}
     ]},
     {k:'maintenance',label:'manualMaintenance',sections:[
       {h:'口令与监听',body:'<p>访问口令作为页面密码保存在浏览器当前设备中；维护卡片修改后会同步到当前集群。网页默认使用 <code>webPort=25580</code>，TLS 数据接口默认使用 <code>apiPort=25581</code>；配置位于 <code>config/sablepanel-server.json</code>。</p>'},

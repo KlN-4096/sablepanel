@@ -154,7 +154,6 @@ header .hbtn.stale{border-color:var(--warn);color:var(--warn)}
 .chartPresets{display:flex;gap:2px;padding:2px;background:#0d1118;border:1px solid var(--line)}
 .chartPresets button{border:none;background:transparent;padding:3px 8px;font-size:11px}
 .chartPresets button.on{background:#1d2a3e;color:var(--acc)}
-.chartTools input{width:168px;padding:4px 7px;font-family:var(--mono);font-size:11px}
 .chartTools .chartMeta{margin-left:auto;color:var(--dim);font-size:10.5px;font-family:var(--mono)}
 .mini{font-size:12.5px}
 .mini table{width:100%;border-collapse:collapse}

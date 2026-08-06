@@ -60,11 +60,7 @@ function resetServerContext(){
   hideTip();
   document.getElementById('pvInfo').textContent = '';
   CLONE_SETS = new Map();
-  clearTimeout(CHART.fetchTimer); CHART.fetchTimer = null;
-  // from/to 也要清:updateChartControls 优先用非零区间,不清的话页面写着"实时 5 分钟",
-  // 日期输入框里还是上一个服的自定义区间
-  CHART.live = true; CHART.span = 300; CHART.preset = 300; CHART.hoverIndex = -1;
-  CHART.from = 0; CHART.to = 0;
+  CHART.span = 300; CHART.hoverIndex = -1;
   SELECTED = new Set(); BODY_BY_UUID = new Map();
   R_SELECTED = new Set(); RECYCLE_BY_ID = new Map();
   RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
