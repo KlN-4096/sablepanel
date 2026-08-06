@@ -29,8 +29,16 @@ async function load(key, request, apply, onFail){
    真断开由 showLogin 和网关状态负责 */
 function loadServers(){
   return load('servers', () => api('/api/servers'), r => {
+    // 正在看的服从成员表里消失了(停服/被接管)。applyServersResponse 只会把 CURSRV 清空,
+    // 那不够:代次不推进,它的在途响应会当成本机的落地;localStorage 不改,刷新页面又回到
+    // 那个死服;DATA/选中还是它的,而后续请求已经打向本机了。这里要走完整的切服。
+    // 检测放在这儿而不是 applyServersResponse 里:登录路径也调那个函数,但那时没有任何
+    // 脏状态,紧接着的 loadAll 会正常加载本机 —— 在那里切一次只会白跑一遍还弹错提示
+    const gone = CURSRV && !(r.servers || []).some(s => s.id === CURSRV);
+    const lost = CURSRV;
     applyServersResponse(r);
     maybeWarnDefaultToken(r);
+    if (gone) { toast(t('srvGone')(lost), 'bad'); switchServer(r.self); }
   });
 }
 /* ===================== 数据 ===================== */

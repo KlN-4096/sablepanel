@@ -14,7 +14,7 @@ const I18N = {
     pickBody:'选择一个物理体查看详情', teleportTo:'传送结构', adopt:'收养找回(含依赖)',
     tpDest:'目的坐标', tpUseCur:'取当前', tabFav:'收藏', favTip:'收藏/取消收藏',
     opMove:'传送', opPlayer:'玩家', opPhysics:'物理与恢复', opDanger:'危险操作',
-    srvHost:'主', srvSwitched:(n)=>`已切换到 ${n}`,
+    srvHost:'主', srvSwitched:(n)=>`已切换到 ${n}`, srvGone:(n)=>`服务器 ${n} 已离线`,
     adoptHint:'重建加载指针,数据不动盘', delBody:'删除该物理体', delHint:'删除严格验收成功后才会进入回收站',
     close:'关闭', cancel:'取消', confirm:'确认', composition:'方块构成', reload:'重载',
     loginAddress:'服务器地址', loginToken:'访问口令', loginEnter:'进入', loginBad:'地址或访问口令无效', loginChanged:'连接或访问口令已失效,请重新输入',

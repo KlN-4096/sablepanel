@@ -835,6 +835,36 @@ test('LOAD-01 成员表加载失败要保留上一次的结果', async () => {
     '切服器不能因为一次失败就整个消失 —— 用户会以为集群掉了');
 });
 
+test('UI-03 正在看的服务器从成员表消失时要走完整切服,不能只把 CURSRV 清空', async () => {
+  // 从前只有 CURSRV = ''。代次不推进 → B 的在途响应当成本机的落地;localStorage 不改 →
+  // 刷新页面又回到那个死服;DATA 还是 B 的,而后续请求已经打向本机
+  let hasB = true;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/servers')) {
+      return jsonResponse({ self: 'A', servers: hasB
+        ? [{ id: 'A', self: true, host: true }, { id: 'B' }] : [{ id: 'A', self: true, host: true }] });
+    }
+    if (url.startsWith('/api/bodies')) return bodiesResponse({ total_bodies: 5 });
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; toast = () => {}; localStorage.setItem('spServer', 'B')");
+  await evalIn(sandbox, 'loadServers')();
+  evalIn(sandbox, "CURSRV = 'B'");
+  await evalIn(sandbox, 'loadBodies')();
+  const gen = evalIn(sandbox, 'SRVGEN');
+  assert.equal(evalIn(sandbox, 'DATA.total_bodies'), 5);
+
+  hasB = false;
+  await evalIn(sandbox, 'loadServers')();
+  await tick();
+  assert.equal(evalIn(sandbox, 'CURSRV'), '');
+  assert.ok(evalIn(sandbox, 'SRVGEN') > gen, '代次必须推进,否则那个服的在途响应会当成本机的落地');
+  assert.equal(evalIn(sandbox, "localStorage.getItem('spServer')"), '',
+    '不改 localStorage 的话,刷新页面又回到那个已经没了的服');
+});
+
 test('LOAD-01 日志页加载失败要说明,不能停在"加载中…"', async () => {
   const { sandbox, state } = setup();
   state.fetch = async () => errorResponse(500);
