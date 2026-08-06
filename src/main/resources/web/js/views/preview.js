@@ -8,6 +8,16 @@ let rotSpeed = parseFloat(localStorage.getItem('spRotSpeed') || '0.18');
 let raycaster, pointer = {x:0,y:0}, hoverEnabled = true, needPick = false, lastPick = 0;
 let fsMode = false, clock;
 
+/* 3D 预览是服务器级的:只把 MESH_* 置空的话,场景里的几何体还在(GPU 资源不释放),
+   全屏层还开着并显示旧服的体名,pvInfo 还停在上一次的文字 */
+onServerReset(() => {
+  if (fsMode) closePreviewFs();
+  disposeMesh();
+  MESH_DATA = MESH_UUID = MESH_SOURCE = null;
+  hideTip();
+  document.getElementById('pvInfo').textContent = '';
+});
+
 function initGL() {
   const box = document.getElementById('previewWrap');
   renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:'low-power'});

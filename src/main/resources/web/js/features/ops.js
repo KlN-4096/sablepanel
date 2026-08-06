@@ -9,16 +9,15 @@
    POST 发出后也可能切服:旧服的接受响应不能把 job seq 写进新服的 watch,更不能让
    调用方拿旧服的成功结果去乐观更新新服。 */
 async function submitJob(path, opts, label){
-  const server = srvGen(), auth = authSeq;
-  const fresh = () => server === srvGen() && auth === authSeq && authenticated;
+  const ctx = captureCtx();
   try {
     const r = await api(path, opts);
-    if (!fresh()) return null;
+    if (!ctx.fresh()) return null;
     if (r && r.job) JOB_WATCH.set(r.job, r.op || label || '');
     await pollJobs();   // 立刻把"处理中"画出来,不再靠写死的 setTimeout 等
-    return fresh() ? r : null;
+    return ctx.fresh() ? r : null;
   } catch(e){
-    if (fresh()) toast((label ? label + ' · ' : '') + e.message, 'bad');
+    if (ctx.fresh()) toast((label ? label + ' · ' : '') + e.message, 'bad');
     return null;
   }
 }
@@ -28,24 +27,25 @@ async function doChangeToken(){
   const next = document.getElementById('modalInput').value.trim();
   if (!next) return;
   if (next === token) { toast(t('tokenSame')); return; }
-  let session = authSeq;
-  const current = () => authenticated && session === authSeq;
+  // 改口令是集群级操作,收尾只看会话代次(authFresh):中途切换查看的服务器不该作废它
+  let ctx = captureCtx();
   busy(t('loading'));
   try {
     const r = await api('/api/cluster/token', {method:'POST', body: JSON.stringify({token: next})});
-    if (!current()) return;
+    if (!ctx.authFresh()) return;
     token = r.token;
-    // 凭据已经改变,旧 token 发出的所有读取/写入响应从这里起都属于上一会话。
-    session = ++authSeq;
+    // 凭据已经改变,旧 token 发出的所有读取/写入响应从这里起都属于上一会话
+    authSeq++;
+    ctx = captureCtx();
     localStorage.setItem(TOKEN_STORAGE_KEY, token);
     if (r.failed && r.failed.length) toast(t('tokenPartial')(r.failed.join('、')), 'bad');
     else toast(t('tokenOk'), 'ok');
     if (r.warn) toast(r.warn, 'bad');
     await loadServers();
-    if (!current()) return;
+    if (!ctx.authFresh()) return;
     await loadAll(true);
-    if (current()) startEventStream();
-  } catch(e){ if (current()) toast(t('tokenFail') + e.message, 'bad'); }
+    if (ctx.authFresh()) startEventStream();
+  } catch(e){ if (ctx.authFresh()) toast(t('tokenFail') + e.message, 'bad'); }
   finally { busy(null); }
 }
 async function doRescan(){
@@ -86,14 +86,13 @@ async function saveRecycleLimit(){
     const confirmed=await askModal(t('limitConfirmT'),t('limitConfirmMsg')(RECYCLE.file_count,limit),false);
     if (!confirmed) { document.getElementById('rLimit').value=RECYCLE.limit||500; return; }
   }
-  const server=srvGen(), auth=authSeq;
-  const current=()=>authenticated&&server===srvGen()&&auth===authSeq;
+  const ctx=captureCtx();
   busy(t('loading'));
   try {
     await api('/api/recycle/config',{method:'POST',body:JSON.stringify({max_files:limit})});
-    if (!current()) return;
+    if (!ctx.fresh()) return;
     toast(t('saveLimitOk'),'ok'); await loadRecycle();
-  } catch(e){ if (current()) toast(t('saveLimitFail')+e.message,'bad'); }
+  } catch(e){ if (ctx.fresh()) toast(t('saveLimitFail')+e.message,'bad'); }
   finally { busy(null); }
 }
 async function restoreCurrentGroup(){

@@ -8,6 +8,9 @@ let jobsFile = '';          // 空 = 本次运行(内存)
 let jobsOnlyFailed = false;
 let jobsExpanded = new Set();
 
+/* 日志记录与选中的历史文件都属于当前服务器 */
+onServerReset(() => { JOBS = null; JOBS_ERROR = ''; jobsFile = ''; jobsExpanded.clear(); });
+
 /* 序号键必须和 pollJobs 的 'jobs' 分开:同一个键会让两者互相作废对方的响应。
    切服后旧服的日志不能落地(job seq 在每个服都从 1 开始),这条由 load() 的代次守卫管。
    本页只在用户点击时加载,所以刷新失败弹 toast 就够了,不像总览那样需要常驻提示条 */

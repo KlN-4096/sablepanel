@@ -1,12 +1,13 @@
 'use strict';
 /* 启动只读一致性报告 + 显式选择修复。 */
 let CONSISTENCY = null, CONSISTENCY_POLL_GEN = 0;
+/* 报告与等待循环都属于当前服务器;POLL_GEN 另管"新一轮扫描作废旧等待",与切服代次独立 */
+onServerReset(() => { CONSISTENCY = null; CONSISTENCY_POLL_GEN++; });
 function consistencyDismissKey(){ return `spConsistencyDismissed:${CURSRV||'self'}`; }
 async function scheduleStartupConsistency(){
   const gen = ++CONSISTENCY_POLL_GEN;
-  const server = srvGen(), auth = authSeq;
-  const fresh = () => authenticated && gen===CONSISTENCY_POLL_GEN
-    && server===srvGen() && auth===authSeq;
+  const ctx = captureCtx();
+  const fresh = () => ctx.fresh() && gen===CONSISTENCY_POLL_GEN;
   for (let attempt=0;attempt<45;attempt++) {
     if (!fresh()) return;
     try {
@@ -87,9 +88,8 @@ async function runConsistencyScan(){
 }
 async function waitForConsistencyChange(previous,open){
   const gen=++CONSISTENCY_POLL_GEN;
-  const server=srvGen(), auth=authSeq;
-  const fresh=()=>authenticated&&gen===CONSISTENCY_POLL_GEN
-    &&server===srvGen()&&auth===authSeq;
+  const ctx=captureCtx();
+  const fresh=()=>ctx.fresh()&&gen===CONSISTENCY_POLL_GEN;
   for (let attempt=0;attempt<90;attempt++) {
     await new Promise(resolve=>setTimeout(resolve,1000));
     if (!fresh()) return;

@@ -9,6 +9,12 @@ function cancelBodiesFlight(){
   bodiesFlight = null;
   bodiesRerun = false;
 }
+/* 在途请求与作业轮询属于本层,切服由自己收 */
+onServerReset(() => {
+  cancelBodiesFlight();
+  // 作业状态按服务器隔离:JobService 的 seq 在每个服务端都从 1 开始,不清就会张冠李戴
+  stopBusyPolling();
+});
 
 /* 每个加载器都要做同样三件事:丢弃过期响应、失败时记下原因、然后重绘。
    这三件事从前在七个加载器里各写各的 —— bodiesRequest / CHART.request / RECYCLE_REQ
@@ -20,12 +26,11 @@ function cancelBodiesFlight(){
 const LOAD_SEQ = {};
 async function load(key, request, apply, onFail){
   const seq = LOAD_SEQ[key] = (LOAD_SEQ[key] || 0) + 1;
-  const gen = srvGen(), auth = authSeq;
-  // 会话身份必须用 authSeq,不能用 authenticated:后者是布尔,注销再登录又变回 true,
-  // 旧会话的在途响应就重新满足条件了 —— 旧服的成员表盖掉新会话的、旧快照落地成 DATA。
-  // authSeq 在 showLogin 和每一次 authenticate 都推进,天然就是会话代次
-  const fresh = () => seq === LOAD_SEQ[key] && gen === srvGen()
-    && auth === authSeq && authenticated;
+  // 会话身份必须用 authSeq(captureCtx 已含),不能只看 authenticated:后者是布尔,
+  // 注销再登录又变回 true,旧会话的在途响应就重新满足条件了。
+  // 每键序号(LOAD_SEQ)与上下文代次是两回事:前者管同键请求的先后,后者管切服/换凭据
+  const ctx = captureCtx();
+  const fresh = () => seq === LOAD_SEQ[key] && ctx.fresh();
   try {
     const result = await request();
     if (fresh()) apply(result);
@@ -69,13 +74,13 @@ async function loadBodies() {
   // 但期间来的请求要合并成"完事后再跑一次" —— 直接丢掉的话,切服时新服的那次加载会被
   // 旧服还没回来的请求吞掉,列表一直空到 60 秒兜底刷新。
   // 合并只在同一个服务器 + 会话代次里成立:换了上下文就取消旧的那次
-  const context = {server: srvGen(), auth: authSeq};
-  if (bodiesFlight && bodiesFlight.server === context.server && bodiesFlight.auth === context.auth) {
+  const ctx = captureCtx();
+  if (bodiesFlight && bodiesFlight.ctx.srv === ctx.srv && bodiesFlight.ctx.auth === ctx.auth) {
     bodiesRerun = true;
     return;
   }
   cancelBodiesFlight();
-  const run = {...context, controller: new AbortController()};
+  const run = {ctx, controller: new AbortController()};
   bodiesFlight = run;
   const keepUuid = SEL && SEL.uuid;
   try {
@@ -110,11 +115,11 @@ async function loadBodies() {
     // 也不能替新上下文补跑
     if (bodiesFlight === run) {
       bodiesFlight = null;
-      // 补跑要看认证状态:请求重叠期间用户注销的话,这一跑会带着空 token 发出去,
+      // 补跑也要过 fresh():请求重叠期间用户注销的话,这一跑会带着空 token 发出去,
       // 白吃一个 401 再把人往登录流程里推一次
       const rerun = bodiesRerun;
       bodiesRerun = false;
-      if (rerun && authenticated && context.server === srvGen() && context.auth === authSeq) loadBodies();
+      if (rerun && ctx.fresh()) loadBodies();
     }
   }
 }
@@ -160,10 +165,10 @@ function syncBusyPolling(){
   // 只看它就等于放弃这个作业 —— 界面连"已经开始了"都不知道
   if (!ACTIVE_JOBS.length && !JOB_WATCH.size) { clearBusyTimer(); return; }
   if (busyTimer) return;
-  const gen = srvGen();
+  const ctx = captureCtx();
   busyTimer = setTimeout(() => {
     busyTimer = null;
-    if (authenticated && gen === srvGen()) pollJobs();
+    if (ctx.fresh()) pollJobs();
   }, 2000);
 }
 function clearBusyTimer(){

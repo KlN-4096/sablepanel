@@ -5,9 +5,9 @@
    任何"界面上应该出现 X"的断言都恒真。分发逻辑正好是最需要被测的那部分。 */
 /* ===================== 视图 ===================== */
 function scheduleSelectedPreview(view, uuid, groupId){
-  const gen=srvGen(), auth=authSeq;
+  const ctx=captureCtx();
   setTimeout(()=>{
-    if (!authenticated||view!==VIEW||gen!==srvGen()||auth!==authSeq) return;
+    if (!ctx.fresh()||view!==VIEW) return;
     if (view==='recycle') {
       if (RSEL?.uuid===uuid&&RSELG?.id===groupId) loadRecycleMesh(groupId,uuid);
       return;

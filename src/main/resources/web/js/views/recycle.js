@@ -5,6 +5,10 @@ const R_TABS = [
   {k:'latest', label:'rTabLatest', count:'latest_groups'},
   {k:'old', label:'rTabOld', count:'old_groups'},
 ];
+/* 维度筛选是按维度 id 记的,两个服的 minecraft:overworld 是同一个字符串:不清的话,
+   在 A 服取消勾选主世界,切到 B 之后 B 的主世界组会整批消失,而勾选框看着是正常的。
+   #rDims 里的旧 DOM 由钩子后统一的 renderAll() 回收站空态清掉 */
+onServerReset(() => { R_DIM_DISABLED.clear(); clearRecycleDetail(); });
 function setRecycleTab(tab){
   if (tab===R_TAB) return;
   R_TAB=tab;

@@ -15,7 +15,7 @@ let modalCb = null;
    才按当时的 CURSRV 拼 server= 参数 —— 中途切了服,攒着的就是旧服的 uuid,发到新服上执行。
    两服由同一份存档复制而来时(同机多服的常见做法)uuid 还会真的命中,那就是误删。 */
 function askModal(title, msg, needInput, expected){
-  const gen = srvGen(), auth = authSeq;
+  const ctx = captureCtx();
   return new Promise(res => {
     document.getElementById('modalTitle').textContent = title;
     document.getElementById('modalMsg').textContent = msg;
@@ -31,7 +31,7 @@ function askModal(title, msg, needInput, expected){
       // 用过就作废:不清的话,后面任何一次 modalCancel() 都会再打到这个已经结束的框上
       modalCb = null;
       document.getElementById('modalBack').style.display = 'none';
-      if (gen !== srvGen() || auth !== authSeq) return res(false);
+      if (!ctx.fresh()) return res(false);
       if (!ok) return res(false);
       if (needInput && expected !== undefined && inp.value.trim() !== String(expected)) {
         toast(t('confirmMismatch'), 'bad');
@@ -65,11 +65,11 @@ function maybeWarnDefaultToken(serverData){
   if (!serverData.using_default_token || defaultTokenWarningShown
       || localStorage.getItem(DEFAULT_TOKEN_WARNING_KEY) === '1') return;
   defaultTokenWarningShown = true;
-  const auth = authSeq;
+  const ctx = captureCtx();
   setTimeout(async()=>{
-    if (!authenticated || auth !== authSeq) return;
+    if (!ctx.authFresh()) return;
     const change = await askDefaultTokenWarning();
-    if (change && authenticated && auth === authSeq) doChangeToken();
+    if (change && ctx.authFresh()) doChangeToken();
   }, 0);
 }
 function modalConfirm(){ modalCb && modalCb(true); }

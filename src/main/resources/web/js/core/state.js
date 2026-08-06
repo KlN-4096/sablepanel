@@ -22,6 +22,26 @@ let SERVERS = [], SERVERS_ERROR = '', CURSRV = localStorage.getItem('spServer') 
 let SRVGEN = 0;
 function srvGen(){ return SRVGEN; }
 
+/* 统一上下文捕获:异步提交前 capture,落地/回调时判定。
+   fresh() = 登录着且服务器/会话代次都没变(数据落地、UI 操作用它);
+   authFresh() = 登录着且会话代次没变(集群级操作用它 —— 改口令对全集群生效,
+   中途切换查看的服务器不该作废它的收尾)。
+   从前这套三元组在 6 处各写一份、共 4 种成员组合,每轮审计都在漏掉的那份里再找出 bug */
+function captureCtx(){
+  const srv = SRVGEN, auth = authSeq;
+  return {
+    srv, auth,
+    fresh(){ return authenticated && srv === SRVGEN && auth === authSeq; },
+    authFresh(){ return authenticated && auth === authSeq; },
+  };
+}
+
+/* 模块自己的"切服归零"钩子:谁的状态谁清。cluster 的 resetServerContext 只负责推进代次、
+   按注册顺序(=脚本加载顺序)调用钩子、最后统一 renderAll() —— 一个函数越界写五个模块
+   私有状态的时代到此为止 */
+const SERVER_RESET_HOOKS = [];
+function onServerReset(hook){ SERVER_RESET_HOOKS.push(hook); }
+
 /* 在线玩家(传送玩家用):选中体时拉取,15s 节流;切服作废 */
 let PLAYERS = [], PLAYERS_ERROR = '', playersFetchedAt = 0;
 
@@ -65,3 +85,15 @@ function loadFav(){
   catch(e){ FAV = new Set(); }
 }
 function saveFav(){ localStorage.setItem(favKey(), JSON.stringify([...FAV])); }
+
+/* 本文件声明的共享快照/选中/缓存,切服一律作废 */
+onServerReset(() => {
+  DATA = STATS = RECYCLE = null; SEL = SELG = RSEL = RSELG = null;
+  BODIES_ERROR = RECYCLE_ERROR = STATS_ERROR = '';   // 旧服的失败提示不能挂在新服界面上
+  CLONE_SETS = new Map();
+  SELECTED = new Set(); BODY_BY_UUID = new Map();
+  R_SELECTED = new Set(); RECYCLE_BY_ID = new Map();
+  RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
+  EXPAND_STATE.clear(); loadFav();
+  PLAYERS = []; PLAYERS_ERROR = ''; playersFetchedAt = 0; PAUSED = new Set(); FORCED = new Set();
+});

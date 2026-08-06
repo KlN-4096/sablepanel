@@ -1,6 +1,7 @@
 'use strict';
 /* 性能图表:窗口预设 + canvas 绘制 + 悬停交互。数据始终是 /api/stats 的内存 15 分钟窗口,
    预设只决定本地裁剪多长的尾部,切预设不重新请求 */
+onServerReset(() => { CHART.span = 300; CHART.hoverIndex = -1; });
 function chartPresetLabel(seconds){
   return {300:'5 分钟',900:'15 分钟'}[seconds];
 }
