@@ -102,6 +102,7 @@ const TABS = [
 ];
 function tabTest(k){ return (TABS.find(x=>x.k===k)||TABS[0]).test; }
 function renderTabs(){
+  if (!DATA) return;   // 分发是全函数,没数据时这里没什么可画,由 render() 去说明原因
   document.getElementById('tabs').innerHTML = TABS.map(tb => {
     const n = DATA.groups.filter(tb.test).length;
     const style = TAB!==tb.k && n ? (tb.k==='rec' ? 'style="color:var(--warn)"' : tb.k==='anom' ? 'style="color:var(--bad)"' : '') : '';

@@ -46,6 +46,12 @@ async function loadBodies() {
   const keepUuid = SEL && SEL.uuid;
   try {
     await load('bodies', () => api('/api/bodies'), result => {
+      // 先确认这是一份快照再发布 DATA。渲染层(summarize/renderTabs/render)一律假设
+      // "DATA 非空 = groups 和 block_palette 都在";从前是先赋值后使用,网关或版本不匹配
+      // 返回一个 200 的别的东西时,DATA 会留下半份,连"加载失败"那块提示自己都会再崩一次
+      if (!Array.isArray(result.groups) || !Array.isArray(result.block_palette)) {
+        throw new Error('响应不是一份完整的快照');
+      }
       DATA = result;
       BODIES_ERROR = '';
       BODY_BY_UUID = new Map();
@@ -71,7 +77,7 @@ async function loadBodies() {
       // 有旧数据就留着并标记"这是上次的结果";没有的话要明说加载失败,不能停在"加载中…"
       BODIES_ERROR = message;
       toast(t('loadFail') + message, 'bad');
-      render();   // 只有列表和工具条要改口径,DATA 没变,别的面板不用重画
+      renderAll();   // 总览也要改口径:从前只调 render(),不在 bodies 页就什么都不画
     });
   } finally {
     bodiesInFlight = false;
@@ -252,7 +258,7 @@ function loadRecycle(append){
     // "加载更多"要能原地再点一次
     RECYCLE_ERROR = message;
     if (append) toast(t('loadFail') + message, 'bad');
-    if (VIEW==='recycle') renderRecycle();
+    renderAll();   // 总览的回收卡片也要改口径,不能只管当前是不是回收站页
   });
 }
 function loadMoreRecycle(){ if (RECYCLE_CURSOR && !RECYCLE_LOADING) loadRecycle(true); }

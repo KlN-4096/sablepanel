@@ -689,6 +689,45 @@ test('LOAD-01 已有数据时刷新失败要保留旧数据并标明是上次的
   assert.equal(evalIn(sandbox, 'RECYCLE_LOADING'), false, '按钮不能卡在禁用态');
 });
 
+test('LOAD-01 默认总览页首屏失败也要说明,不是一片空白', async () => {
+  // 默认视图就是总览。loadBodies 的失败分支从前只调 render(),那个函数不在 bodies 页
+  // 就立刻返回;renderDash 自己又挡着一句 if (!DATA) return —— 于是整页空白,
+  // 用户只看到一闪而过的 toast
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies') || url.startsWith('/api/recycle')) return errorResponse(500);
+    return jsonResponse({ running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; VIEW = 'dash'; toast = () => {}");
+  await evalIn(sandbox, 'loadBodies')();
+  await evalIn(sandbox, 'loadRecycle')();
+  await tick();
+  assert.match(evalIn(sandbox, "document.getElementById('dashTop').innerHTML"), /加载失败/,
+    '首屏失败,总览必须自己说出来');
+  assert.match(evalIn(sandbox, "document.getElementById('cleanCard').innerHTML"), /加载失败/,
+    '回收卡片从前一律画"加载中…",服务端已经 500 了也照样转圈');
+});
+
+test('LOAD-01 总览有数据时刷新失败要标明是上一次的结果', async () => {
+  let ok = true;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies')) return ok ? bodiesResponse({ total_bodies: 7 }) : errorResponse(500);
+    return jsonResponse({ running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; VIEW = 'dash'; toast = () => {}");
+  await evalIn(sandbox, 'loadBodies')();
+  assert.doesNotMatch(evalIn(sandbox, "document.getElementById('dashSrv').innerHTML"), /上一次的结果/);
+
+  ok = false;
+  await evalIn(sandbox, 'loadBodies')();
+  assert.equal(evalIn(sandbox, 'DATA.total_bodies'), 7, '刷新失败不能把已有数据抹掉');
+  assert.match(evalIn(sandbox, "document.getElementById('dashSrv').innerHTML"), /上一次的结果/,
+    '旧数字照常显示,但要说明它是上一次的');
+  assert.doesNotMatch(evalIn(sandbox, "document.getElementById('dashTop').innerHTML"), /加载失败/,
+    '有数据就不该画成"加载失败"');
+});
+
 test('LOAD-01 成员表加载失败要保留上一次的结果', async () => {
   let ok = true;
   const { sandbox, state } = setup();

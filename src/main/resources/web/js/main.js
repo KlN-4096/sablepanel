@@ -1,5 +1,5 @@
 'use strict';
-/* 装配层:视图切换、全局快捷键与点击收起、启动序列、轮询定时器 */
+/* 装配层:全局快捷键与点击收起、启动序列、轮询定时器。视图切换和分发在 views/shell.js */
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('modalBack').style.display === 'flex') modalCancel();
@@ -9,39 +9,6 @@ document.addEventListener('keydown', e => {
     else if (document.getElementById('fsOverlay').style.display === 'block') closePreviewFs();
   }
 });
-/* ===================== 视图 ===================== */
-function setView(v, opts){
-  if (!['dash','bodies','recycle','jobs'].includes(v)) v = 'dash';
-  VIEW = v;
-  localStorage.setItem('spView', v);
-  document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.view === v));
-  document.querySelectorAll('.view').forEach(s => s.classList.remove('on'));
-  document.getElementById(v === 'dash' ? 'viewDash' : v === 'bodies' ? 'viewBodies'
-    : v === 'jobs' ? 'viewJobs' : 'viewRecycle').classList.add('on');
-  if (v === 'jobs') loadJobs();
-  const previewHost = document.getElementById(v === 'recycle' ? 'recyclePreviewHost' : 'bodyPreviewHost');
-  const preview = document.getElementById('previewWrap');
-  if (!fsMode && preview.parentElement !== previewHost) previewHost.appendChild(preview);
-  const selectedPreview = v==='recycle' ? RSEL : v==='bodies' ? SEL : null;
-  const expectedSource = v==='recycle'&&RSELG ? `recycle:${RSELG.id}` : v==='bodies' ? 'body' : null;
-  if ((v==='recycle'||v==='bodies') && (!selectedPreview||MESH_UUID!==selectedPreview.uuid||MESH_SOURCE!==expectedSource)) {
-    disposeMesh(); MESH_DATA=null; MESH_UUID=MESH_SOURCE=null; document.getElementById('pvInfo').textContent='';
-    if (selectedPreview) setTimeout(()=>v==='recycle'
-      ?loadRecycleMesh(RSELG.id,selectedPreview.uuid):loadMesh(selectedPreview.uuid),30);
-  }
-  if (opts && opts.tab) { TAB = opts.tab; renderLimit = 400; }
-  if (opts && opts.sortCost) { sortCfg = [{k:'cost',d:-1}]; saveSort(); renderSortRows(); }
-  if (opts && opts.reset) resetFilters(true);
-  renderAll();
-  if (v === 'bodies' || v === 'recycle') setTimeout(resizeGL, 30);
-  if (authenticated && (v === 'dash' || v === 'recycle') && RECYCLE === null) loadRecycle();
-}
-function renderAll(){
-  if (VIEW === 'recycle') { renderRecycle(); return; }
-  if (!DATA) return;
-  if (VIEW === 'dash') renderDash();
-  else { renderTabs(); render(); }
-}
 document.addEventListener('click', e => {
   if (!e.target.closest('#loadPill') && !e.target.closest('#statPop'))
     document.getElementById('statPop').style.display = 'none';

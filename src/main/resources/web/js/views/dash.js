@@ -50,10 +50,38 @@ function renderDashServer(){
 const SIZE_COLORS = {huge:'#5aa9ff',large:'#4b8ed6',mid:'#3d72ab',small:'#345a80',frag:'#2a3d55'};
 const STATE_COLORS = {loaded:'#46c96b',stored:'#3b475e',holding:'#e0a33a',orphan:'#f2635c'};
 
+/* 回收站卡片三态:加载中 / 加载失败 / 有数据。
+   从前 RECYCLE===null 一律画"加载中…",服务端已经 500 了也照样转圈 */
+function renderDashClean(){
+  document.getElementById('cleanCard').innerHTML = `
+    <h4><span>${t('recycleT')}</span></h4>
+    ${RECYCLE ? `<div class="bignum">${fmt((RECYCLE.latest_groups||0)+(RECYCLE.old_groups||0))}</div>
+         <div class="hint">${t('recycleStructures')}</div>
+         <div class="kvgrid">
+           <div class="k">${t('rTabLatest')}</div><div class="v">${fmt(RECYCLE.latest_groups||0)}</div>
+           <div class="k">${t('rTabOld')}</div><div class="v">${fmt(RECYCLE.old_groups||0)}</div>
+         </div>
+         <div class="hint">${t('recycleDisk')(fmtBytes(RECYCLE.disk_bytes||0))}</div>`
+      : RECYCLE_ERROR ? `<div class="empty" style="color:var(--bad)">⚠ ${t('loadFail')}${esc(RECYCLE_ERROR)}</div>`
+      : `<div class="empty">${t('loading')}</div>`}`;
+}
 function renderDash(){
-  if (!DATA) return;
-  const s = summarize();
   renderDashServer();
+  // 已有数据时刷新失败:旧数字照常显示,但要说明它是上一次的结果
+  const stale = (DATA && BODIES_ERROR) || (RECYCLE && RECYCLE_ERROR) || '';
+  if (stale) document.getElementById('dashSrv').innerHTML +=
+    `<div class="srvHint" style="color:var(--bad)">${t('staleData')}${esc(stale)}</div>`;
+  // 首屏就失败:从前直接 return,总览是一片空白,用户只看到一闪而过的 toast
+  if (!DATA) {
+    document.getElementById('dashTop').innerHTML = BODIES_ERROR
+      ? `<div class="card"><h4>${t('dashBodies')}</h4>
+           <div class="sub" style="color:var(--bad)">⚠ ${t('loadFail')}${esc(BODIES_ERROR)}</div></div>`
+      : `<div class="card"><div class="sub">${t('loading')}</div></div>`;
+    document.getElementById('dashMid').innerHTML = '';
+    renderDashClean();
+    return;
+  }
+  const s = summarize();
   const loadedCost = STATS ? (STATS.body_cost_total ?? 0) : null;
   document.getElementById('dashTop').innerHTML = `
     <div class="card"><h4>${t('dashBodies')}</h4><div class="bignum">${fmt(s.bodies)}<small>${t('bodies')}</small></div>
@@ -87,16 +115,7 @@ function renderDash(){
         <div class="k"><i class="dot" style="background:var(--warn)"></i>${t('dashHolding')}</div><div class="v">${s.state.holding}</div>
       </div></div>`;
 
-  document.getElementById('cleanCard').innerHTML = `
-    <h4><span>${t('recycleT')}</span></h4>
-    ${RECYCLE === null ? `<div class="empty">${t('loading')}</div>`
-      : `<div class="bignum">${fmt((RECYCLE.latest_groups||0)+(RECYCLE.old_groups||0))}</div>
-         <div class="hint">${t('recycleStructures')}</div>
-         <div class="kvgrid">
-           <div class="k">${t('rTabLatest')}</div><div class="v">${fmt(RECYCLE.latest_groups||0)}</div>
-           <div class="k">${t('rTabOld')}</div><div class="v">${fmt(RECYCLE.old_groups||0)}</div>
-         </div>
-         <div class="hint">${t('recycleDisk')(fmtBytes(RECYCLE.disk_bytes||0))}</div>`}`;
+  renderDashClean();
   document.getElementById('toolCard').innerHTML = `
     <h4>${t('tools')}</h4>
     <div style="display:flex;gap:9px;flex-wrap:wrap">
