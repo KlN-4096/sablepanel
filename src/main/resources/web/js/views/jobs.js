@@ -3,18 +3,18 @@
    数据来自 /api/jobs —— 内存里是本次运行的记录,服务端同时按启动时间落盘成
    logs/sablepanel/jobs-<启动时间>.jsonl,顶部下拉框可以切到历史文件事后查证。 */
 let JOBS = null;
+let JOBS_ERROR = '';        // 非空 = 上一次加载失败的原因
 let jobsFile = '';          // 空 = 本次运行(内存)
 let jobsOnlyFailed = false;
 let jobsExpanded = new Set();
 
-async function loadJobs(){
-  const gen = srvGen();
-  try {
-    const result = await api('/api/jobs' + (jobsFile ? `?file=${encodeURIComponent(jobsFile)}` : ''));
-    if (gen !== srvGen()) return;      // 切服后旧服的日志不能落地:job seq 在每个服都从 1 开始
-    JOBS = result;
-    renderJobs();
-  } catch(e){ if (gen === srvGen()) toast(t('loadFail') + e.message, 'bad'); }
+/* 序号键必须和 pollJobs 的 'jobs' 分开:同一个键会让两者互相作废对方的响应。
+   切服后旧服的日志不能落地(job seq 在每个服都从 1 开始),这条由 load() 的代次守卫管。
+   本页只在用户点击时加载,所以刷新失败弹 toast 就够了,不像总览那样需要常驻提示条 */
+function loadJobs(){
+  return load('joblog', () => api('/api/jobs' + (jobsFile ? `?file=${encodeURIComponent(jobsFile)}` : '')),
+    result => { JOBS = result; JOBS_ERROR = ''; renderJobs(); },
+    message => { JOBS_ERROR = message; toast(t('loadFail') + message, 'bad'); renderJobs(); });
 }
 function setJobsFile(name){ jobsFile = name; jobsExpanded.clear(); loadJobs(); }
 function toggleJobsFailed(){ jobsOnlyFailed = !jobsOnlyFailed; renderJobs(); }
@@ -55,9 +55,12 @@ function jobCost(job){
 
 function renderJobs(){
   if (VIEW !== 'jobs') return;
-  // JOBS 为空要显式画 loading:切服时把它清掉再重画,否则页面会一直挂着上一个服的记录
+  // JOBS 为空要显式画:切服时把它清掉再重画,否则页面会一直挂着上一个服的记录。
+  // 失败也要说出来 —— 从前只弹一下 toast,页面就永远停在"加载中…"
   if (!JOBS) {
-    document.getElementById('jobsList').innerHTML = `<div id="listEmpty">${t('loading')}</div>`;
+    document.getElementById('jobsList').innerHTML = JOBS_ERROR
+      ? `<div id="listEmpty"><span class="big">⚠</span>${t('loadFail')}${esc(JOBS_ERROR)}</div>`
+      : `<div id="listEmpty">${t('loading')}</div>`;
     document.getElementById('jobsWorkers').textContent = '';
     return;
   }

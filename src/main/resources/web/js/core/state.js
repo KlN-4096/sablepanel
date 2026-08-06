@@ -51,7 +51,7 @@ let R_SELECTED = new Set(), RECYCLE_BY_ID = new Map();
 let R_DIM_DISABLED = new Set();
 /* 回收站游标分页:服务端按 latest/old 分页并返回全局版本计数。
    RECYCLE.groups 仍只是当前版本页签已经加载的页。 */
-let RECYCLE_CURSOR = '', RECYCLE_TOTAL = 0, RECYCLE_LOADING = false, RECYCLE_REQ = 0;
+let RECYCLE_CURSOR = '', RECYCLE_TOTAL = 0, RECYCLE_LOADING = false;
 
 /* 折叠记忆:用户显式展开/折叠过的组(gid → bool),优先于默认展开策略;切服清空 */
 let EXPAND_STATE = new Map();

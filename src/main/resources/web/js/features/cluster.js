@@ -31,9 +31,10 @@ async function switchServer(id){
   const gen = srvGen();
   // 作业状态按服务器隔离:JobService 的 seq 在每个服务端都从 1 开始,不清就会张冠李戴
   stopBusyPolling();
-  JOBS = null; jobsFile = ''; jobsExpanded.clear();
+  JOBS = null; JOBS_ERROR = ''; jobsFile = ''; jobsExpanded.clear();
   // 切服等于换了一整套数据,旧的一律作废
   DATA = STATS = RECYCLE = null; SEL = SELG = RSEL = RSELG = MESH_DATA = MESH_UUID = MESH_SOURCE = null;
+  BODIES_ERROR = RECYCLE_ERROR = '';   // 旧服的失败提示不能挂在新服界面上
   CLONE_SETS = new Map();
   CHART.live = true; CHART.span = 300; CHART.preset = 300; CHART.hoverIndex = -1;
   SELECTED = new Set(); BODY_BY_UUID = new Map();

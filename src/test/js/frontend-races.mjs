@@ -344,6 +344,65 @@ test('PERF-04 作业从有到无时才刷新一次 bodies', async () => {
   assert.equal(evalIn(sandbox, 'busyTimer'), null, '没作业了要停掉轮询');
 });
 
+const RUNNING_JOB = { seq: 7, op: '批量删除', state: 'running', phase: '定位磁盘条目',
+  started_at: 1, queued_at: 0, targets: ['u1'] };
+
+test('PERF-04 晚到的旧轮询响应不能覆盖新状态', async () => {
+  // 提交后的立即轮询、2 秒轮询、60 秒兜底刷新会重叠。只有服务器代次没有请求序号时,
+  // 旧的那份空响应后到就会把刚起的作业抹掉:徽章消失、轮询停摆、还白刷一次 bodies
+  const slowOld = deferred();
+  let calls = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/jobs')) {
+      return ++calls === 1 ? slowOld.promise : jsonResponse({ running: [RUNNING_JOB], log: [] });
+    }
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    return jsonResponse({});
+  };
+  evalIn(sandbox, 'authenticated = true');
+  const pollJobs = evalIn(sandbox, 'pollJobs');
+  const stale = pollJobs();
+  await pollJobs();                    // 新的先回:界面上是"作业 7 在跑"
+  assert.equal(evalIn(sandbox, 'ACTIVE_JOBS').length, 1);
+
+  slowOld.resolve(jsonResponse({ running: [], log: [] }));
+  await stale;
+  await tick();
+  assert.equal(evalIn(sandbox, 'ACTIVE_JOBS').length, 1, '旧的空响应不得把刚起的作业抹掉');
+  assert.equal(evalIn(sandbox, "BUSY.has('u1')"), true, '行徽章也不能跟着消失');
+  assert.notEqual(evalIn(sandbox, 'busyTimer'), null, '更不能顺手把 2 秒轮询停掉');
+});
+
+test('PERF-04 轮询失败一次不能让 2 秒轮询就此停摆', async () => {
+  // 定时器回调进来时已经把 busyTimer 清空了,失败路径不续期就再没有人续
+  let fail = true;
+  const hits = [];
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    hits.push(url.split('?')[0]);
+    if (!url.startsWith('/api/jobs')) return jsonResponse({});
+    return fail ? errorResponse(500) : jsonResponse({ running: [RUNNING_JOB], log: [] });
+  };
+  // 作业刚提交:JOB_WATCH 里有它,但首轮查询就失败,ACTIVE_JOBS 还是空的
+  evalIn(sandbox, "authenticated = true; JOB_WATCH.set(7, '批量删除'); toast = () => {}");
+  evalIn(sandbox, '__fired = null; setTimeout = fn => { __fired = fn; return 7; }');
+  await evalIn(sandbox, 'pollJobs')();
+  await tick();
+  assert.equal(evalIn(sandbox, 'ACTIVE_JOBS').length, 0);
+  assert.notEqual(evalIn(sandbox, 'busyTimer'), null,
+    '首轮就失败时 ACTIVE_JOBS 是空的,只看它就等于放弃这个作业,界面连"已经开始了"都不知道');
+
+  fail = false;
+  hits.length = 0;
+  await evalIn(sandbox, '__fired')();
+  await tick();
+  await tick();
+  await tick();
+  assert.deepEqual(hits, ['/api/jobs'], '续期的那一轮必须真的再查一次');
+  assert.equal(evalIn(sandbox, 'ACTIVE_JOBS').length, 1, '恢复之后要能看到作业已经在跑');
+});
+
 test('PERF-03 慢响应期间不重叠请求,期间的请求合并成完事后再跑一次', async () => {
   const slow = deferred();
   let calls = 0, live = 0, maxLive = 0;
@@ -628,6 +687,44 @@ test('LOAD-01 已有数据时刷新失败要保留旧数据并标明是上次的
   await tick();
   assert.equal(evalIn(sandbox, 'RECYCLE_CURSOR'), 'c1', '加载更多失败要保留游标,能原地再点一次');
   assert.equal(evalIn(sandbox, 'RECYCLE_LOADING'), false, '按钮不能卡在禁用态');
+});
+
+test('LOAD-01 成员表加载失败要保留上一次的结果', async () => {
+  let ok = true;
+  const { sandbox, state } = setup();
+  state.fetch = async () => ok
+    ? jsonResponse({ self: 'A', servers: [{ id: 'A', self: true, host: true }, { id: 'B' }] })
+    : errorResponse(500);
+  evalIn(sandbox, 'authenticated = true');
+  await evalIn(sandbox, 'loadServers')();
+  assert.equal(evalIn(sandbox, 'SERVERS').length, 2);
+
+  ok = false;
+  await evalIn(sandbox, 'loadServers')();
+  assert.equal(evalIn(sandbox, 'SERVERS').length, 2, '20 秒轮询抖一下不能让成员表清空');
+  assert.notEqual(evalIn(sandbox, "document.getElementById('srvWrap').style.display"), 'none',
+    '切服器不能因为一次失败就整个消失 —— 用户会以为集群掉了');
+});
+
+test('LOAD-01 日志页加载失败要说明,不能停在"加载中…"', async () => {
+  const { sandbox, state } = setup();
+  state.fetch = async () => errorResponse(500);
+  evalIn(sandbox, "authenticated = true; VIEW = 'jobs'; toast = () => {}");
+  await evalIn(sandbox, 'loadJobs')();
+  assert.match(evalIn(sandbox, "document.getElementById('jobsList').innerHTML"), /加载失败/,
+    '从前只弹一下 toast,页面永远停在"加载中…"');
+});
+
+test('日志页和作业轮询各用各的请求序号,不能互相作废', async () => {
+  const { sandbox, state } = setup();
+  state.fetch = async url => url.includes('poll=1')
+    ? jsonResponse({ running: [RUNNING_JOB], log: [] })
+    : jsonResponse({ running: [], log: [{ seq: 1, op: '删除', state: 'done' }], files: [] });
+  evalIn(sandbox, "authenticated = true; VIEW = 'jobs'");
+  await Promise.all([evalIn(sandbox, 'pollJobs')(), evalIn(sandbox, 'loadJobs')()]);
+  await tick();
+  assert.equal(evalIn(sandbox, 'ACTIVE_JOBS').length, 1, '轮询的结果不能被日志页作废');
+  assert.equal(evalIn(sandbox, 'JOBS').log.length, 1, '日志页的结果不能被轮询作废');
 });
 
 // UI-04:预览旧失败

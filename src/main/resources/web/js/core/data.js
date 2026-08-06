@@ -1,13 +1,33 @@
 'use strict';
 /* 数据编排层:从后端拉取 bodies/stats/recycle/servers 并更新全局状态、触发渲染 */
-let bodiesRequest = 0;
 let bodiesInFlight = false, bodiesRerun = false;
-async function loadServers(){
+
+/* 每个加载器都要做同样三件事:丢弃过期响应、失败时记下原因、然后重绘。
+   这三件事从前在七个加载器里各写各的 —— bodiesRequest / CHART.request / RECYCLE_REQ
+   三种序号写法,loadServers、pollJobs、loadJobs 干脆没有。每轮审计都能在缺的那几个里
+   再找出一条:pollJobs 没有序号,旧的空响应会把刚起的作业抹掉、顺手停掉轮询、还多刷一次
+   bodies;loadServers 失败把成员表清空,20 秒轮询抖一下切服器就整个消失。
+   收敛到一处,新加载器不会再漏。apply / onFail 只在"这一次仍然是最新的一次"时才跑,
+   所以里面可以放心改全局状态。 */
+const LOAD_SEQ = {};
+async function load(key, request, apply, onFail){
+  const seq = LOAD_SEQ[key] = (LOAD_SEQ[key] || 0) + 1;
+  const gen = srvGen();
+  const fresh = () => seq === LOAD_SEQ[key] && gen === srvGen() && authenticated;
   try {
-    const r = await api('/api/servers');
+    const result = await request();
+    if (fresh()) apply(result);
+  } catch (e) {
+    if (fresh() && onFail) onFail(e.message || String(e));
+  }
+}
+/* 成员表低频变化,失败什么都不改:抖一下就把切服器藏起来,用户会以为集群掉了。
+   真断开由 showLogin 和网关状态负责 */
+function loadServers(){
+  return load('servers', () => api('/api/servers'), r => {
     applyServersResponse(r);
     maybeWarnDefaultToken(r);
-  } catch (e) { SERVERS = []; document.getElementById('srvWrap').style.display = 'none'; }
+  });
 }
 /* ===================== 数据 ===================== */
 async function loadAll(manual){
@@ -23,40 +43,36 @@ async function loadBodies() {
   // 旧服还没回来的请求吞掉,列表一直空到 60 秒兜底刷新
   if (bodiesInFlight) { bodiesRerun = true; return; }
   bodiesInFlight = true;
-  const request = ++bodiesRequest;
-  const gen = srvGen();
+  const keepUuid = SEL && SEL.uuid;
   try {
-    const keepUuid = SEL && SEL.uuid;
-    const result = await api('/api/bodies');
-    if (request !== bodiesRequest || gen !== srvGen()) return;
-    DATA = result;
-    BODIES_ERROR = '';
-    BODY_BY_UUID = new Map();
-    CLONE_SETS = new Map((DATA.clone_sets || []).map(set=>[Number(set.id), set]));
-    PAUSED = new Set(DATA.paused || []);
-    FORCED = new Set(DATA.forced || []);
-    REACH = DATA.reach || REACH;
-    DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));
-    SELECTED = new Set([...SELECTED].filter(u => BODY_BY_UUID.has(u)));
-    const dims = new Set();
-    DATA.groups.forEach(g => g.bodies.forEach(b => dims.add(b.dim)));
-    const prevChecked = new Set([...document.querySelectorAll('.fDim:checked')].map(x=>x.value));
-    const hadAny = document.querySelectorAll('.fDim').length > 0;
-    document.getElementById('fDims').innerHTML = [...dims].map(d =>
-      `<label><input type="checkbox" class="fDim" value="${esc(d)}" ${(!hadAny || prevChecked.has(d))?'checked':''} onchange="render()"> ${esc(d.replace('minecraft:',''))}</label>`).join('');
-    document.getElementById('scanMeta').innerHTML =
-      `${fmt(DATA.total_bodies)} ${t('bodies')} · ${fmt(DATA.total_entries)} ${t('entries')}<br>${t('scanAt')} ${new Date(DATA.scan_time).toLocaleTimeString()}`;
-    refreshBlockList();
-    renderAll();
-    refreshTimer = 60;
-    if (keepUuid) reselect(keepUuid);
-  } catch (e) {
-    if (request === bodiesRequest && gen === srvGen()) {
+    await load('bodies', () => api('/api/bodies'), result => {
+      DATA = result;
+      BODIES_ERROR = '';
+      BODY_BY_UUID = new Map();
+      CLONE_SETS = new Map((DATA.clone_sets || []).map(set=>[Number(set.id), set]));
+      PAUSED = new Set(DATA.paused || []);
+      FORCED = new Set(DATA.forced || []);
+      REACH = DATA.reach || REACH;
+      DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));
+      SELECTED = new Set([...SELECTED].filter(u => BODY_BY_UUID.has(u)));
+      const dims = new Set();
+      DATA.groups.forEach(g => g.bodies.forEach(b => dims.add(b.dim)));
+      const prevChecked = new Set([...document.querySelectorAll('.fDim:checked')].map(x=>x.value));
+      const hadAny = document.querySelectorAll('.fDim').length > 0;
+      document.getElementById('fDims').innerHTML = [...dims].map(d =>
+        `<label><input type="checkbox" class="fDim" value="${esc(d)}" ${(!hadAny || prevChecked.has(d))?'checked':''} onchange="render()"> ${esc(d.replace('minecraft:',''))}</label>`).join('');
+      document.getElementById('scanMeta').innerHTML =
+        `${fmt(DATA.total_bodies)} ${t('bodies')} · ${fmt(DATA.total_entries)} ${t('entries')}<br>${t('scanAt')} ${new Date(DATA.scan_time).toLocaleTimeString()}`;
+      refreshBlockList();
+      renderAll();
+      refreshTimer = 60;
+      if (keepUuid) reselect(keepUuid);
+    }, message => {
       // 有旧数据就留着并标记"这是上次的结果";没有的话要明说加载失败,不能停在"加载中…"
-      BODIES_ERROR = e.message || String(e);
-      toast(t('loadFail') + e.message, 'bad');
+      BODIES_ERROR = message;
+      toast(t('loadFail') + message, 'bad');
       render();   // 只有列表和工具条要改口径,DATA 没变,别的面板不用重画
-    }
+    });
   } finally {
     bodiesInFlight = false;
     // 补跑要看认证状态:请求重叠期间用户注销的话,这一跑会带着空 token 发出去,
@@ -66,19 +82,20 @@ async function loadBodies() {
 }
 /* 作业状态。打 /api/jobs 而不是 /api/bodies —— running[] 里就有忙碌徽章需要的
    seq/op/state/phase/name/targets,而 bodies 快照最大 12 MiB,作业期间每 2 秒
-   重建、序列化、下发一整份纯属白烧 CPU 和带宽。作业从有到无时才刷新一次列表。
-   失败什么都不改:轮询本来就会再来一轮,没必要为一次抖动清掉进度显示。 */
-async function pollJobs(){
-  const gen = srvGen();
-  let result;
-  try { result = await api('/api/jobs?poll=1'); } catch(e){ return; }
-  if (gen !== srvGen() || !authenticated) return;
-  const had = ACTIVE_JOBS.length;
-  applyJobs(result.running || []);
-  reapFinishedJobs(result.log || []);
-  // 作业刚跑完:这时候的列表才是服务端真值(乐观更新过的字段要纠正回来)
-  if (had && !ACTIVE_JOBS.length) loadBodies();
-  syncBusyPolling();
+   重建、序列化、下发一整份纯属白烧 CPU 和带宽。作业从有到无时才刷新一次列表。 */
+function pollJobs(){
+  return load('jobs', () => api('/api/jobs?poll=1'), result => {
+    const had = ACTIVE_JOBS.length;
+    applyJobs(result.running || []);
+    reapFinishedJobs(result.log || []);
+    // 作业刚跑完:这时候的列表才是服务端真值(乐观更新过的字段要纠正回来)
+    if (had && !ACTIVE_JOBS.length) loadBodies();
+    syncBusyPolling();
+  }, () => {
+    // 失败什么都不改,但一定要续期:定时器回调进来时已经把 busyTimer 清空了,
+    // 这里不续就再没有人续 —— 抖一次网络,进度显示会一直冻到 60 秒兜底刷新才动
+    syncBusyPolling();
+  });
 }
 /* 每个作业一条,按 targets 展开成"体 → 作业"给行徽章用;
    没有目标体的作业(回收站恢复/重扫磁盘)只进 ACTIVE_JOBS,靠顶栏指示器显示 */
@@ -98,8 +115,10 @@ function applyJobs(list){
    用 setTimeout 自续期而不是 setInterval:上一轮真的回来了才排下一轮,请求不会重叠。 */
 function syncBusyPolling(){
   // 只管定时器。作业跑完时不能顺手清 JOB_WATCH —— 紧接着的 reapFinishedJobs 正是靠它
-  // 去取终态弹 toast,清了就永远弹不出"完成/失败"
-  if (!ACTIVE_JOBS.length) { clearBusyTimer(); return; }
+  // 去取终态弹 toast,清了就永远弹不出"完成/失败"。
+  // JOB_WATCH 也要算进续期条件:作业刚提交、首轮查询就失败时 ACTIVE_JOBS 还是空的,
+  // 只看它就等于放弃这个作业 —— 界面连"已经开始了"都不知道
+  if (!ACTIVE_JOBS.length && !JOB_WATCH.size) { clearBusyTimer(); return; }
   if (busyTimer) return;
   const gen = srvGen();
   busyTimer = setTimeout(() => {
@@ -163,15 +182,11 @@ function reselect(uuid){
   }
   SEL = null; SELG = null;
 }
-async function loadStats(){
-  const request = (CHART.request || 0) + 1;
-  CHART.request = request;
-  const gen = srvGen();
+/* 统计失败不影响主体操作,所以没有 onFail:图表留着上一次的,下一轮 15 秒后自己回来 */
+function loadStats(){
   const now = Math.floor(Date.now()/1000);
   if (CHART.live) { CHART.to = now; CHART.from = now - CHART.span; }
-  try {
-    const result = await api(`/api/stats?from=${CHART.from}&to=${CHART.to}&max_points=2000`);
-    if (request !== CHART.request || gen !== srvGen()) return;
+  return load('stats', () => api(`/api/stats?from=${CHART.from}&to=${CHART.to}&max_points=2000`), result => {
     STATS = result;
     CHART.from = Number(STATS.range_from ?? CHART.from);
     CHART.to = Number(STATS.range_to ?? CHART.to);
@@ -182,34 +197,27 @@ async function loadStats(){
     drawPhysChart(document.getElementById('pillSpark'), false);
     renderStatPop();
     if (VIEW === 'dash') renderDash();
-  } catch(e){ /* 统计失败不影响主体操作 */ }
+  });
 }
 /* 在线玩家列表:15s 节流,失败静默(下拉显示"没有在线玩家") */
-async function loadPlayers(force){
+function loadPlayers(force){
   if (!force && Date.now() - playersFetchedAt < 15000) { renderPlayerSelect(); return; }
   playersFetchedAt = Date.now();
-  const gen = srvGen();
-  try {
-    const r = await api('/api/players');
-    if (gen !== srvGen()) return;
-    PLAYERS = r.players || [];
-  } catch(e){ if (gen !== srvGen()) return; PLAYERS = []; }
-  renderPlayerSelect();
+  return load('players', () => api('/api/players'),
+    r => { PLAYERS = r.players || []; renderPlayerSelect(); },
+    () => { PLAYERS = []; renderPlayerSelect(); });
 }
 /* 回收站游标分页。append=false 是重新从第一页拉(切服/删除/恢复之后),true 是"加载更多"。
    服务端一页只读这一页的 manifest,不会像从前那样先把全部备份建成一个对象再发。 */
-async function loadRecycle(append){
-  const req = ++RECYCLE_REQ;
+function loadRecycle(append){
   RECYCLE_LOADING = true;
-  const gen = srvGen();
   const cursor = append ? RECYCLE_CURSOR : '';
-  try {
-    const query = `?version=${R_TAB}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-    const page = await api('/api/recycle' + query);
-    // 整表重拉可能和翻页撞上,晚到的那次不能落地 —— 否则会把一页追加到另一份列表上
-    if (gen !== srvGen() || req !== RECYCLE_REQ) return;
+  const query = `?version=${R_TAB}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+  // 整表重拉可能和翻页撞上,晚到的那次不能落地 —— 否则会把一页追加到另一份列表上。
+  // 过期的那次不用管 RECYCLE_LOADING:更新的那次自己会清
+  return load('recycle', () => api('/api/recycle' + query), page => {
     // 必须在渲染之前清:下面的 renderRecycle 会照着 RECYCLE_LOADING 画按钮,
-    // 留到 finally 里清就只改变量不重绘,"加载更多"会永久停在 disabled 的"加载中…"
+    // 只改变量不重绘的话,"加载更多"会永久停在 disabled 的"加载中…"
     RECYCLE_LOADING = false;
     RECYCLE_ERROR = '';
     const groups = page.groups || [];
@@ -238,17 +246,14 @@ async function loadRecycle(append){
     }
     if (VIEW==='dash') renderDash();
     if (VIEW==='recycle') renderRecycle();
-  } catch(e){
-    if (gen !== srvGen() || req !== RECYCLE_REQ) return;
+  }, message => {
     RECYCLE_LOADING = false;   // 同上:失败时也要在重绘之前清,否则按钮卡在禁用态
     // 失败就是失败:既不写一份空数据(那会显示成"回收站为空"),也不动游标 ——
     // "加载更多"要能原地再点一次
-    RECYCLE_ERROR = e.message || String(e);
-    if (append) toast(t('loadFail') + e.message, 'bad');
+    RECYCLE_ERROR = message;
+    if (append) toast(t('loadFail') + message, 'bad');
     if (VIEW==='recycle') renderRecycle();
-  } finally {
-    if (req === RECYCLE_REQ) RECYCLE_LOADING = false;
-  }
+  });
 }
 function loadMoreRecycle(){ if (RECYCLE_CURSOR && !RECYCLE_LOADING) loadRecycle(true); }
 /* 每页的调色板是这一页自己的,索引也只对这一页有效 —— 追加时把新页的 blk 重映射到合并后的表 */
