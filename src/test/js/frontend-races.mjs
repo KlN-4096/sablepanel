@@ -353,6 +353,77 @@ test('UI-03 切服后顶栏统计和统计弹层也要立刻清空', async () =>
   slowStats.resolve(jsonResponse({ t: [], phys: {}, phys_1m: {}, loaded: {}, body_cost_total: 0, top_cost: [] }));
 });
 
+test('UI-03 断开远端再登录时,旧远端的界面不能再露出来', async () => {
+  // disconnectGateway 从前只清 DATA/STATS/RECYCLE,也不重画;而 authenticate 在
+  // await loadAll 之前就 remove('locked') —— 新远端的 bodies 慢一点,旧远端的顶栏数字、
+  // 统计弹层、列表就都又露出来了
+  const slowBodies = deferred();
+  let phase = 'old';
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/gateway/')) return jsonResponse({ ok: true });
+    if (url.startsWith('/api/stats')) {
+      return jsonResponse({ t: [], phys: {}, phys_1m: {}, loaded: {}, body_cost_total: 9,
+        top_cost: [{ uuid: 'OLD_REMOTE_BODY', name: '旧远端的体', cost: 9 }] });
+    }
+    if (url.startsWith('/api/bodies')) {
+      return phase === 'old' ? bodiesResponse({ total_bodies: 11 }) : slowBodies.promise;
+    }
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ self: phase === 'old' ? 'OLD' : 'NEW',
+      servers: [{ id: phase === 'old' ? 'OLD' : 'NEW', self: true }], running: [], log: [] });
+  };
+  evalIn(sandbox, "gatewayMode = 'client'; authenticated = true; toast = () => {}");
+  evalIn(sandbox, "document.getElementById('loginAddress').value = '10.0.0.9'");
+  await evalIn(sandbox, 'loadStats')();
+  await evalIn(sandbox, 'loadBodies')();
+  assert.equal(evalIn(sandbox, "document.getElementById('pillCost').textContent"), '9.00');
+  assert.equal(evalIn(sandbox, 'DATA.total_bodies'), 11);
+
+  await evalIn(sandbox, 'disconnectGateway')();
+  phase = 'new';
+  const login = evalIn(sandbox, 'authenticate')('t', false);
+  await tick();
+  await tick();
+  // 此时已经解锁,而新远端的 bodies 还挂着
+  assert.equal(evalIn(sandbox, 'DATA'), null, '旧远端的快照必须已经没了');
+  assert.equal(evalIn(sandbox, "document.getElementById('pillCost').textContent"), '--',
+    '顶栏不能还是旧远端的 9.00');
+  assert.doesNotMatch(evalIn(sandbox, "document.getElementById('statPop').innerHTML"), /OLD_REMOTE_BODY/,
+    '统计弹层同理');
+  slowBodies.resolve(bodiesResponse());
+  await login;
+});
+
+test('UI-03 切服要清掉图表区间和悬浮提示', async () => {
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ self: 'A', servers: [{ id: 'A', self: true }, { id: 'B' }], running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; SERVERS = [{id:'A',self:true},{id:'B'}]; toast = () => {}");
+  evalIn(sandbox, "STATS = {t:[], loaded:{}, body_cost_total:1, top_cost:[]}");
+  // A 服上用户拖过时间轴、鼠标停在某个点上
+  evalIn(sandbox, "CHART.from = 1000; CHART.to = 2000; CHART.live = false; CHART.preset = null; CHART.hoverIndex = 5");
+  evalIn(sandbox, "const tip = document.getElementById('chartTip'); tip.style.display = 'block'; tip.innerHTML = 'A 服的悬浮'");
+
+  // 断言点是"重置完成、新数据还没到"这一段:loadStats 一旦回来就会按 live 重设区间,
+  // 那时 from/to 非零是对的。switchServer 的重置是同步的,所以这里不 await
+  const switching = evalIn(sandbox, 'switchServer')('B');
+  assert.equal(evalIn(sandbox, 'CHART.from'), 0,
+    '不清 from/to 的话,页面写着"实时 5 分钟",日期输入框还是上一个服的自定义区间');
+  assert.equal(evalIn(sandbox, 'CHART.to'), 0);
+  assert.equal(evalIn(sandbox, 'CHART.hoverIndex'), -1);
+  // 用户看见的是输入框,不是变量:1000 秒会被画成 1970-01-01
+  assert.doesNotMatch(evalIn(sandbox, "document.getElementById('chartFrom').value"), /^1970/,
+    '日期输入框必须跟着回到实时窗口');
+  assert.equal(evalIn(sandbox, "document.getElementById('chartTip').style.display"), 'none',
+    '空图上不该还挂着上一个服的悬浮提示');
+  assert.equal(evalIn(sandbox, "document.getElementById('chartTip').innerHTML"), '');
+  await switching;
+});
+
 test('UI-03 切服清空作业 watch、忙碌定时器和日志页', async () => {
   const { sandbox, state } = setup();
   state.fetch = async (url) => {

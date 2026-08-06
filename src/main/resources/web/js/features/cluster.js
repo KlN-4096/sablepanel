@@ -18,25 +18,32 @@ function toggleSrvPop(){
   const p = document.getElementById('srvPop');
   p.style.display = p.style.display === 'block' ? 'none' : 'block';
 }
-async function switchServer(id){
-  document.getElementById('srvPop').style.display = 'none';
+/* 关掉属于当前服务器的弹层。必须在改 CURSRV 之前调:closeConsistency 会按
+   consistencyDismissKey() 记"已读",而那个键是按服务器隔离的 —— 改完再关就记到新服头上了 */
+function closeServerModals(){
   closeDedupe();
   if (document.getElementById('consistencyBack').style.display==='flex') closeConsistency();
-  const self = SERVERS.find(s => s.self);
-  CURSRV = (self && id === self.id) ? '' : id;
-  localStorage.setItem('spServer', CURSRV);
+}
+/* 服务器上下文归零。切服和断开远端共用 —— 两个入口各自手写一份的话总有一份漏:
+   断开远端从前只清 DATA/STATS/RECYCLE,而 authenticate 在 loadAll 之前就解锁,
+   新远端的 bodies 慢一点,旧远端的顶栏数字、列表、统计弹层就会再露一次。
+   调用方负责先定好 CURSRV(收藏按服务器隔离,loadFav 要读它)并先关弹层。 */
+function resetServerContext(){
   // 代次先自增:在途的 bodies/recycle/stats/players/jobs 响应从这一刻起全部作废,
   // 否则旧服的慢响应回来会直接盖掉新服的界面
   SRVGEN++;
-  const gen = srvGen();
   // 作业状态按服务器隔离:JobService 的 seq 在每个服务端都从 1 开始,不清就会张冠李戴
   stopBusyPolling();
   JOBS = null; JOBS_ERROR = ''; jobsFile = ''; jobsExpanded.clear();
-  // 切服等于换了一整套数据,旧的一律作废
+  CONSISTENCY = null; CONSISTENCY_POLL_GEN++;   // 作废还在等新报告的那个循环
+  // 换了一整套数据,旧的一律作废
   DATA = STATS = RECYCLE = null; SEL = SELG = RSEL = RSELG = MESH_DATA = MESH_UUID = MESH_SOURCE = null;
   BODIES_ERROR = RECYCLE_ERROR = '';   // 旧服的失败提示不能挂在新服界面上
   CLONE_SETS = new Map();
+  // from/to 也要清:updateChartControls 优先用非零区间,不清的话页面写着"实时 5 分钟",
+  // 日期输入框里还是上一个服的自定义区间
   CHART.live = true; CHART.span = 300; CHART.preset = 300; CHART.hoverIndex = -1;
+  CHART.from = 0; CHART.to = 0;
   SELECTED = new Set(); BODY_BY_UUID = new Map();
   R_SELECTED = new Set(); RECYCLE_BY_ID = new Map();
   RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
@@ -46,13 +53,22 @@ async function switchServer(id){
     `<div id="detailEmpty"><span class="big">⬢</span><span>${t('pickBody')}</span></div>`;
   document.getElementById('ops').style.display = 'none';
   clearRecycleDetail();
+  // 状态清空之后必须立刻整页重画。不画的话总览的图表、"最吃性能"、顶栏数字、日志页
+  // 都还挂着上一个服的 HTML —— 点一下就是拿旧服的 uuid 查新服
+  renderAll();
+}
+async function switchServer(id){
+  document.getElementById('srvPop').style.display = 'none';
+  closeServerModals();
+  const self = SERVERS.find(s => s.self);
+  CURSRV = (self && id === self.id) ? '' : id;
+  localStorage.setItem('spServer', CURSRV);
+  resetServerContext();
+  const gen = srvGen();
   // 顶栏立刻切过去 —— 数据还在路上时也别显示旧服务器名
   renderServerPicker(self ? self.id : id);
-  // 状态清空之后必须立刻整页重画。只画横幅的话,总览的图表、"最吃性能"、日志页
-  // 都还挂着上一个服的 HTML,一直挂到 loadAll 回来 —— 点一下就是拿旧服的 uuid 查新服
-  renderAll();
   await loadAll(true);
-  CONSISTENCY=null; scheduleStartupConsistency();
+  scheduleStartupConsistency();
   // A→B 快速连切时,A 那次的慢请求回来后界面已经是 B 了,再弹"已切换到 A"就是骗人。
   // 数据落地有代次保护,操作反馈也要有
   if (gen === srvGen()) toast(t('srvSwitched')(id));

@@ -129,11 +129,13 @@ async function disconnectGateway(){
     method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'
   }).catch(()=>{});
   gatewayConnected = false;
-  DATA = STATS = RECYCLE = null;
-  RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
+  closeServerModals();      // 要在改 CURSRV 之前
   SERVERS = []; CURSRV = '';
-  SRVGEN++;                 // 断开等于换服:在途响应一律作废
   localStorage.removeItem('spServer');
+  // 断开等于换服,归零走跟切服同一套。从前这里只清 DATA/STATS/RECYCLE 也不重画,
+  // 而 authenticate 在 loadAll 之前就解锁 —— 新远端的 bodies 慢一点,旧远端的界面会再露一次
+  resetServerContext();
+  renderServerPicker('');
   document.getElementById('gatewayDisconnect').style.display = 'none';
   showLogin('');
 }

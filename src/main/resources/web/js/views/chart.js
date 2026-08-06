@@ -33,6 +33,14 @@ function renderStats(){
   updateChartControls();
   drawPhysChart(document.getElementById('pillSpark'), false);
   renderStatPop();
+  // 悬浮提示只在鼠标移出时隐藏。切服清空 STATS 之后图是空的,上一个服的 tooltip
+  // 还能挂在上面 —— 没数据就没有可提示的东西
+  if (!STATS) {
+    const tip = document.getElementById('chartTip');
+    tip.style.display = 'none';
+    tip.innerHTML = '';
+    CHART.hoverIndex = -1;
+  }
 }
 function updateChartControls(){
   const now = Math.floor(Date.now()/1000);
