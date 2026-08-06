@@ -239,8 +239,8 @@ class DiskScannerCorruptionTest {
         writeStorageFile(dir.resolve("r.0.0.slvlr"), 128,
                 Map.of(7, gzipNbt(pointerTag(0, 5, 5))));
 
-        List<DiskScanner.PointerReference> references =
-                DiskScanner.scanPointersStrict(Map.of(DIM, dir), new ArrayList<>());
+        List<DiskScanner.PointerReference> references = new ArrayList<>();
+        DiskScanner.forEachPointerStrict(Map.of(DIM, dir), new ArrayList<>(), references::add);
         DiskScanner.EntryKey dangling = new DiskScanner.EntryKey(DIM, 0, 0, 0, 5);
 
         assertEquals(3, references.size());

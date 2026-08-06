@@ -135,7 +135,7 @@ class ResponseLimitAdversarialTest {
                     break;
                 }
             }
-            long size = JsonSize.of(jobs.view());
+            long size = JsonSize.of(jobs.view(false));
             assertTrue(size < BUSY_BUDGET,
                     "满容量的 /api/jobs 必须落在 2 MiB 内(资源上限归资源所有者),实际 " + size);
         } finally {
@@ -176,14 +176,14 @@ class ResponseLimitAdversarialTest {
         // 摘要从前是"复制白名单字段再截断 name",于是同样来自磁盘、同样没有长度限制的
         // dims 整份进来 —— 一个 34 MiB 的 dims 就能让「固定尺寸摘要」自己越过协议上限
         writeGroup("20260101-000009-000", "dims", "D".repeat(35_000_000), 1, "n");
-        JsonObject page = new RecycleStore(new PanelConfig(), this.root).view("", 100);
+        JsonObject page = new RecycleStore(new PanelConfig(), this.root).view("latest", "", 100);
         assertUnderWireLimit("超长 dims 的回收组", page);
     }
 
     @Test
     void hostileStateFieldCannotEscapeThroughTheSummary() throws Exception {
         writeGroup("20260101-000009-000", "state", "S".repeat(35_000_000), 1, "n");
-        JsonObject page = new RecycleStore(new PanelConfig(), this.root).view("", 100);
+        JsonObject page = new RecycleStore(new PanelConfig(), this.root).view("latest", "", 100);
         assertUnderWireLimit("超长 state 的回收组", page);
     }
 
@@ -195,7 +195,7 @@ class ResponseLimitAdversarialTest {
         RecycleStore store = new RecycleStore(new PanelConfig(), this.root);
         String cursor = "";
         for (int page = 0; page < 20; page++) {
-            JsonObject view = store.view(cursor, 200);
+            JsonObject view = store.view("latest", cursor, 200);
             assertUnderWireLimit("回收站第 " + page + " 页", view);
             cursor = view.get("next_cursor").getAsString();
             if (cursor.isEmpty()) return;

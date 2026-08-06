@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -90,7 +91,7 @@ class RecycleStorePagingTest {
         String cursor = "";
         int pages = 0;
         do {
-            JsonObject page = store.view(cursor, 3);
+            JsonObject page = store.view("latest", cursor, 3);
             List<String> pageIds = ids(page);
             assertTrue(pageIds.size() <= 3, "单页不得超过请求的上限");
             for (String id : pageIds) assertTrue(seen.add(id), "同一个组不能出现在两页里: " + id);
@@ -110,20 +111,20 @@ class RecycleStorePagingTest {
     @Test
     void lastPageReportsNoCursorAndEmptyStoreReturnsEmptyPage() throws Exception {
         RecycleStore empty = store();
-        JsonObject page = empty.view("", 0);
+        JsonObject page = empty.view("latest", "", 0);
         assertEquals(0, page.getAsJsonArray("groups").size());
         assertEquals("", page.get("next_cursor").getAsString());
         assertEquals(0, page.get("total_groups").getAsInt());
 
         writeGroup("20260101-000001-000", 1, 1);
         writeGroup("20260101-000002-000", 1, 1);
-        JsonObject full = store().view("", 10);
+        JsonObject full = store().view("latest", "", 10);
         assertEquals(2, full.getAsJsonArray("groups").size());
         assertEquals("", full.get("next_cursor").getAsString(), "取完了就不该再给游标");
 
         // 游标指向最后一个组 -> 后面没有内容了
         String lastId = ids(full).get(1);
-        JsonObject beyond = store().view(lastId, 10);
+        JsonObject beyond = store().view("latest", lastId, 10);
         assertEquals(0, beyond.getAsJsonArray("groups").size());
         assertEquals("", beyond.get("next_cursor").getAsString());
     }
@@ -135,13 +136,13 @@ class RecycleStorePagingTest {
         RecycleStore store = store();
 
         // 游标那一组在两次请求之间被清理掉:keyset 语义下仍然只返回它之后的组
-        JsonObject afterDeleted = store.view(newer, 10);
+        JsonObject afterDeleted = store.view("latest", newer, 10);
         assertEquals(List.of(older), ids(afterDeleted));
         deleteTree(this.root.resolve(newer));
-        assertEquals(List.of(older), ids(store.view(newer, 10)), "游标组消失后翻页不能失败");
+        assertEquals(List.of(older), ids(store.view("latest", newer, 10)), "游标组消失后翻页不能失败");
 
         // 格式非法的游标退回第一页,而不是抛错把整个回收站页面打空
-        JsonObject garbage = store.view("../../etc/passwd", 10);
+        JsonObject garbage = store.view("latest", "../../etc/passwd", 10);
         assertEquals(List.of(older), ids(garbage));
         assertFalse(garbage.has("error"));
     }
@@ -153,7 +154,7 @@ class RecycleStorePagingTest {
         String small = writeGroup("20260101-000001-000", 1, 2);
         RecycleStore store = store();
 
-        JsonObject first = store.view("", 100);
+        JsonObject first = store.view("latest", "", 100);
         assertTrue(ids(first).contains(huge), "超预算的组必须发得出去,不能被挤到永远翻不到");
         assertTrue(pageBytes(first) < 4 * 1024 * 1024, "退让之后整页仍要受控,实际 " + pageBytes(first));
 
@@ -177,11 +178,11 @@ class RecycleStorePagingTest {
         String kept = writeGroup("20260101-000009-000", 1, 2);
         String gone = writeGroup("20260101-000001-000", 1, 2);
         RecycleStore store = store();
-        assertEquals(2, store.view("", 100).getAsJsonArray("groups").size());
+        assertEquals(2, store.view("latest", "", 100).getAsJsonArray("groups").size());
 
         store.purgeGroups(List.of(gone));
 
-        JsonObject after = store.view("", 100);
+        JsonObject after = store.view("latest", "", 100);
         assertEquals(List.of(kept), ids(after), "彻底删除必须让缓存立刻失效");
         assertEquals(1, after.get("total_groups").getAsInt());
         assertEquals(1, after.get("latest_groups").getAsInt());
@@ -200,14 +201,14 @@ class RecycleStorePagingTest {
             Files.writeString(this.root.resolve(id).resolve("a.nbt.gz"), "x", StandardCharsets.UTF_8);
         }
         RecycleStore store = new RecycleStore(config, this.root);
-        JsonObject before = store.view("", 100);
+        JsonObject before = store.view("latest", "", 100);
         assertEquals(4, before.getAsJsonArray("groups").size(), "超限也不能自动删除");
         assertEquals(4, before.get("file_count").getAsInt());
 
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
                 () -> store.stage(List.of(new RecycleStore.Source(UUID.randomUUID(),
                         RecycleStore.DEFAULT_DIMENSION, new DiskScanner.EntryKey(
-                                RecycleStore.DEFAULT_DIMENSION, 0, 0, 0, 0), new net.minecraft.nbt.CompoundTag()))));
+                                RecycleStore.DEFAULT_DIMENSION, 0, 0, 0, 0), new net.minecraft.nbt.CompoundTag())), Map.of()));
     }
 
     @Test
@@ -221,7 +222,7 @@ class RecycleStorePagingTest {
         String cursor = "";
         int pages = 0;
         do {
-            JsonObject page = store.view(cursor, 2);
+            JsonObject page = store.view("latest", cursor, 2);
             for (String id : ids(page)) assertTrue(seen.add(id), "同一组不能翻到两次: " + id);
             cursor = page.get("next_cursor").getAsString();
             assertTrue(++pages <= 12, "翻页必须收敛");
@@ -230,7 +231,7 @@ class RecycleStorePagingTest {
 
         // 游标指向一个已经不存在的 id(两次请求之间被清掉):keyset 语义下仍要继续往后翻。
         // 后缀 zzzzzzzz 排在 05 那组的真实随机后缀之后,所以 05 自己也在游标之后 —— 05..01 共 5 组
-        JsonObject afterStale = store.view("20260105-000000-000-zzzzzzzz", 100);
+        JsonObject afterStale = store.view("latest", "20260105-000000-000-zzzzzzzz", 100);
         assertEquals(5, afterStale.getAsJsonArray("groups").size(), "失效游标要落到同一个位置");
     }
 
@@ -239,7 +240,7 @@ class RecycleStorePagingTest {
         Set<String> seen = new LinkedHashSet<>();
         String cursor = "";
         for (int page = 0; page < 20; page++) {
-            JsonObject view = store.view(cursor, 100);
+            JsonObject view = store.view("latest", cursor, 100);
             seen.addAll(ids(view));
             cursor = view.get("next_cursor").getAsString();
             if (cursor.isEmpty()) break;
@@ -255,7 +256,7 @@ class RecycleStorePagingTest {
         String small = writeGroup("20260101-000001-000", 1, 2);
         RecycleStore store = store();
 
-        JsonObject first = store.view("", 100);
+        JsonObject first = store.view("latest", "", 100);
         JsonObject group = first.getAsJsonArray("groups").get(0).getAsJsonObject();
         assertEquals(huge, group.get("id").getAsString());
         assertTrue(group.get("bodies_omitted").getAsBoolean(), "连元数据都装不下就只发摘要");
@@ -277,7 +278,7 @@ class RecycleStorePagingTest {
         int seen = 0;
         String cursor = "";
         do {
-            JsonObject page = store.view(cursor, 100);
+            JsonObject page = store.view("latest", cursor, 100);
             seen += page.getAsJsonArray("groups").size();
             assertTrue(pageBytes(page) < 4 * 1024 * 1024,
                     "单页字节必须受控,实际 " + pageBytes(page));
@@ -296,7 +297,7 @@ class RecycleStorePagingTest {
         String huge = writeGroup("20260101-000001-000", 30, 20_000);
         RecycleStore store = store();
 
-        JsonObject first = store.view("", 100);
+        JsonObject first = store.view("latest", "", 100);
         assertEquals(List.of(small), ids(first), "超预算的大组必须留到下一页");
         assertFalse(first.getAsJsonArray("groups").get(0).getAsJsonObject().has("blocks_omitted"));
         // 被拒的候选不能把自己的调色板条目留在表里 —— 那就是没人引用又没记账的字节。
@@ -304,7 +305,7 @@ class RecycleStorePagingTest {
         assertEquals(2, first.getAsJsonArray("block_palette").size(),
                 "第一页只该有小组用到的那两种方块");
 
-        JsonObject second = store.view(first.get("next_cursor").getAsString(), 100);
+        JsonObject second = store.view("latest", first.get("next_cursor").getAsString(), 100);
         assertEquals(List.of(huge), ids(second), "大组单独成页");
         assertTrue(second.getAsJsonArray("groups").get(0).getAsJsonObject()
                 .get("blocks_omitted").getAsBoolean(), "单独成页才轮得到只发元数据");
@@ -315,7 +316,7 @@ class RecycleStorePagingTest {
     void pageLimitIsCappedAndPaletteIsPerPage() throws Exception {
         for (int i = 1; i <= 3; i++) writeGroup(String.format("20260101-00000%d-000", i), 1, 2);
         RecycleStore store = store();
-        JsonObject page = store.view("", 9999);
+        JsonObject page = store.view("latest", "", 9999);
         assertEquals(RecycleStore.PAGE_LIMIT_MAX, page.get("page_limit").getAsInt(), "客户端要不到超过硬上限的页");
         // 调色板只覆盖这一页出现过的方块,blk 索引指向的就是本页的表
         assertEquals(2, page.getAsJsonArray("block_palette").size());
@@ -345,7 +346,7 @@ class RecycleStorePagingTest {
         String cursor = "";
         int pages = 0;
         do {
-            JsonObject page = store.view(cursor, 200);
+            JsonObject page = store.view("latest", cursor, 200);
             // 退让标记就是例外路径的指纹;本用例的每组自己都装得下,一个都不该出现
             for (var element : page.getAsJsonArray("groups")) {
                 JsonObject group = element.getAsJsonObject();
@@ -370,13 +371,13 @@ class RecycleStorePagingTest {
     void theDirectoryIndexIsCachedUntilAWriteNotUntilATimerExpires() throws Exception {
         String first = writeGroup("20260101-000000-000", 1, 2);
         RecycleStore store = store();
-        assertEquals(List.of(first), ids(store.view("", 100)));
+        assertEquals(List.of(first), ids(store.view("latest", "", 100)));
 
         writeGroup("20260102-000000-000", 1, 2);
-        assertEquals(List.of(first), ids(store.view("", 100)), "没有经过本模块的写入就不该重扫全盘");
+        assertEquals(List.of(first), ids(store.view("latest", "", 100)), "没有经过本模块的写入就不该重扫全盘");
 
         store.markRestored(first);   // 一次真正的写入
-        assertEquals(2, ids(store.view("", 100)).size(), "写入之后必须立刻反映,不能等 TTL");
+        assertEquals(2, ids(store.view("latest", "", 100)).size(), "写入之后必须立刻反映,不能等 TTL");
     }
 
     private static void deleteTree(Path directory) throws Exception {

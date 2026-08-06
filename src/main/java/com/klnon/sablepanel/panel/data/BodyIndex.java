@@ -293,13 +293,6 @@ public final class BodyIndex {
         return best;
     }
 
-    public DiskScanner.DiskEntry findEntry(String entryId) {
-        for (DiskScanner.DiskEntry e : this.diskSnapshot) {
-            if (e.key().id().equals(entryId)) return e;
-        }
-        return null;
-    }
-
     /** 全量视图 JSON:组聚合 + 体明细 + 方块调色板 */
     public JsonObject view() {
         List<DiskScanner.DiskEntry> disk = this.diskSnapshot;

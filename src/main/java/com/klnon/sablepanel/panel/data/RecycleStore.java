@@ -145,10 +145,6 @@ public final class RecycleStore {
         rebuildLatestIndex();
     }
 
-    public synchronized Stage stage(List<Source> sources) throws IOException {
-        return stage(sources, Map.of());
-    }
-
     public synchronized Stage stage(List<Source> sources, Map<UUID, OperationalState> states) throws IOException {
         return stageInternal(sources, states, null);
     }
@@ -361,10 +357,6 @@ public final class RecycleStore {
      *
      * @param limit 单页组数,≤0 取默认值,上限 {@link #PAGE_LIMIT_MAX}
      */
-    public synchronized JsonObject view(String cursor, int limit) {
-        return view("latest", cursor, limit);
-    }
-
     public synchronized JsonObject view(String version, String cursor, int limit) {
         if (!"latest".equals(version) && !"old".equals(version)) {
             throw new IllegalArgumentException("回收站版本必须是 latest 或 old");

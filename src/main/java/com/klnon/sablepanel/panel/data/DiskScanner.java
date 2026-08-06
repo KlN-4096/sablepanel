@@ -322,14 +322,6 @@ public final class DiskScanner {
     public record PointerReference(EntryKey key, int chunkX, int chunkZ) {
     }
 
-    /** 严格读取全部 holding 指针；一致性检查据此识别目标槽为空的引用。 */
-    public static List<PointerReference> scanPointersStrict(Map<String, Path> dims,
-                                                             List<String> warnings) throws IOException {
-        List<PointerReference> references = new ArrayList<>();
-        forEachPointerStrict(dims, warnings, references::add);
-        return List.copyOf(references);
-    }
-
     /** 流式严格遍历 holding 指针；目标定位和有上限的检查不必先物化全服指针表。 */
     public static void forEachPointerStrict(Map<String, Path> dims, List<String> warnings,
                                             PointerConsumer consumer) throws IOException {

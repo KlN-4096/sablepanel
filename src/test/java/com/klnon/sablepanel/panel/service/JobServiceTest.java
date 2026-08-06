@@ -259,7 +259,7 @@ class JobServiceTest {
             });
             assertTrue(waitUntil(() -> running(jobs).isEmpty(), 20_000), "作业应当结束并进入历史");
 
-            JsonObject full = jobs.view();
+            JsonObject full = jobs.view(false);
             JsonObject poll = jobs.view(true);
             JsonObject fullEntry = full.getAsJsonArray("log").get(0).getAsJsonObject();
             JsonObject pollEntry = poll.getAsJsonArray("log").get(0).getAsJsonObject();
@@ -284,7 +284,7 @@ class JobServiceTest {
     }
 
     private static JsonArray running(JobService jobs) {
-        return jobs.view().getAsJsonArray("running");
+        return jobs.view(false).getAsJsonArray("running");
     }
 
     private static JsonObject okTotal(int ok, int total) {

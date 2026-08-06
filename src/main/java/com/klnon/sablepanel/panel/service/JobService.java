@@ -167,8 +167,8 @@ public final class JobService implements AutoCloseable {
             for (UUID key : keys) {
                 Long running = this.busy.get(key);
                 if (running != null) {
-                    Job other = this.active.get(running);
-                    String name = other != null ? other.op : "作业 #" + running;
+                    // busy 与 active 在同一把锁下同增同删,busy 命中则 active 必有对应记录
+                    String name = this.active.get(running).op;
                     throw new IllegalStateException(targets.isEmpty()
                             ? "该操作正在执行中(" + name + "),请等它结束"
                             : "该物理体正在处理中(" + name + "),请等它结束");
@@ -273,11 +273,6 @@ public final class JobService implements AutoCloseable {
     }
 
     // ---------- 读取 ----------
-
-    /** 日志页:内存里的当前一轮(正在跑的 + 最近完成的) */
-    public JsonObject view() {
-        return view(false);
-    }
 
     /**
      * {@code poll=true} 是面板每 2 秒那一次作业状态轮询要的份额。

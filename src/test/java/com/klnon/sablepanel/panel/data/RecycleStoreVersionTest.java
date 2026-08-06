@@ -86,7 +86,7 @@ class RecycleStoreVersionTest {
         RecycleStore running = store();
         UUID uuid = UUID.randomUUID();
         String committed = commit(running, uuid, 0);
-        RecycleStore.Stage interrupted = running.stage(List.of(source(uuid, 1)));
+        RecycleStore.Stage interrupted = running.stage(List.of(source(uuid, 1)), Map.of());
         Path manifest = this.root.resolve(".pending").resolve(interrupted.id()).resolve("manifest.json");
         Files.writeString(manifest, Files.readString(manifest, StandardCharsets.UTF_8)
                 .replace("\"state\": \"pending\"", "\"state\": \"deleted\""), StandardCharsets.UTF_8);
@@ -105,7 +105,7 @@ class RecycleStoreVersionTest {
         RecycleStore store = store();
         String older = commitGroup(store, 0, shared, dependency);
         String newer = commit(store, shared, 2);
-        store.stage(List.of(source(UUID.randomUUID(), 9)));
+        store.stage(List.of(source(UUID.randomUUID(), 9)), Map.of());
         JsonObject latest = store.view("latest", "", 10);
         JsonObject old = store.view("old", "", 10);
 
@@ -198,10 +198,10 @@ class RecycleStoreVersionTest {
         PanelConfig config = new PanelConfig();
         config.recycleMaxFiles = 1;
         RecycleStore store = new RecycleStore(config, this.root);
-        store.stage(List.of(source(UUID.randomUUID(), 0)));
+        store.stage(List.of(source(UUID.randomUUID(), 0)), Map.of());
 
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
-                () -> store.stage(List.of(source(UUID.randomUUID(), 1))));
+                () -> store.stage(List.of(source(UUID.randomUUID(), 1)), Map.of()));
     }
 
     private RecycleStore store() {
@@ -209,7 +209,7 @@ class RecycleStoreVersionTest {
     }
 
     private static String commit(RecycleStore store, UUID uuid, int slot) throws Exception {
-        return store.commit(store.stage(List.of(source(uuid, slot))));
+        return store.commit(store.stage(List.of(source(uuid, slot)), Map.of()));
     }
 
     private static String commitGroup(RecycleStore store, int firstSlot, UUID... uuids) throws Exception {
@@ -217,7 +217,7 @@ class RecycleStoreVersionTest {
         for (int index = 0; index < uuids.length; index++) {
             sources.add(source(uuids[index], firstSlot + index));
         }
-        return store.commit(store.stage(sources));
+        return store.commit(store.stage(sources, Map.of()));
     }
 
     private static RecycleStore.Source source(UUID uuid, int slot) {
