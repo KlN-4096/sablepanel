@@ -45,7 +45,7 @@ public final class ClientPanelConfig {
     public synchronized void save() throws java.io.IOException {
         Path file = this.configFile != null ? this.configFile : file();
         Files.createDirectories(file.getParent());
-        com.klnon.sablepanel.panel.data.AtomicIo.writeString(file, new GsonBuilder().setPrettyPrinting().create().toJson(this));
+        com.klnon.sablepanel.panel.storage.AtomicIo.writeString(file, new GsonBuilder().setPrettyPrinting().create().toJson(this));
     }
 
     private static Path file() {

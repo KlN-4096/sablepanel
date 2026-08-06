@@ -6,12 +6,12 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.SablePanel;
 import com.klnon.sablepanel.panel.PanelConfig;
-import com.klnon.sablepanel.panel.data.BodyIndex;
-import com.klnon.sablepanel.panel.data.DiskScanner;
-import com.klnon.sablepanel.panel.data.MeshExtractor;
-import com.klnon.sablepanel.panel.data.StatsCollector;
-import com.klnon.sablepanel.panel.service.JobService;
-import com.klnon.sablepanel.panel.service.PanelOps;
+import com.klnon.sablepanel.panel.bodies.BodyIndex;
+import com.klnon.sablepanel.panel.storage.DiskScanner;
+import com.klnon.sablepanel.panel.storage.MeshExtractor;
+import com.klnon.sablepanel.panel.metrics.StatsCollector;
+import com.klnon.sablepanel.panel.ops.JobService;
+import com.klnon.sablepanel.panel.ops.PanelOps;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 

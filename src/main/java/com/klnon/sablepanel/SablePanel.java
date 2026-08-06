@@ -1,9 +1,9 @@
 package com.klnon.sablepanel;
 
 import com.google.gson.JsonObject;
-import com.klnon.sablepanel.panel.PanelRuntime;
+import com.klnon.sablepanel.panel.bodies.PanelRuntime;
 import com.klnon.sablepanel.panel.client.ClientPanelConfig;
-import com.klnon.sablepanel.panel.web.PanelWebGateway;
+import com.klnon.sablepanel.panel.gateway.PanelWebGateway;
 import com.mojang.logging.LogUtils;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.neoforge.event.ForgeSablePostPhysicsTickEvent;
@@ -17,6 +17,9 @@ import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.slf4j.Logger;
+import com.klnon.sablepanel.panel.audit.EventLog;
+import com.klnon.sablepanel.panel.audit.PanelObserver;
+import com.klnon.sablepanel.panel.metrics.PhysicsTimer;
 
 @Mod(SablePanel.MOD_ID)
 public class SablePanel {
@@ -29,7 +32,7 @@ public class SablePanel {
 
     public SablePanel() {
         // 票种注册必须早于世界读档,否则存档里的常驻票 byName 查不到会被静默丢弃
-        com.klnon.sablepanel.panel.service.ForceLoadService.init();
+        com.klnon.sablepanel.panel.ops.ForceLoadService.init();
         if (FMLEnvironment.dist == Dist.CLIENT) startClientGateway();
         NeoForge.EVENT_BUS.addListener(this::onContainerReady);
         NeoForge.EVENT_BUS.addListener(this::onPrePhysics);

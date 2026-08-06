@@ -79,7 +79,7 @@ public final class PanelConfig {
     public synchronized void save() throws java.io.IOException {
         Path f = file();
         Files.createDirectories(f.getParent());
-        com.klnon.sablepanel.panel.data.AtomicIo.writeString(f, new GsonBuilder().setPrettyPrinting().create().toJson(this));
+        com.klnon.sablepanel.panel.storage.AtomicIo.writeString(f, new GsonBuilder().setPrettyPrinting().create().toJson(this));
     }
 
     public static PanelConfig load() {
@@ -104,14 +104,14 @@ public final class PanelConfig {
         cfg.clampInvalid();
         // 旧版本的配置文件缺新字段(会取默认值),补写回去,服主才看得见能调什么
         String full = gson.toJson(cfg);
-        if (!full.equals(raw)) com.klnon.sablepanel.panel.data.AtomicIo.writeString(file, full);
+        if (!full.equals(raw)) com.klnon.sablepanel.panel.storage.AtomicIo.writeString(file, full);
         return cfg;
     }
 
     private static PanelConfig writeFresh(Path file, Gson gson) throws java.io.IOException {
         PanelConfig cfg = new PanelConfig();
         Files.createDirectories(file.getParent());
-        com.klnon.sablepanel.panel.data.AtomicIo.writeString(file, gson.toJson(cfg));
+        com.klnon.sablepanel.panel.storage.AtomicIo.writeString(file, gson.toJson(cfg));
         SablePanel.LOGGER.info("sablepanel: generated panel config {}", file);
         return cfg;
     }

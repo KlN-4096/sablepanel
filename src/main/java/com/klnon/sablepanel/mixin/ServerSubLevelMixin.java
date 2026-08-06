@@ -1,6 +1,6 @@
 package com.klnon.sablepanel.mixin;
 
-import com.klnon.sablepanel.BodyCostTracker;
+import com.klnon.sablepanel.panel.metrics.BodyCostTracker;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;

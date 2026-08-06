@@ -6,7 +6,7 @@ import com.klnon.sablepanel.panel.api.PanelResponse;
 import com.klnon.sablepanel.panel.transport.PanelEvent;
 import com.klnon.sablepanel.panel.transport.PanelTcpServer;
 import com.klnon.sablepanel.panel.transport.TlsIdentity;
-import com.klnon.sablepanel.panel.web.PanelWebGateway;
+import com.klnon.sablepanel.panel.gateway.PanelWebGateway;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 

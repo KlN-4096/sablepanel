@@ -31,6 +31,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.Date;
 import java.util.HexFormat;
+import com.klnon.sablepanel.SablePanel;
 
 public final class TlsIdentity {
     private static final String ALIAS = "sablepanel";
@@ -95,8 +96,8 @@ public final class TlsIdentity {
             keyStore.store(output, password);
         }
         Files.writeString(passwordTemp, passwordText, StandardCharsets.UTF_8);
-        com.klnon.sablepanel.panel.data.AtomicIo.move(storeTemp, store);
-        com.klnon.sablepanel.panel.data.AtomicIo.move(passwordTemp, passwordFile);
+        com.klnon.sablepanel.panel.storage.AtomicIo.move(storeTemp, store);
+        com.klnon.sablepanel.panel.storage.AtomicIo.move(passwordTemp, passwordFile);
     }
 
     public SslContext serverContext() throws javax.net.ssl.SSLException {
