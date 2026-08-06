@@ -421,12 +421,13 @@ public final class JobService implements AutoCloseable {
 
     /** 读取指定历史日志文件;文件名归一化到日志目录内,合法值以 logFiles() 列表为准 */
     public static JsonObject readLog(String name) throws IOException {
-        if (name == null || name.isBlank()) {
+        Path leaf = name == null || name.isBlank() ? null : Path.of(name).getFileName();
+        if (leaf == null) {
             throw new IllegalArgumentException("日志文件名非法");
         }
         JsonArray log = new JsonArray();
-        Path file = EventLog.logDir().resolve(Path.of(name).getFileName().toString());
-        if (Files.exists(file)) {
+        Path file = EventLog.logDir().resolve(leaf.toString());
+        if (Files.isRegularFile(file)) {
             List<String> lines = tailLines(file);
             for (int i = lines.size() - 1; i >= 0 && log.size() < HISTORY_MAX * 5; i--) {
                 String line = lines.get(i).trim();
