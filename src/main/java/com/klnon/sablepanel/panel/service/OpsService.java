@@ -429,6 +429,18 @@ public final class OpsService {
         return components;
     }
 
+    /**
+     * 规范副本优先级的唯一定义:活动条目 > 有 holding 指针 > 条目 id 字典序。
+     * active 传 null = 该路径语义上不看活动项(回滚清理只关心可达性)。
+     */
+    private static <T> Comparator<T> canonicalOrder(
+            java.util.function.Function<T, DiskScanner.EntryKey> key,
+            java.util.function.Function<T, List<DiskScanner.LiveLocation>> pointers, String active) {
+        return Comparator.comparing((T copy) -> !key.apply(copy).id().equals(active))
+                .thenComparing(copy -> pointers.apply(copy).isEmpty())
+                .thenComparing(copy -> key.apply(copy).id());
+    }
+
     /** 选择唯一规范副本并记录运行状态；内容不同的副本必须先由用户处理，删除不能猜。 */
     private void prepareDeleteSemantics(List<DeleteComponent> components,
                                         Map<UUID, DeleteStatus> statuses) throws Exception {
@@ -443,10 +455,8 @@ public final class OpsService {
                 if (!copies.isEmpty()) {
                     JsonObject state = runtime.getAsJsonObject(uuid.toString());
                     String active = state.has("active") ? state.get("active").getAsString() : null;
-                    DeleteCopy keep = copies.stream().min(Comparator
-                            .comparing((DeleteCopy copy) -> !copy.key().id().equals(active))
-                            .thenComparing(copy -> copy.pointers().isEmpty())
-                            .thenComparing(copy -> copy.key().id())).orElseThrow();
+                    DeleteCopy keep = copies.stream()
+                            .min(canonicalOrder(DeleteCopy::key, DeleteCopy::pointers, active)).orElseThrow();
                     component.canonical.put(uuid, keep);
                     if (copies.stream().anyMatch(copy -> !copy.tag().equals(keep.tag()))) conflict = true;
                 }
@@ -460,12 +470,26 @@ public final class OpsService {
         }
     }
 
+    /** 删除语义准备用:paused/forced + 活动条目 */
     private JsonObject readOperationalMetadata(Set<UUID> targets) throws Exception {
+        return readStates(targets, true, false);
+    }
+
+    /**
+     * 主线程状态读取的唯一入口。两组调用方要的字段集不同:
+     * 删除/副本准备要活动条目(withActive),删除后验收要加载/holding 存在性(withRuntime)。
+     */
+    private JsonObject readStates(Collection<UUID> targets, boolean withActive, boolean withRuntime)
+            throws Exception {
         return onMain(() -> {
             JsonObject out = new JsonObject();
-            Map<UUID, String> activeEntries = activeEntriesOnMain(targets);
+            Map<UUID, String> activeEntries = withActive ? activeEntriesOnMain(targets) : Map.of();
             for (UUID uuid : targets) {
                 JsonObject state = new JsonObject();
+                if (withRuntime) {
+                    state.addProperty("loaded", resolveLoaded(uuid) != null);
+                    state.addProperty("holding", isHolding(uuid));
+                }
                 state.addProperty("paused", PauseService.isPaused(uuid));
                 state.addProperty("forced", ForceLoadService.isForcedOnMain(this.server, uuid));
                 String active = activeEntries.get(uuid);
@@ -511,11 +535,21 @@ public final class OpsService {
         return result;
     }
 
-    private static CompoundTag readVerifiedTag(Map<String, Path> dims, UUID uuid, DiskScanner.EntryKey key)
-            throws IOException {
+    /**
+     * 按 key 重读条目并验 uuid 的唯一句式。快照可能陈旧(autosave 会搬迁条目、槽位会被
+     * sable 复用给别的体),读回不验 uuid 是 0.6.0 定下的铁律。返回 null = 条目缺失或
+     * 槽位已易主,失败语义(抛错/警告/跳过)由调用方决定。
+     */
+    private static CompoundTag readVerified(Map<String, Path> dims, UUID uuid, DiskScanner.EntryKey key) {
         Path dir = dims.get(key.dim());
         CompoundTag tag = dir != null ? DiskScanner.readEntryTag(dir, key) : null;
-        if (tag == null || !uuid.equals(tagUuid(tag))) {
+        return tag != null && uuid.equals(tagUuid(tag)) ? tag : null;
+    }
+
+    private static CompoundTag readVerifiedTag(Map<String, Path> dims, UUID uuid, DiskScanner.EntryKey key)
+            throws IOException {
+        CompoundTag tag = readVerified(dims, uuid, key);
+        if (tag == null) {
             throw new IOException("条目 " + key.id() + " 在准备阶段被 sable 搬迁，未执行删除，请重试");
         }
         return tag;
@@ -528,40 +562,37 @@ public final class OpsService {
         for (UUID uuid : targets) {
             if (meta.getOrDefault(uuid, List.of()).isEmpty()) unsaved.add(uuid);
         }
-        if (unsaved.isEmpty()) return false;
-        JsonObject result = onMainUntilComplete(() -> {
-            Set<ServerLevel> touched = new LinkedHashSet<>();
-            for (UUID uuid : unsaved) {
-                ServerSubLevel body = resolveLoaded(uuid);
-                if (body != null) touched.add(body.getLevel());
-            }
-            for (ServerLevel level : touched) {
-                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
-                if (container == null) throw new IllegalStateException("物理体容器不存在");
-                container.getHoldingChunkMap().saveAll();
-            }
-            JsonObject out = new JsonObject();
-            out.addProperty("flushed", touched.size());
-            return out;
-        });
-        return result.get("flushed").getAsInt() > 0;
+        return !unsaved.isEmpty() && flushTargetLevels(unsaved) > 0;
     }
 
     private void flushLoadedTargets(Collection<UUID> targets) throws Exception {
-        onMainUntilComplete(() -> {
+        flushTargetLevels(targets);
+        DiskScanner.invalidateCache();
+    }
+
+    /** 把目标中已加载的体所在维度逐个 saveAll,返回落盘的维度数 */
+    private int flushTargetLevels(Collection<UUID> targets) throws Exception {
+        JsonObject result = onMainUntilComplete(() -> {
             Set<ServerLevel> touched = new LinkedHashSet<>();
             for (UUID uuid : targets) {
                 ServerSubLevel body = resolveLoaded(uuid);
                 if (body != null) touched.add(body.getLevel());
             }
-            for (ServerLevel level : touched) {
-                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
-                if (container == null) throw new IllegalStateException("物理体容器不存在");
-                container.getHoldingChunkMap().saveAll();
-            }
-            return new JsonObject();
+            saveAllLevels(touched);
+            JsonObject out = new JsonObject();
+            out.addProperty("flushed", touched.size());
+            return out;
         });
-        DiskScanner.invalidateCache();
+        return result.get("flushed").getAsInt();
+    }
+
+    /** 主线程:对一批维度依次 saveAll;容器缺失视为致命(维度在操作中途消失了) */
+    private static void saveAllLevels(Collection<ServerLevel> levels) {
+        for (ServerLevel level : levels) {
+            ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+            if (container == null) throw new IllegalStateException("物理体容器不存在");
+            container.getHoldingChunkMap().saveAll();
+        }
     }
 
     private static UUID tagUuid(CompoundTag tag) {
@@ -831,12 +862,10 @@ public final class OpsService {
                 execution.handledPointers.getOrDefault(uuid, List.of()));
         Map<String, Path> dims = DiskScanner.sublevelDirs(this.server);
         for (DeleteCopy copy : execution.component.copies.getOrDefault(uuid, List.of())) {
-            // 指针来自 HTTP 线程的准备扫描;其间自动保存可能已把条目搬走、槽位复用给别的体。
             // sable 清槽(attemptSaveSubLevel(ptr,null))不验 uuid,入队前必须重读槽位确认还是目标,
             // 否则会静默清掉无辜体的条目(此处在主线程,sable 不会并发写盘)
-            Path dimDir = dims.get(copy.key().dim());
-            CompoundTag fresh = dimDir != null ? DiskScanner.readEntryTag(dimDir, copy.key()) : null;
-            if (fresh == null || !uuid.equals(tagUuid(fresh))) {
+            CompoundTag fresh = readVerified(dims, uuid, copy.key());
+            if (fresh == null) {
                 throw new IllegalStateException("条目 " + copy.key().id() + " 在删除前被 sable 搬迁，已中止并回滚");
             }
             List<GlobalSavedSubLevelPointer> pointers = new ArrayList<>();
@@ -958,19 +987,9 @@ public final class OpsService {
         return new DiskVerification(entries, DiskScanner.countPointersStrict(dimensions, keys, warnings));
     }
 
+    /** 删除后验收用:loaded/holding/paused/forced */
     private JsonObject readRuntimeStates(Set<UUID> targets) throws Exception {
-        return onMain(() -> {
-            JsonObject out = new JsonObject();
-            for (UUID uuid : targets) {
-                JsonObject state = new JsonObject();
-                state.addProperty("loaded", resolveLoaded(uuid) != null);
-                state.addProperty("holding", isHolding(uuid));
-                state.addProperty("paused", PauseService.isPaused(uuid));
-                state.addProperty("forced", ForceLoadService.isForcedOnMain(this.server, uuid));
-                out.add(uuid.toString(), state);
-            }
-            return out;
-        });
+        return readStates(targets, false, true);
     }
 
     /** 删除失败回滚前先清掉所有残留，随后才能从快照完整重建同 UUID 依赖组。 */
@@ -1008,9 +1027,8 @@ public final class OpsService {
             List<DeleteCopy> copies = prepared.getOrDefault(target, List.of());
             if (!copies.isEmpty()) {
                 component.addTarget(target, copies);
-                component.canonical.put(target, copies.stream().min(Comparator
-                        .comparing((DeleteCopy copy) -> copy.pointers().isEmpty())
-                        .thenComparing(copy -> copy.key().id())).orElseThrow());
+                component.canonical.put(target, copies.stream()
+                        .min(canonicalOrder(DeleteCopy::key, DeleteCopy::pointers, null)).orElseThrow());
             }
         }
         return component;
@@ -1290,11 +1308,7 @@ public final class OpsService {
                 created.add(restored);
                 touched.add(level);
             }
-            for (ServerLevel level : touched) {
-                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
-                if (container == null) throw new IllegalStateException("恢复目标维度没有物理体容器");
-                container.getHoldingChunkMap().saveAll();
-            }
+            saveAllLevels(touched);
         } catch (Throwable error) {
             cleanupFailedRestore(created, touched);
             if (error instanceof Exception exception) throw exception;
@@ -1680,10 +1694,8 @@ public final class OpsService {
         for (UUID member : members) {
             List<DeleteCopy> prepared = component.copies.getOrDefault(member, List.of());
             String activeEntry = active.get(member);
-            component.canonical.put(member, prepared.stream().min(Comparator
-                    .comparing((DeleteCopy copy) -> !copy.key().id().equals(activeEntry))
-                    .thenComparing(copy -> copy.pointers().isEmpty())
-                    .thenComparing(copy -> copy.key().id())).orElseThrow());
+            component.canonical.put(member, prepared.stream()
+                    .min(canonicalOrder(DeleteCopy::key, DeleteCopy::pointers, activeEntry)).orElseThrow());
             for (DeleteCopy copy : prepared) {
                 copies.add(new CopyVersionScanner.Copy(member, copy.key(), copy.tag(), copy.blocks(),
                         copy.pointers()));
@@ -1948,11 +1960,7 @@ public final class OpsService {
             } finally {
                 body.setLastSerializationPointer(originalPointer);
             }
-            for (ServerLevel level : touched) {
-                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
-                if (container == null) throw new IllegalStateException("物理体容器不存在");
-                container.getHoldingChunkMap().saveAll();
-            }
+            saveAllLevels(touched);
             JsonObject out = new JsonObject();
             out.addProperty("queued", removed);
             return out;
@@ -2007,28 +2015,16 @@ public final class OpsService {
 
         List<CopyCandidate> copies = new ArrayList<>();
         for (DiskScanner.EntryMeta entry : entries) {
-            CompoundTag tag = readCopy(dimensions, uuid, entry.key());
+            CompoundTag tag = readVerified(dimensions, uuid, entry.key());
+            if (tag == null) throw new IOException("副本槽位已经变化: " + entry.key().id());
             copies.add(new CopyCandidate(entry.key(), tag,
                     DiskScanner.countBlocks(tag.getCompound("plot"), null),
                     List.copyOf(pointers.getOrDefault(entry.key(), List.of()))));
         }
-        copies.sort(Comparator
-                .comparing((CopyCandidate copy) -> !copy.key().id().equals(active))
-                .thenComparing(copy -> copy.pointers().isEmpty())
-                .thenComparing(copy -> copy.key().id()));
+        copies.sort(canonicalOrder(CopyCandidate::key, CopyCandidate::pointers, active));
         CopyCandidate keep = copies.get(0);
         boolean identical = copies.stream().allMatch(copy -> copy.tag().equals(keep.tag()));
         return new CopyInspection(dimensions, List.copyOf(copies), keep, identical);
-    }
-
-    private static CompoundTag readCopy(Map<String, Path> dimensions, UUID uuid, DiskScanner.EntryKey key)
-            throws IOException {
-        Path directory = dimensions.get(key.dim());
-        CompoundTag tag = directory == null ? null : DiskScanner.readEntryTag(directory, key);
-        if (tag == null || !uuid.equals(tagUuid(tag))) {
-            throw new IOException("副本槽位已经变化: " + key.id());
-        }
-        return tag;
     }
 
     private JsonObject copiesJson(CopyInspection inspection) {
@@ -2056,23 +2052,15 @@ public final class OpsService {
     }
 
     private String activePointerEntryId(UUID uuid) {
-        for (ServerLevel level : this.server.getAllLevels()) {
-            try {
-                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
-                if (container == null) continue;
-                ServerSubLevel loaded = container.getSubLevel(uuid) instanceof ServerSubLevel body ? body : null;
-                GlobalSavedSubLevelPointer pointer = loaded != null ? loaded.getLastSerializationPointer() : null;
-                if (pointer == null) {
-                    HoldingSubLevel holding = container.getHoldingChunkMap().getHoldingSubLevel(uuid);
-                    if (holding != null) pointer = holding.pointer();
-                }
-                if (pointer != null) {
-                    return entryKey(level.dimension().location().toString(), pointer).id();
-                }
-            } catch (Throwable ignored) {
+        return findInContainers((level, container) -> {
+            ServerSubLevel loaded = container.getSubLevel(uuid) instanceof ServerSubLevel body ? body : null;
+            GlobalSavedSubLevelPointer pointer = loaded != null ? loaded.getLastSerializationPointer() : null;
+            if (pointer == null) {
+                HoldingSubLevel holding = container.getHoldingChunkMap().getHoldingSubLevel(uuid);
+                if (holding != null) pointer = holding.pointer();
             }
-        }
-        return null;
+            return pointer != null ? entryKey(level.dimension().location().toString(), pointer).id() : null;
+        });
     }
 
     private static DiskScanner.EntryKey entryKey(String dim, GlobalSavedSubLevelPointer pointer) {
@@ -2162,16 +2150,11 @@ public final class OpsService {
         Set<UUID> missing = new LinkedHashSet<>();
         for (UUID u : uuids) {
             DiskScanner.DiskEntry cached = this.index.findEntry(u);
-            Path dir = cached != null ? dims.get(cached.key().dim()) : null;
-            CompoundTag t = dir != null ? DiskScanner.readEntryTag(dir, cached.key()) : null;
-            try {
-                // 快照可能陈旧(autosave 会搬迁条目),读回来必须验 uuid —— 0.6.0 定下的铁律
-                if (t != null && u.equals(t.getUUID("uuid"))) {
-                    keys.put(u, cached.key());
-                    tags.put(u, t);
-                    continue;
-                }
-            } catch (Throwable ignored) {
+            CompoundTag t = cached != null ? readVerified(dims, u, cached.key()) : null;
+            if (t != null) {
+                keys.put(u, cached.key());
+                tags.put(u, t);
+                continue;
             }
             missing.add(u);
         }
@@ -2269,9 +2252,8 @@ public final class OpsService {
             if (level == null) return;
             ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
             if (container == null) return;
-            Path dimDir = DiskScanner.sublevelDirs(this.server).get(plan.key().dim());
-            CompoundTag fresh = dimDir != null ? DiskScanner.readEntryTag(dimDir, plan.key()) : null;
-            if (fresh == null || !uuid.equals(fresh.getUUID("uuid"))) {
+            CompoundTag fresh = readVerified(DiskScanner.sublevelDirs(this.server), uuid, plan.key());
+            if (fresh == null) {
                 SablePanel.LOGGER.warn("sablepanel: adopt {} aborted, entry slot changed since prepare", uuid);
                 return;
             }
@@ -2309,28 +2291,35 @@ public final class OpsService {
         return null;
     }
 
-    private ServerSubLevel resolveLoaded(UUID uuid) {
+    /**
+     * 全维度容器探测的唯一循环:逐容器执行 probe,拿到第一个非 null 就返回。
+     * 单个维度出错静默跳过 —— 需要逐维度记日志的循环(loadOne 的 snatch)不适用。
+     */
+    private <T> T findInContainers(java.util.function.BiFunction<ServerLevel, ServerSubLevelContainer, T> probe) {
         for (ServerLevel level : this.server.getAllLevels()) {
             try {
-                ServerSubLevelContainer c = SubLevelContainer.getContainer(level);
-                if (c == null) continue;
-                var sl = c.getSubLevel(uuid);
-                if (sl instanceof ServerSubLevel ssl && !ssl.isRemoved()) return ssl;
+                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+                if (container == null) continue;
+                T hit = probe.apply(level, container);
+                if (hit != null) return hit;
             } catch (Throwable ignored) {
             }
         }
         return null;
     }
 
+    /** "已加载且未移除"的唯一判定句(ForceLoadService 摘票/守护同用) */
+    static ServerSubLevel loadedBody(ServerSubLevelContainer container, UUID uuid) {
+        return container.getSubLevel(uuid) instanceof ServerSubLevel body && !body.isRemoved() ? body : null;
+    }
+
+    private ServerSubLevel resolveLoaded(UUID uuid) {
+        return findInContainers((level, container) -> loadedBody(container, uuid));
+    }
+
     private boolean isHolding(UUID uuid) {
-        for (ServerLevel level : this.server.getAllLevels()) {
-            try {
-                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
-                if (container != null && container.getHoldingChunkMap().getHoldingSubLevel(uuid) != null) return true;
-            } catch (Throwable ignored) {
-            }
-        }
-        return false;
+        return findInContainers((level, container) ->
+                container.getHoldingChunkMap().getHoldingSubLevel(uuid) != null ? Boolean.TRUE : null) != null;
     }
 
     // ---------- 审计 ----------
