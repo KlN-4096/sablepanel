@@ -224,7 +224,7 @@ public final class PanelTcpServer implements AutoCloseable {
                 switch (frame.type()) {
                     case PanelFrame.PEER_REGISTER -> registerPeer(context, frame);
                     case PanelFrame.REQUEST -> submitRequest(context, frame);
-                    case PanelFrame.RESPONSE, PanelFrame.ERROR -> {
+                    case PanelFrame.RESPONSE -> {
                         CompletableFuture<PanelResponse> future = this.pending.remove(frame.requestId());
                         if (future != null) future.complete(PanelWire.response(frame));
                     }

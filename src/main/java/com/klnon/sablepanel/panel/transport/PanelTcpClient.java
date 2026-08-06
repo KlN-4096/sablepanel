@@ -253,7 +253,7 @@ public final class PanelTcpClient implements AutoCloseable {
         protected void channelRead0(ChannelHandlerContext context, PanelFrame frame) {
             try {
                 switch (frame.type()) {
-                    case PanelFrame.RESPONSE, PanelFrame.ERROR -> {
+                    case PanelFrame.RESPONSE -> {
                         CompletableFuture<PanelResponse> future = pending.remove(frame.requestId());
                         if (future != null) future.complete(PanelWire.response(frame));
                     }

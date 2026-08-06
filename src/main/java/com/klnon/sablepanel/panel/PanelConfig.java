@@ -92,8 +92,6 @@ public final class PanelConfig {
                 var source = com.google.gson.JsonParser.parseString(raw).getAsJsonObject();
                 cfg = gson.fromJson(source, PanelConfig.class);
                 if (cfg != null) {
-                    if (!source.has("webBind") && source.has("bind")) cfg.webBind = source.get("bind").getAsString();
-                    if (!source.has("webPort") && source.has("port")) cfg.webPort = source.get("port").getAsInt();
                     if (cfg.token == null || cfg.token.isBlank()) cfg.token = DEFAULT_TOKEN;
                     if (cfg.webBind == null || cfg.webBind.isBlank()) cfg.webBind = "0.0.0.0";
                     if (cfg.apiBind == null || cfg.apiBind.isBlank()) cfg.apiBind = "0.0.0.0";

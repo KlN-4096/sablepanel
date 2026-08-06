@@ -52,7 +52,7 @@ final class PanelFrameDecoder extends LengthFieldBasedFrameDecoder {
     }
 
     private boolean allowsLargeBody(ChannelHandlerContext context, byte type) {
-        if (type != PanelFrame.RESPONSE && type != PanelFrame.ERROR) return false;
+        if (type != PanelFrame.RESPONSE) return false;
         if (this.trustedResponseSource) return true;
         if (!(context.channel().remoteAddress() instanceof InetSocketAddress remote)) return false;
         return remote.getAddress().isLoopbackAddress();
