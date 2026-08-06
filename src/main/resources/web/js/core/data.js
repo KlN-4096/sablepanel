@@ -12,8 +12,12 @@ let bodiesInFlight = false, bodiesRerun = false;
 const LOAD_SEQ = {};
 async function load(key, request, apply, onFail){
   const seq = LOAD_SEQ[key] = (LOAD_SEQ[key] || 0) + 1;
-  const gen = srvGen();
-  const fresh = () => seq === LOAD_SEQ[key] && gen === srvGen() && authenticated;
+  const gen = srvGen(), auth = authSeq;
+  // 会话身份必须用 authSeq,不能用 authenticated:后者是布尔,注销再登录又变回 true,
+  // 旧会话的在途响应就重新满足条件了 —— 旧服的成员表盖掉新会话的、旧快照落地成 DATA。
+  // authSeq 在 showLogin 和每一次 authenticate 都推进,天然就是会话代次
+  const fresh = () => seq === LOAD_SEQ[key] && gen === srvGen()
+    && auth === authSeq && authenticated;
   try {
     const result = await request();
     if (fresh()) apply(result);

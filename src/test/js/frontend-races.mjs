@@ -221,6 +221,41 @@ test('UI-02 记住的 token 自动登录不能覆盖用户手动输入的结果'
   assert.equal(evalIn(sandbox, 'authenticated'), true);
 });
 
+test('UI-02 旧会话的在途响应不能落到重新登录后的新会话上', async () => {
+  // fresh() 从前只看 authenticated 这个布尔:注销再登录它又变回 true,
+  // 旧会话还在路上的响应就重新满足条件了。会话身份得是 authSeq
+  const slowOld = deferred();
+  let phase = 'old';
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (phase === 'old') return slowOld.promise;
+    if (url.startsWith('/api/servers')) return jsonResponse({ self: 'NEW', servers: [{ id: 'NEW', self: true }] });
+    if (url.startsWith('/api/bodies')) return bodiesResponse({ total_bodies: 2 });
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; toast = () => {}");
+  const staleServers = evalIn(sandbox, 'loadServers')();
+  const staleBodies = evalIn(sandbox, 'loadBodies')();
+
+  evalIn(sandbox, "showLogin('')");                       // 注销:authSeq++
+  phase = 'new';
+  assert.equal(await evalIn(sandbox, 'authenticate')('t', false), true);
+
+  // 一份同时满足两种形状的旧响应:两个在途请求共用这个 deferred。
+  // bodies 那半边必须是合法快照,否则会被快照校验挡下,测不到会话代次
+  slowOld.resolve(jsonResponse({
+    self: 'OLD', servers: [{ id: 'OLD', self: true }],
+    scan_time: 0, total_bodies: 111, total_entries: 0, groups: [], block_palette: [],
+    clone_sets: [], paused: [], forced: [], reach: { void_below: -64, sky_above: 1000 },
+  }));
+  await Promise.all([staleServers, staleBodies]);
+  await tick();
+  await tick();
+  assert.deepEqual(evalIn(sandbox, 'SERVERS.map(s => s.id)'), ['NEW'], '旧会话的成员表不得盖掉新会话的');
+  assert.notEqual(evalIn(sandbox, 'DATA && DATA.total_bodies'), 111, '旧会话的快照不得落地');
+});
+
 // UI-03:切服隔离
 test('UI-03 切服后旧服的 recycle/jobs 慢响应都不落地', async () => {
   const slowRecycle = deferred();
