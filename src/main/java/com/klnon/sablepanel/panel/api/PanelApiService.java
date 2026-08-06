@@ -11,7 +11,7 @@ import com.klnon.sablepanel.panel.data.DiskScanner;
 import com.klnon.sablepanel.panel.data.MeshExtractor;
 import com.klnon.sablepanel.panel.data.StatsCollector;
 import com.klnon.sablepanel.panel.service.JobService;
-import com.klnon.sablepanel.panel.service.OpsService;
+import com.klnon.sablepanel.panel.service.PanelOps;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 
@@ -43,7 +43,7 @@ public final class PanelApiService {
     private final PanelConfig config;
     private final MinecraftServer server;
     private final BodyIndex index;
-    private final OpsService ops;
+    private final PanelOps ops;
     private final JobService jobs;
     private final String selfId;
     private final Object tokenLock = new Object();
@@ -51,7 +51,7 @@ public final class PanelApiService {
     private long meshCacheBytes;
     private volatile long lastActivityMs = System.currentTimeMillis();
 
-    public PanelApiService(PanelConfig config, MinecraftServer server, BodyIndex index, OpsService ops,
+    public PanelApiService(PanelConfig config, MinecraftServer server, BodyIndex index, PanelOps ops,
                            JobService jobs) {
         this.config = config;
         this.server = server;
@@ -100,7 +100,7 @@ public final class PanelApiService {
                 return PanelResponse.json(200, this.jobs.view(request.query().containsKey("poll")), true);
             }
             case "/api/players" -> {
-                return PanelResponse.json(200, this.ops.listPlayers(), false);
+                return PanelResponse.json(200, this.ops.teleport().listPlayers(), false);
             }
             case "/api/stats" -> {
                 return PanelResponse.json(200, StatsCollector.INSTANCE.toJson(), true);
@@ -114,41 +114,44 @@ public final class PanelApiService {
                 String cursor = request.query().getOrDefault("cursor", "");
                 int limit = request.query().containsKey("limit")
                         ? Integer.parseInt(request.query().get("limit")) : 0;
-                return PanelResponse.json(200, this.ops.recycleView(version, cursor, limit), true);
+                return PanelResponse.json(200, this.ops.recycle().view(version, cursor, limit), true);
             }
             case "/api/recycle/config" -> {
                 requirePost(request);
                 JsonObject body = request.jsonBody();
                 if (!body.has("max_files")) throw new IllegalArgumentException("max_files 缺失");
-                return PanelResponse.json(200, this.ops.setRecycleLimit(body.get("max_files").getAsInt()), false);
+                JsonObject out = new JsonObject();
+                out.addProperty("limit", this.ops.recycle().setLimit(body.get("max_files").getAsInt()));
+                out.addProperty("ok", true);
+                return PanelResponse.json(200, out, false);
             }
             case "/api/recycle/restore" -> {
                 requirePost(request);
                 List<String> groupIds = readRecycleIds(request);
                 return enqueue("回收站恢复", List.of(), groupIds.size() + " 个依赖组",
-                        () -> this.ops.restoreRecycleGroups(groupIds));
+                        () -> this.ops.restore().restoreRecycleGroups(groupIds));
             }
             case "/api/recycle/purge" -> {
                 requirePost(request);
                 List<String> groupIds = readRecycleIds(request);
                 return enqueue("回收站彻底删除", List.of(), groupIds.size() + " 个依赖组",
-                        () -> this.ops.purgeRecycleGroups(groupIds));
+                        () -> this.ops.restore().purgeRecycleGroups(groupIds));
             }
             case "/api/rescan" -> {
                 requirePost(request);
                 return enqueue("重扫磁盘", List.of(), "", () -> {
-                    this.ops.rescanNow();
+                    this.ops.kit().rescanNow();
                     JsonObject out = new JsonObject();
                     out.addProperty("ok", true);
                     return out;
                 });
             }
             case "/api/consistency" -> {
-                return PanelResponse.json(200, this.ops.consistencyView(), true);
+                return PanelResponse.json(200, this.ops.consistency().view(), true);
             }
             case "/api/consistency/scan" -> {
                 requirePost(request);
-                return enqueue("一致性检查", List.of(), "", () -> this.ops.analyzeConsistency(false));
+                return enqueue("一致性检查", List.of(), "", () -> this.ops.consistency().scan(false));
             }
             case "/api/consistency/repair" -> {
                 requirePost(request);
@@ -161,17 +164,17 @@ public final class PanelApiService {
                 int total = pointers.size() + forced.size() + paused.size();
                 if (total == 0 || total > 10_000) throw new IllegalArgumentException("修复项数量无效");
                 return enqueue("一致性修复", List.of(), total + " 项",
-                        () -> this.ops.repairConsistency(scanId, pointers, forced, paused));
+                        () -> this.ops.consistency().repair(scanId, pointers, forced, paused));
             }
             case "/api/ops/batch_delete" -> {
                 requirePost(request);
                 List<UUID> uuids = readUuids(request);
-                return enqueue("批量删除", uuids, targetLabel(uuids), () -> this.ops.deleteBatch(uuids));
+                return enqueue("批量删除", uuids, targetLabel(uuids), () -> this.ops.delete().deleteBatch(uuids));
             }
             case "/api/ops/batch_adopt" -> {
                 requirePost(request);
                 List<UUID> uuids = readUuids(request);
-                return enqueue("批量收养", uuids, targetLabel(uuids), () -> this.ops.adoptBatch(uuids));
+                return enqueue("批量收养", uuids, targetLabel(uuids), () -> this.ops.adopt().adoptBatch(uuids));
             }
             case "/api/ops/pause" -> {
                 requirePost(request);
@@ -179,7 +182,7 @@ public final class PanelApiService {
                 List<UUID> uuids = readUuids(body);
                 boolean paused = body.has("paused") && body.get("paused").getAsBoolean();
                 return enqueue(paused ? "暂停" : "恢复", uuids, targetLabel(uuids),
-                        () -> this.ops.setPaused(uuids, paused));
+                        () -> this.ops.teleport().setPaused(uuids, paused));
             }
             case "/api/ops/force_load" -> {
                 requirePost(request);
@@ -187,19 +190,19 @@ public final class PanelApiService {
                 List<UUID> uuids = readUuids(body);
                 boolean forced = body.has("forced") && body.get("forced").getAsBoolean();
                 return enqueue(forced ? "常驻加载" : "取消常驻", uuids, targetLabel(uuids),
-                        () -> this.ops.setForced(uuids, forced));
+                        () -> this.ops.teleport().setForced(uuids, forced));
             }
         }
 
         var recycleMesh = RECYCLE_MESH.matcher(path);
         if (recycleMesh.matches()) {
-            JsonObject mesh = this.ops.recycleMesh(recycleMesh.group(1), UUID.fromString(recycleMesh.group(2)));
+            JsonObject mesh = this.ops.recycle().mesh(recycleMesh.group(1), UUID.fromString(recycleMesh.group(2)));
             return PanelResponse.json(200, mesh, true);
         }
 
         var copyMesh = COPY_MESH.matcher(path);
         if (copyMesh.matches()) {
-            JsonObject mesh = this.ops.copyVersionMesh(
+            JsonObject mesh = this.ops.copies().copyVersionMesh(
                     UUID.fromString(copyMesh.group(1)), copyMesh.group(2));
             return PanelResponse.json(200, mesh, true);
         }
@@ -209,7 +212,7 @@ public final class PanelApiService {
         UUID uuid = UUID.fromString(bodyOp.group(1));
         return switch (bodyOp.group(2)) {
             case "mesh" -> mesh(uuid);
-            case "copies" -> PanelResponse.json(200, this.ops.inspectCopies(uuid), true);
+            case "copies" -> PanelResponse.json(200, this.ops.copies().inspectCopies(uuid), true);
             case "teleport" -> {
                 requirePost(request);
                 // 参数在入队前解析:格式错误要当场 400,而不是过几秒变成一条失败作业
@@ -217,7 +220,7 @@ public final class PanelApiService {
                 double y = Double.parseDouble(request.query().get("y"));
                 double z = Double.parseDouble(request.query().get("z"));
                 yield enqueue("传送", List.of(uuid), targetLabel(List.of(uuid)),
-                        () -> this.ops.teleport(uuid, x, y, z));
+                        () -> this.ops.teleport().teleport(uuid, x, y, z));
             }
             case "teleport_player" -> {
                 requirePost(request);
@@ -225,20 +228,20 @@ public final class PanelApiService {
                 if (player == null || player.isBlank()) throw new IllegalArgumentException("player 缺失");
                 UUID playerUuid = UUID.fromString(player);
                 yield enqueue("传送玩家", List.of(uuid), targetLabel(List.of(uuid)),
-                        () -> this.ops.teleportPlayer(uuid, playerUuid));
+                        () -> this.ops.teleport().teleportPlayer(uuid, playerUuid));
             }
             case "delete" -> {
                 requirePost(request);
-                yield enqueue("删除", List.of(uuid), targetLabel(List.of(uuid)), () -> this.ops.delete(uuid));
+                yield enqueue("删除", List.of(uuid), targetLabel(List.of(uuid)), () -> this.ops.delete().delete(uuid));
             }
             case "adopt" -> {
                 requirePost(request);
-                yield enqueue("收养", List.of(uuid), targetLabel(List.of(uuid)), () -> this.ops.adopt(uuid));
+                yield enqueue("收养", List.of(uuid), targetLabel(List.of(uuid)), () -> this.ops.adopt().adopt(uuid));
             }
             case "deduplicate" -> {
                 requirePost(request);
                 yield enqueue("去重", List.of(uuid), targetLabel(List.of(uuid)),
-                        () -> this.ops.deduplicate(uuid));
+                        () -> this.ops.copies().deduplicate(uuid));
             }
             case "resolve_copies" -> {
                 requirePost(request);
@@ -246,12 +249,12 @@ public final class PanelApiService {
                 String version = body.has("version") ? body.get("version").getAsString() : "";
                 if (!version.matches("[0-9a-f]{16}")) throw new IllegalArgumentException("version 无效");
                 yield enqueue("处理副本", List.of(uuid), targetLabel(List.of(uuid)),
-                        () -> this.ops.resolveCopyVersion(uuid, version));
+                        () -> this.ops.copies().resolveCopyVersion(uuid, version));
             }
             case "quarantine_copies" -> {
                 requirePost(request);
                 yield enqueue("隔离不完整副本", List.of(uuid), targetLabel(List.of(uuid)),
-                        () -> this.ops.quarantineIncompleteCopies(uuid));
+                        () -> this.ops.copies().quarantineIncompleteCopies(uuid));
             }
             default -> PanelResponse.error(404, "not found");
         };
@@ -398,7 +401,7 @@ public final class PanelApiService {
         this.lastActivityMs = now;
         if (wasIdle) {
             SablePanel.LOGGER.info("sablepanel: [{}] panel active again, rescanning", this.selfId);
-            this.ops.rescanNow();
+            this.ops.kit().rescanNow();
         }
     }
 

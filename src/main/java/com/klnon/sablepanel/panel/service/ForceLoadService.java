@@ -116,7 +116,7 @@ public final class ForceLoadService {
             try {
                 ServerSubLevelContainer c = container(level);
                 if (c == null) continue;
-                ServerSubLevel sl = OpsService.loadedBody(c, uuid);
+                ServerSubLevel sl = OpKit.loadedBody(c, uuid);
                 if (sl != null) {
                     c.removeForceLoadTicket(sl, PANEL_FORCED, Unit.INSTANCE);
                     continue;
@@ -159,7 +159,7 @@ public final class ForceLoadService {
                     if (!panelTicket) continue;
                     UUID uuid = en.getKey();
                     forced.add(uuid);
-                    if (OpsService.loadedBody(c, uuid) != null) {
+                    if (OpKit.loadedBody(c, uuid) != null) {
                         FAILED.remove(uuid);
                         continue;
                     }
@@ -172,7 +172,7 @@ public final class ForceLoadService {
                     } catch (Throwable t) {
                         SablePanel.LOGGER.warn("sablepanel: force-load guard snatch {} failed", r.uuid(), t);
                     }
-                    if (OpsService.loadedBody(c, r.uuid()) == null) {
+                    if (OpKit.loadedBody(c, r.uuid()) == null) {
                         int fails = FAILED.merge(r.uuid(), 1, Integer::sum);
                         if (fails >= MAX_RETRY) {
                             SablePanel.LOGGER.warn(

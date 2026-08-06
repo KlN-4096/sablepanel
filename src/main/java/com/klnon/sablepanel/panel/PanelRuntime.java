@@ -7,7 +7,7 @@ import com.klnon.sablepanel.panel.data.BodyIndex;
 import com.klnon.sablepanel.panel.data.DiskScanner;
 import com.klnon.sablepanel.panel.data.StatsCollector;
 import com.klnon.sablepanel.panel.service.JobService;
-import com.klnon.sablepanel.panel.service.OpsService;
+import com.klnon.sablepanel.panel.service.PanelOps;
 import com.klnon.sablepanel.panel.service.PauseService;
 import com.klnon.sablepanel.panel.transport.PanelClusterNode;
 import com.klnon.sablepanel.panel.web.PanelWebGateway;
@@ -78,7 +78,7 @@ public final class PanelRuntime implements AutoCloseable {
             Runnable scanOnce = scanTask(server, generation);
             Runnable requestScan = mergedRunner(this.scanPending, executor,
                     () -> isLifecycleCurrent(generation) && !executor.isShutdown(), scanOnce);
-            OpsService ops = new OpsService(server, this.bodyIndex, requestScan, config);
+            PanelOps ops = PanelOps.create(server, this.bodyIndex, requestScan, config);
             StatsCollector.INSTANCE.start();
             JobService jobs = new JobService(this::requestRuntimeRefresh);
             this.jobService = jobs;
@@ -94,7 +94,7 @@ public final class PanelRuntime implements AutoCloseable {
             executor.scheduleWithFixedDelay(requestScan, 5, 120, TimeUnit.SECONDS);
             // 只读一致性分析每次面板启动只跑一次；发现问题由网页提示，绝不在这里自动修复。
             executor.schedule(() -> {
-                if (isLifecycleCurrent(generation)) ops.analyzeConsistency(true);
+                if (isLifecycleCurrent(generation)) ops.consistency().scan(true);
             }, 10, TimeUnit.SECONDS);
             createdHeartbeat = executor.scheduleWithFixedDelay(() -> clusterTick(config, panel, generation),
                     PanelClusterNode.HEARTBEAT_SECONDS, PanelClusterNode.HEARTBEAT_SECONDS, TimeUnit.SECONDS);

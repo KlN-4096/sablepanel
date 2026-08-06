@@ -67,13 +67,24 @@ public final class ConsistencyService {
     }
 
     private final MinecraftServer server;
+    /** 与删除/恢复/副本处理共用的变更锁(OpKit.lock):扫描/修复与它们互斥,原 OpsService 包装的语义 */
+    private final Object opLock;
+    private final Runnable rescan;
     private volatile Report report = Report.pending();
 
-    public ConsistencyService(MinecraftServer server) {
+    public ConsistencyService(MinecraftServer server, Object opLock, Runnable rescan) {
         this.server = server;
+        this.opLock = opLock;
+        this.rescan = rescan;
     }
 
-    public synchronized JsonObject scan(boolean startup) {
+    public JsonObject scan(boolean startup) {
+        synchronized (this.opLock) {
+            return scanExclusive(startup);
+        }
+    }
+
+    private JsonObject scanExclusive(boolean startup) {
         try {
             Report fresh = JobService.underLocate(() -> collect(startup));
             this.report = fresh;
@@ -90,8 +101,18 @@ public final class ConsistencyService {
         return this.report.toJson();
     }
 
-    public synchronized JsonObject repair(String scanId, Set<String> pointerIds,
-                                          Set<UUID> forced, Set<UUID> paused) throws Exception {
+    public JsonObject repair(String scanId, Set<String> pointerIds,
+                             Set<UUID> forced, Set<UUID> paused) throws Exception {
+        synchronized (this.opLock) {
+            JsonObject out = repairExclusive(scanId, pointerIds, forced, paused);
+            // 修复落盘后触发一次重扫(原 OpsService 包装的职责);修复抛错则不扫
+            this.rescan.run();
+            return out;
+        }
+    }
+
+    private JsonObject repairExclusive(String scanId, Set<String> pointerIds,
+                                       Set<UUID> forced, Set<UUID> paused) throws Exception {
         Report shown = this.report;
         if (!shown.ready || !shown.id.equals(scanId)) throw new IllegalStateException("一致性结果已变化，请重新扫描");
         Report current = JobService.underLocate(() -> collect(false));
