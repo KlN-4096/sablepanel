@@ -223,8 +223,9 @@ class DiskScannerCorruptionTest {
         List<String> pointerWarnings = new ArrayList<>();
         DiskScanner.EntryKey firstKey = new DiskScanner.EntryKey(DIM, 0, 0, 0, 0);
         DiskScanner.EntryKey secondKey = new DiskScanner.EntryKey(DIM, 0, 0, 0, 9);
-        Map<DiskScanner.EntryKey, Integer> counts = DiskScanner.countPointersStrict(
-                Map.of(DIM, dir), Set.of(firstKey, secondKey), pointerWarnings);
+        Map<DiskScanner.EntryKey, Integer> counts = new java.util.HashMap<>();
+        DiskScanner.locatePointersStrict(Map.of(DIM, dir), Set.of(firstKey, secondKey), pointerWarnings)
+                .forEach((key, locations) -> counts.put(key, locations.size()));
         assertEquals(1, counts.get(firstKey));
         assertEquals(1, counts.get(secondKey));
         assertEquals(List.of(), pointerWarnings);

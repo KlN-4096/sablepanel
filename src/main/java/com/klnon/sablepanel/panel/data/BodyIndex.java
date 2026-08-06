@@ -63,14 +63,6 @@ public final class BodyIndex {
     /** 单个体最多列出这么多个冗余条目 id;真实数量由 copies 字段给出 */
     private static final int MAX_ENTRY_IDS = 50;
 
-    private static JsonObject paletteEntry(String id) {
-        String[] names = BlockNames.of(id);
-        JsonObject entry = new JsonObject();
-        entry.addProperty("id", id);
-        entry.addProperty("en", names[0]);
-        entry.addProperty("zh", names[1]);
-        return entry;
-    }
 
     private volatile List<DiskScanner.DiskEntry> diskSnapshot = List.of();
     private volatile long diskScanTime;
@@ -369,16 +361,16 @@ public final class BodyIndex {
         JsonArray paletteArr = new JsonArray();
 
         // 并查集分组(按 deps,双向)
-        Map<UUID, UUID> parent = new HashMap<>();
-        for (UUID u : byUuid.keySet()) parent.put(u, u);
+        UnionFind linked = new UnionFind();
+        for (UUID u : byUuid.keySet()) linked.add(u);
         for (DiskScanner.DiskEntry e : byUuid.values()) {
             for (UUID d : e.deps()) {
-                if (parent.containsKey(d)) union(parent, e.uuid(), d);
+                if (linked.contains(d)) linked.union(e.uuid(), d);
             }
         }
         Map<UUID, List<UUID>> groups = new HashMap<>();
         for (UUID u : byUuid.keySet()) {
-            groups.computeIfAbsent(find(parent, u), k -> new ArrayList<>()).add(u);
+            groups.computeIfAbsent(linked.find(u), k -> new ArrayList<>()).add(u);
         }
 
         // 运行时存在但磁盘还没有条目的体(刚生成/未保存):单独成组显示,可传送不可预览
@@ -544,7 +536,7 @@ public final class BodyIndex {
                             paletteFull = true;
                             continue;
                         }
-                        JsonObject p = paletteEntry(id);
+                        JsonObject p = BlockNames.paletteEntry(id);
                         if (!budget.offer(p)) {
                             paletteFull = true;
                             continue;
@@ -697,21 +689,6 @@ public final class BodyIndex {
         if (e.name() != null) return "n|" + e.name() + "|" + e.blocks() + "|" + sz;
         if (e.blocks() >= 50) return "u|" + e.blocks() + "|" + sz;
         return null;
-    }
-
-    private static UUID find(Map<UUID, UUID> parent, UUID u) {
-        UUID root = u;
-        while (!parent.get(root).equals(root)) root = parent.get(root);
-        while (!parent.get(u).equals(root)) {
-            UUID next = parent.get(u);
-            parent.put(u, root);
-            u = next;
-        }
-        return root;
-    }
-
-    private static void union(Map<UUID, UUID> parent, UUID a, UUID b) {
-        parent.put(find(parent, a), find(parent, b));
     }
 
     /**

@@ -219,7 +219,7 @@ public final class RecycleStore {
         Path destination = this.root.resolve(stage.id);
         if (Files.exists(destination)) throw new IOException("回收组 ID 已存在: " + stage.id);
         Set<String> previous = prepareVersionTransaction(stage.directory, stage.manifest);
-        moveAtomic(stage.directory, destination);
+        AtomicIo.move(stage.directory, destination);
         stage.committed = true;
         registerLatest(stage.id, bodyUuids(stage.manifest), previous);
         try {
@@ -243,7 +243,7 @@ public final class RecycleStore {
         Files.createDirectories(this.root);
         Path destination = this.root.resolve(stage.id);
         if (Files.exists(destination)) throw new IOException("回收组 ID 已存在: " + stage.id);
-        moveAtomic(stage.directory, destination);
+        AtomicIo.move(stage.directory, destination);
         stage.committed = true;
         invalidateCaches();
         return stage.id;
@@ -269,7 +269,7 @@ public final class RecycleStore {
                         writeJsonAtomic(directory.resolve(MANIFEST), manifest);
                         Path destination = this.root.resolve(id);
                         if (Files.exists(destination)) throw new IOException("同名回收组已存在");
-                        moveAtomic(directory, destination);
+                        AtomicIo.move(directory, destination);
                         recovered++;
                         continue;
                     }
@@ -285,7 +285,7 @@ public final class RecycleStore {
                     Path destination = this.root.resolve(id);
                     if (Files.exists(destination)) throw new IOException("同名回收组已存在");
                     Set<String> previous = prepareVersionTransaction(directory, manifest);
-                    moveAtomic(directory, destination);
+                    AtomicIo.move(directory, destination);
                     registerLatest(id, bodyUuids(manifest), previous);
                     try {
                         completeVersionTransaction(destination);
@@ -380,9 +380,10 @@ public final class RecycleStore {
             PagePalette palette = new PagePalette();
             String nextCursor = "";
             boolean more = false;
-            // 外壳也占字节:上面那几个统计字段是真的会发出去的。从前只累计候选组和调色板,
-            // 于是"2 MiB 单页预算"其实是 2 MiB 加上一份没记账的外壳
-            long cost = JsonSize.of(out) + PAGE_SHELL_RESERVE;
+            // 字节账本统一走 ByteBudget(与 BodyIndex.view 同一套):外壳也占字节,
+            // 上面那几个统计字段是真的会发出去的
+            ByteBudget budget = new ByteBudget(PAGE_BYTE_BUDGET);
+            budget.charge(JsonSize.of(out) + PAGE_SHELL_RESERVE);
             // 清单已按 id 降序排好,游标位置直接二分 —— 从头线性扫到游标的话,
             // 翻到第 N 页就要白扫前 N 页的全部条目
             for (Path directory : directories.subList(cursorOffset(directories, from), directories.size())) {
@@ -395,10 +396,9 @@ public final class RecycleStore {
                     JsonObject manifest = readManifest(directory);
                     manifest.addProperty("version_state", version);
                     // 量的是这一条真正会发出去的字节,连它新增的调色板条目一起算。
-                    // 只看读取前的旧 cost 的话,小组先占了位,紧跟着的超大组照样整条进来
+                    // 只看余额不记账的话,小组先占了位,紧跟着的超大组照样整条进来
                     JsonObject candidate = toView(manifest, palette, true);
-                    long size = JsonSize.of(candidate) + palette.pendingBytes() + 1;   // +1 是数组分隔符
-                    if (cost + size > PAGE_BYTE_BUDGET) {
+                    if (!budget.offerBytes(JsonSize.of(candidate) + palette.pendingBytes() + 1)) {   // +1 是数组分隔符
                         palette.rollback();
                         // 前面已经有组了就把这条留到下一页 —— 它自己一页装得下
                         if (!groups.isEmpty()) {
@@ -406,9 +406,10 @@ public final class RecycleStore {
                             break;
                         }
                         // 单组自己就超预算:先退到只发元数据,还是装不下就发固定尺寸摘要,
-                        // 否则这一组永远翻不过去
+                        // 否则这一组永远翻不过去。与整页预算比的是"单组超页"判定;
+                        // 选中的那份必须发出去,走 charge 无条件记账
                         candidate = toView(manifest, palette, false);
-                        size = JsonSize.of(candidate);
+                        long size = JsonSize.of(candidate);
                         if (size > PAGE_BYTE_BUDGET) {
                             candidate = summaryView(id, manifest);
                             size = JsonSize.of(candidate);
@@ -422,9 +423,9 @@ public final class RecycleStore {
                                 continue;
                             }
                         }
+                        budget.charge(size);
                     }
                     palette.commit();
-                    cost += size;
                     groups.add(candidate);
                     nextCursor = id;
                 } catch (Exception error) {
@@ -516,12 +517,7 @@ public final class RecycleStore {
             if (this.committed.size() + this.pending.size() >= MAX_PALETTE) return null;
             at = this.committed.size() + this.pending.size();
             this.pending.put(id, at);
-            String[] names = BlockNames.of(id);
-            JsonObject entry = new JsonObject();
-            entry.addProperty("id", id);
-            entry.addProperty("en", names[0]);
-            entry.addProperty("zh", names[1]);
-            this.pendingArr.add(entry);
+            this.pendingArr.add(BlockNames.paletteEntry(id));
             return at;
         }
 
@@ -1090,17 +1086,7 @@ public final class RecycleStore {
     }
 
     private static void writeJsonAtomic(Path file, JsonObject value) throws IOException {
-        Path temporary = file.resolveSibling(file.getFileName() + ".tmp");
-        Files.writeString(temporary, GSON.toJson(value), StandardCharsets.UTF_8);
-        moveAtomic(temporary, file);
-    }
-
-    private static void moveAtomic(Path source, Path destination) throws IOException {
-        try {
-            Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (AtomicMoveNotSupportedException ignored) {
-            Files.move(source, destination, StandardCopyOption.REPLACE_EXISTING);
-        }
+        AtomicIo.writeString(file, GSON.toJson(value));
     }
 
     /**

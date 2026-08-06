@@ -976,7 +976,10 @@ public final class OpsService {
             keys.addAll(status.entryKeys);
             entries.put(status.uuid, scan.entriesOf(status.uuid).size());
         }
-        return new DiskVerification(entries, DiskScanner.countPointersStrict(scan.dims(), keys, warnings));
+        Map<DiskScanner.EntryKey, Integer> pointerCounts = new HashMap<>();
+        DiskScanner.locatePointersStrict(scan.dims(), keys, warnings)
+                .forEach((key, locations) -> pointerCounts.put(key, locations.size()));
+        return new DiskVerification(entries, pointerCounts);
     }
 
     /** 删除后验收用:loaded/holding/paused/forced */
@@ -1351,7 +1354,7 @@ public final class OpsService {
             if (!restored.key().dim().equals(body.dimension())) {
                 throw new IllegalStateException("恢复后维度不一致: " + uuid);
             }
-            Set<UUID> expectedDependencies = tagDependencies(body.tag());
+            Set<UUID> expectedDependencies = new LinkedHashSet<>(DiskScanner.dependencies(body.tag()));
             if (!new LinkedHashSet<>(restored.deps()).equals(expectedDependencies)) {
                 throw new IllegalStateException("恢复后依赖关系不一致: " + uuid);
             }
@@ -1370,14 +1373,6 @@ public final class OpsService {
                 throw new IllegalStateException("恢复后物理体未加载: " + uuid);
             }
         }
-    }
-
-    private static Set<UUID> tagDependencies(CompoundTag tag) {
-        Set<UUID> dependencies = new LinkedHashSet<>();
-        if (!tag.contains("loading_dependencies")) return dependencies;
-        var values = tag.getList("loading_dependencies", net.minecraft.nbt.Tag.TAG_INT_ARRAY);
-        for (net.minecraft.nbt.Tag value : values) dependencies.add(net.minecraft.nbt.NbtUtils.loadUUID(value));
-        return dependencies;
     }
 
     private ServerLevel restoreLevel(String dimension) {
@@ -2106,10 +2101,7 @@ public final class OpsService {
             Set<UUID> next = new LinkedHashSet<>();
             for (MemberPlan plan : layer.values()) {
                 try {
-                    if (!plan.tag().contains("loading_dependencies")) continue;
-                    var list = plan.tag().getList("loading_dependencies", net.minecraft.nbt.Tag.TAG_INT_ARRAY);
-                    for (net.minecraft.nbt.Tag t : list) {
-                        UUID dep = net.minecraft.nbt.NbtUtils.loadUUID(t);
+                    for (UUID dep : DiskScanner.dependencies(plan.tag())) {
                         if (!chain.containsKey(dep)) next.add(dep);
                     }
                 } catch (Throwable ignored) {

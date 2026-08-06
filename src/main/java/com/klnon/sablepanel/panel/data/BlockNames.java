@@ -69,6 +69,16 @@ public final class BlockNames {
         }
     }
 
+    /** id/en/zh 三字段调色板条目的唯一构造;Mesh 的 color/count 由调用方追加 */
+    public static JsonObject paletteEntry(String blockId) {
+        String[] names = of(blockId);
+        JsonObject entry = new JsonObject();
+        entry.addProperty("id", blockId);
+        entry.addProperty("en", names[0]);
+        entry.addProperty("zh", names[1]);
+        return entry;
+    }
+
     /** 缓存条目数,只给测试判"未注册的 id 不进缓存" */
     static int cachedCount() {
         return CACHE.size();

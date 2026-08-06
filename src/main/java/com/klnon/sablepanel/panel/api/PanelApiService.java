@@ -371,7 +371,7 @@ public final class PanelApiService {
 
     private static CompoundTag locateTag(Map<String, Path> dims, UUID uuid) throws Exception {
         for (var entry : dims.entrySet()) {
-            DiskScanner.LocatedEntry located = DiskScanner.locateEntry(entry.getKey(), entry.getValue(), uuid);
+            DiskScanner.LocatedEntry located = DiskScanner.locateEntries(entry.getKey(), entry.getValue(), java.util.Set.of(uuid)).get(uuid);
             if (located != null) return located.tag();
         }
         return null;

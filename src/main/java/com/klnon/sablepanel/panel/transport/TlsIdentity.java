@@ -96,8 +96,8 @@ public final class TlsIdentity {
             keyStore.store(output, password);
         }
         Files.writeString(passwordTemp, passwordText, StandardCharsets.UTF_8);
-        move(storeTemp, store);
-        move(passwordTemp, passwordFile);
+        com.klnon.sablepanel.panel.data.AtomicIo.move(storeTemp, store);
+        com.klnon.sablepanel.panel.data.AtomicIo.move(passwordTemp, passwordFile);
     }
 
     public SslContext serverContext() throws javax.net.ssl.SSLException {
@@ -125,11 +125,4 @@ public final class TlsIdentity {
         return "SablePanel-" + (safe.isBlank() ? "server" : safe);
     }
 
-    private static void move(Path source, Path target) throws java.io.IOException {
-        try {
-            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
-            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
-        }
-    }
 }

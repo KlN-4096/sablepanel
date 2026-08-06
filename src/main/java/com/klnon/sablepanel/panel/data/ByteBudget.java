@@ -36,7 +36,11 @@ final class ByteBudget {
      * @return false 表示放不下,调用方必须丢弃这个候选
      */
     boolean offer(JsonElement candidate) {
-        long size = JsonSize.of(candidate);
+        return offerBytes(JsonSize.of(candidate));
+    }
+
+    /** 已经量好尺寸的候选(条目连同它牵连的调色板字节)走这里,判与记账同样一次完成 */
+    boolean offerBytes(long size) {
         if (this.spent + size > this.limit) return false;
         this.spent += size;
         return true;

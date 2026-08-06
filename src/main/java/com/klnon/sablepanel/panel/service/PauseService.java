@@ -151,7 +151,7 @@ public final class PauseService {
             Path f = file();
             Files.createDirectories(f.getParent());
             List<String> out = REQUESTED.stream().map(UUID::toString).sorted().toList();
-            Files.writeString(f, new Gson().toJson(out));
+            com.klnon.sablepanel.panel.data.AtomicIo.writeString(f, new Gson().toJson(out));
         } catch (Exception e) {
             SablePanel.LOGGER.warn("sablepanel: saving paused list failed", e);
         }

@@ -142,25 +142,20 @@ public final class CopyVersionScanner {
         for (Copy copy : locationCopies) byUuid.computeIfAbsent(copy.uuid(), ignored -> new ArrayList<>()).add(copy);
         if (!byUuid.containsKey(target)) return null;
 
-        Map<UUID, Set<UUID>> graph = new LinkedHashMap<>();
-        for (UUID uuid : byUuid.keySet()) graph.put(uuid, new LinkedHashSet<>());
+        UnionFind linked = new UnionFind();
+        for (UUID uuid : byUuid.keySet()) linked.add(uuid);
         for (Map.Entry<UUID, List<Copy>> entry : byUuid.entrySet()) {
             for (Copy copy : entry.getValue()) {
-                for (UUID dependency : dependencies(copy.tag())) {
-                    if (!graph.containsKey(dependency)) continue;
-                    graph.get(entry.getKey()).add(dependency);
-                    graph.get(dependency).add(entry.getKey());
+                for (UUID dependency : DiskScanner.dependencies(copy.tag())) {
+                    if (linked.contains(dependency)) linked.union(entry.getKey(), dependency);
                 }
             }
         }
-
+        // 顺序无关:selected/redundant 输出前按条目 id 重排,missing 是集合
+        UUID targetRoot = linked.find(target);
         Set<UUID> connected = new LinkedHashSet<>();
-        Deque<UUID> queue = new ArrayDeque<>();
-        queue.add(target);
-        while (!queue.isEmpty()) {
-            UUID uuid = queue.removeFirst();
-            if (!connected.add(uuid)) continue;
-            queue.addAll(graph.getOrDefault(uuid, Set.of()));
+        for (UUID uuid : byUuid.keySet()) {
+            if (linked.find(uuid).equals(targetRoot)) connected.add(uuid);
         }
 
         List<Copy> selected = new ArrayList<>();
@@ -188,7 +183,7 @@ public final class CopyVersionScanner {
                 selected.addAll(values);
             }
             for (Copy copy : values) {
-                for (UUID dependency : dependencies(copy.tag())) {
+                for (UUID dependency : DiskScanner.dependencies(copy.tag())) {
                     if (!byUuid.containsKey(dependency)) missing.add(dependency);
                 }
             }
@@ -228,14 +223,6 @@ public final class CopyVersionScanner {
     }
 
     private record Current(String version, CurrentState state) {
-    }
-
-    private static Set<UUID> dependencies(CompoundTag tag) {
-        Set<UUID> result = new LinkedHashSet<>();
-        if (!tag.contains("loading_dependencies")) return result;
-        var values = tag.getList("loading_dependencies", net.minecraft.nbt.Tag.TAG_INT_ARRAY);
-        for (net.minecraft.nbt.Tag value : values) result.add(net.minecraft.nbt.NbtUtils.loadUUID(value));
-        return result;
     }
 
     private static UUID readUuid(CompoundTag tag) {

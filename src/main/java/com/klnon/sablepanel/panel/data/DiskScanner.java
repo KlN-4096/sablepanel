@@ -45,8 +45,50 @@ public final class DiskScanner {
 
     public record EntryKey(String dim, int rx, int rz, int storage, int index) {
         public String id() {
-            return dim + "/" + rx + "." + rz + "." + storage + ":" + index;
+            return this.dim + "/" + slotId();
         }
+
+        /** 维度内槽位标识(指针表按它对齐,无需 dim);从前 4 处各拼一遍 */
+        public String slotId() {
+            return slotId(this.rx, this.rz, this.storage, this.index);
+        }
+
+        public static String slotId(int rx, int rz, int storage, int index) {
+            return rx + "." + rz + "." + storage + ":" + index;
+        }
+    }
+
+    /** 一次目录列举解出的存储文件;storage < 0 表示 .slvlr 指针文件 */
+    private record StorageFile(Path path, int rx, int rz, int storage) {
+        boolean pointerFile() {
+            return this.storage < 0;
+        }
+    }
+
+    /**
+     * 目录列举+文件名解析的唯一实现,按文件名排序保证遍历确定性。
+     * 从前 5 个方法各写一遍 Files.list+正则循环,其中 3 处在使用时还要再 match 一次取坐标。
+     */
+    private static List<StorageFile> listStorageFiles(Path dir, boolean strict) throws IOException {
+        if (strict && !Files.isDirectory(dir)) throw new IOException("sublevels 目录不存在: " + dir);
+        List<StorageFile> files = new ArrayList<>();
+        try (var stream = Files.list(dir)) {
+            for (Path path : stream.sorted(Comparator.comparing(p -> p.getFileName().toString())).toList()) {
+                String name = path.getFileName().toString();
+                Matcher pointer = SLVLR.matcher(name);
+                if (pointer.matches()) {
+                    files.add(new StorageFile(path, Integer.parseInt(pointer.group(1)),
+                            Integer.parseInt(pointer.group(2)), -1));
+                    continue;
+                }
+                Matcher entry = SLVLS.matcher(name);
+                if (entry.matches()) {
+                    files.add(new StorageFile(path, Integer.parseInt(entry.group(1)),
+                            Integer.parseInt(entry.group(2)), Integer.parseInt(entry.group(3))));
+                }
+            }
+        }
+        return files;
     }
 
     /**
@@ -116,25 +158,14 @@ public final class DiskScanner {
             Path dir = dimEntry.getValue();
             try {
                 Set<String> pointerIds = new HashSet<>();
-                List<Path> slvlsFiles = new ArrayList<>();
-                try (var stream = Files.list(dir)) {
-                    for (Path p : stream.toList()) {
-                        String fn = p.getFileName().toString();
-                        Matcher mr = SLVLR.matcher(fn);
-                        if (mr.matches()) {
-                            int rx = Integer.parseInt(mr.group(1)), rz = Integer.parseInt(mr.group(2));
-                            collectPointers(p, dir, rx, rz, pointerIds);
-                            continue;
-                        }
-                        if (SLVLS.matcher(fn).matches()) {
-                            slvlsFiles.add(p);
-                        }
-                    }
+                List<StorageFile> files = listStorageFiles(dir, false);
+                for (StorageFile file : files) {
+                    if (file.pointerFile()) collectPointers(file.path(), dir, file.rx(), file.rz(), pointerIds);
                 }
-                for (Path p : slvlsFiles) {
-                    Matcher m = SLVLS.matcher(p.getFileName().toString());
-                    if (!m.matches()) continue;
-                    int rx = Integer.parseInt(m.group(1)), rz = Integer.parseInt(m.group(2)), si = Integer.parseInt(m.group(3));
+                for (StorageFile file : files) {
+                    if (file.pointerFile()) continue;
+                    Path p = file.path();
+                    int rx = file.rx(), rz = file.rz(), si = file.storage();
                     String cacheKey = p.toAbsolutePath().toString();
                     seenFiles.add(cacheKey);
                     List<DiskEntry> parsed = null;
@@ -158,8 +189,7 @@ public final class DiskScanner {
                         if (mtime > 0) SLVLS_CACHE.put(cacheKey, new FileCache(mtime, size, fresh));
                     }
                     for (DiskEntry e : parsed) {
-                        out.add(e.withReachable(pointerIds.contains(
-                                e.key().rx() + "." + e.key().rz() + "." + e.key().storage() + ":" + e.key().index())));
+                        out.add(e.withReachable(pointerIds.contains(e.key().slotId())));
                     }
                 }
             } catch (Exception e) {
@@ -187,34 +217,26 @@ public final class DiskScanner {
         for (Map.Entry<String, Path> dimension : dims.entrySet()) {
             String dim = dimension.getKey();
             Path dir = dimension.getValue();
-            if (!Files.isDirectory(dir)) throw new IOException("sublevels 目录不存在: " + dir);
-            List<Path> files;
-            try (var stream = Files.list(dir)) {
-                files = stream.filter(path -> SLVLS.matcher(path.getFileName().toString()).matches()).toList();
+            for (StorageFile file : listStorageFiles(dir, true)) {
+                if (!file.pointerFile()) collectFileMetaStrict(dim, file, dir, meta, warnings);
             }
-            for (Path file : files) collectFileMetaStrict(dim, file, dir, meta, warnings);
         }
         return meta;
     }
 
-    private static void collectFileMetaStrict(String dim, Path file, Path dir,
+    private static void collectFileMetaStrict(String dim, StorageFile file, Path dir,
                                               Map<UUID, List<EntryMeta>> meta,
                                               List<String> warnings) throws IOException {
-        Matcher matcher = SLVLS.matcher(file.getFileName().toString());
-        if (!matcher.matches()) return;
-        int rx = Integer.parseInt(matcher.group(1));
-        int rz = Integer.parseInt(matcher.group(2));
-        int storage = Integer.parseInt(matcher.group(3));
-        forEachEntryStrict(file, dir, rx, rz, 4096, warnings, (index, tag) -> {
+        forEachEntryStrict(file.path(), dir, file.rx(), file.rz(), 4096, warnings, (index, tag) -> {
             UUID uuid;
             try {
                 uuid = tag.getUUID("uuid");
             } catch (Exception error) {
-                throw new IOException("NBT 条目缺少有效 UUID: " + file.getFileName() + "#" + index, error);
+                throw new IOException("NBT 条目缺少有效 UUID: " + file.path().getFileName() + "#" + index, error);
             }
             CompoundTag plot = tag.getCompound("plot");
             meta.computeIfAbsent(uuid, ignored -> new ArrayList<>())
-                    .add(new EntryMeta(new EntryKey(dim, rx, rz, storage, index),
+                    .add(new EntryMeta(new EntryKey(dim, file.rx(), file.rz(), file.storage(), index),
                             dependencies(tag), plot.getInt("plot_x"), plot.getInt("plot_z")));
         });
     }
@@ -237,28 +259,30 @@ public final class DiskScanner {
     /** 将任意选中成员扩展为完整的、无重复的依赖连通组；已丢失的依赖 UUID 不会凭空加入。 */
     public static List<Set<UUID>> selectedDependencyComponents(
             Map<UUID, List<EntryMeta>> entries, List<UUID> requested) {
-        Map<UUID, UUID> parent = new HashMap<>();
-        for (UUID uuid : entries.keySet()) parent.put(uuid, uuid);
+        UnionFind linked = new UnionFind();
+        for (UUID uuid : entries.keySet()) linked.add(uuid);
         for (Map.Entry<UUID, List<EntryMeta>> entry : entries.entrySet()) {
             for (EntryMeta copy : entry.getValue()) {
                 for (UUID dependency : copy.deps()) {
-                    if (parent.containsKey(dependency)) union(parent, entry.getKey(), dependency);
+                    if (linked.contains(dependency)) linked.union(entry.getKey(), dependency);
                 }
             }
         }
         Map<UUID, List<UUID>> members = new HashMap<>();
-        for (UUID uuid : parent.keySet()) members.computeIfAbsent(find(parent, uuid), ignored -> new ArrayList<>()).add(uuid);
+        for (UUID uuid : linked.members()) {
+            members.computeIfAbsent(linked.find(uuid), ignored -> new ArrayList<>()).add(uuid);
+        }
         for (List<UUID> group : members.values()) group.sort(UUID::compareTo);
 
         List<Set<UUID>> result = new ArrayList<>();
         Set<UUID> emittedRoots = new HashSet<>();
         Set<UUID> emittedMissing = new HashSet<>();
         for (UUID selected : requested) {
-            if (!parent.containsKey(selected)) {
+            if (!linked.contains(selected)) {
                 if (emittedMissing.add(selected)) result.add(new LinkedHashSet<>(List.of(selected)));
                 continue;
             }
-            UUID root = find(parent, selected);
+            UUID root = linked.find(selected);
             if (!emittedRoots.add(root)) continue;
             LinkedHashSet<UUID> group = new LinkedHashSet<>();
             group.add(selected);
@@ -268,40 +292,13 @@ public final class DiskScanner {
         return result;
     }
 
-    private static List<UUID> dependencies(CompoundTag tag) {
+    /** loading_dependencies 读取的唯一实现;从前 DiskScanner×2/CopyVersionScanner/OpsService 各写一份 */
+    public static List<UUID> dependencies(CompoundTag tag) {
         List<UUID> dependencies = new ArrayList<>();
         if (!tag.contains("loading_dependencies")) return dependencies;
         ListTag list = tag.getList("loading_dependencies", Tag.TAG_INT_ARRAY);
         for (Tag dependency : list) dependencies.add(NbtUtils.loadUUID(dependency));
         return dependencies;
-    }
-
-    private static UUID find(Map<UUID, UUID> parent, UUID uuid) {
-        UUID root = uuid;
-        while (!parent.get(root).equals(root)) root = parent.get(root);
-        while (!parent.get(uuid).equals(root)) {
-            UUID next = parent.get(uuid);
-            parent.put(uuid, root);
-            uuid = next;
-        }
-        return root;
-    }
-
-    private static void union(Map<UUID, UUID> parent, UUID first, UUID second) {
-        UUID firstRoot = find(parent, first);
-        UUID secondRoot = find(parent, second);
-        if (!firstRoot.equals(secondRoot)) parent.put(firstRoot, secondRoot);
-    }
-
-    /** 严格统计仍引用目标存储槽的 .slvlr holding 指针。 */
-    public static Map<EntryKey, Integer> countPointersStrict(Map<String, Path> dims, Set<EntryKey> targets,
-                                                             List<String> warnings) throws IOException {
-        Map<EntryKey, Integer> counts = new HashMap<>();
-        for (Map.Entry<EntryKey, List<LiveLocation>> entry
-                : locatePointersStrict(dims, targets, warnings).entrySet()) {
-            counts.put(entry.getKey(), entry.getValue().size());
-        }
-        return counts;
     }
 
     /** 删除准备使用:严格收集每个存储槽的全部 holding 指针,保留重复引用。 */
@@ -330,18 +327,11 @@ public final class DiskScanner {
         for (Map.Entry<String, Path> dimension : dimensions) {
             String dim = dimension.getKey();
             Path dir = dimension.getValue();
-            if (!Files.isDirectory(dir)) throw new IOException("sublevels 目录不存在: " + dir);
-            List<Path> files;
-            try (var stream = Files.list(dir)) {
-                files = stream.filter(path -> SLVLR.matcher(path.getFileName().toString()).matches())
-                        .sorted(Comparator.comparing(path -> path.getFileName().toString())).toList();
-            }
-            for (Path file : files) {
-                Matcher matcher = SLVLR.matcher(file.getFileName().toString());
-                if (!matcher.matches()) continue;
-                int rx = Integer.parseInt(matcher.group(1));
-                int rz = Integer.parseInt(matcher.group(2));
-                forEachEntryStrict(file, dir, rx, rz, 128, warnings, (index, tag) -> {
+            for (StorageFile file : listStorageFiles(dir, true)) {
+                if (!file.pointerFile()) continue;
+                int rx = file.rx();
+                int rz = file.rz();
+                forEachEntryStrict(file.path(), dir, rx, rz, 128, warnings, (index, tag) -> {
                     int chunkX = rx * 32 + (index & 31);
                     int chunkZ = rz * 32 + (index >> 5);
                     for (int packed : tag.getIntArray("pointers")) {
@@ -444,10 +434,8 @@ public final class DiskScanner {
 
     private static void collectPointers(Path file, Path dir, int rx, int rz, Set<String> pointerIds) {
         forEachEntry(file, dir, rx, rz, 128, (idx, tag) -> {
-            int[] ptrs = tag.getIntArray("pointers");
-            for (int pk : ptrs) {
-                int si = (pk >> 16) & 0xFFFF, li = pk & 0xFFFF;
-                pointerIds.add(rx + "." + rz + "." + si + ":" + li);
+            for (int pk : tag.getIntArray("pointers")) {
+                pointerIds.add(EntryKey.slotId(rx, rz, (pk >> 16) & 0xFFFF, pk & 0xFFFF));
             }
         });
     }
@@ -538,34 +526,19 @@ public final class DiskScanner {
     }
 
     /**
-     * 实时定位某 uuid 的条目(不要求有指针——孤儿收养用)。
-     * 同 uuid 多条目时取方块数最大的一份(资产安全:保最完整版本)。
-     */
-    public static LocatedEntry locateEntry(String dim, Path dir, UUID uuid) {
-        return locateEntries(dim, dir, Set.of(uuid)).get(uuid);
-    }
-
-    /**
-     * 批量版 {@link #locateEntry}:一趟扫描解出整批 uuid。
+     * 一趟扫描定位整批 uuid 的条目(不要求有指针——孤儿收养用)。
      * <p>
-     * 逐个调用时每个 uuid 都要把该维度所有 .slvls 解压一遍,依赖链有几十个成员就是几十遍
-     * 同样的解压 —— 生产事故的主要成本之一。同 uuid 多条目仍取方块数最大的一份。
+     * 逐个定位时每个 uuid 都要把该维度所有 .slvls 解压一遍,依赖链有几十个成员就是几十遍
+     * 同样的解压 —— 生产事故的主要成本之一。同 uuid 多条目取方块数最大的一份(资产安全:保最完整版本)。
      */
     public static Map<UUID, LocatedEntry> locateEntries(String dim, Path dir, Set<UUID> uuids) {
         Map<UUID, LocatedEntry> best = new HashMap<>();
         if (uuids.isEmpty()) return best;
         try {
-            List<Path> slvlsFiles = new ArrayList<>();
-            try (var stream = Files.list(dir)) {
-                for (Path p : stream.toList()) {
-                    if (SLVLS.matcher(p.getFileName().toString()).matches()) slvlsFiles.add(p);
-                }
-            }
-            for (Path p : slvlsFiles) {
-                Matcher m = SLVLS.matcher(p.getFileName().toString());
-                if (!m.matches()) continue;
-                int rx = Integer.parseInt(m.group(1)), rz = Integer.parseInt(m.group(2)), si = Integer.parseInt(m.group(3));
-                forEachEntry(p, dir, rx, rz, 4096, (idx, tag) -> {
+            for (StorageFile file : listStorageFiles(dir, false)) {
+                if (file.pointerFile()) continue;
+                int rx = file.rx(), rz = file.rz(), si = file.storage();
+                forEachEntry(file.path(), dir, rx, rz, 4096, (idx, tag) -> {
                     try {
                         UUID uuid = tag.getUUID("uuid");
                         if (!uuids.contains(uuid)) return;
@@ -596,34 +569,26 @@ public final class DiskScanner {
         if (uuids.isEmpty()) return found;
         try {
             Map<String, int[]> refChunk = new HashMap<>();
-            List<Path> slvlsFiles = new ArrayList<>();
-            try (var stream = Files.list(dir)) {
-                for (Path p : stream.toList()) {
-                    String fn = p.getFileName().toString();
-                    Matcher mr = SLVLR.matcher(fn);
-                    if (mr.matches()) {
-                        int rx = Integer.parseInt(mr.group(1)), rz = Integer.parseInt(mr.group(2));
-                        forEachEntry(p, dir, rx, rz, 128, (idx, tag) -> {
-                            int cx = rx * 32 + (idx & 31), cz = rz * 32 + (idx >> 5);
-                            for (int pk : tag.getIntArray("pointers")) {
-                                refChunk.put(rx + "." + rz + "." + ((pk >> 16) & 0xFFFF) + ":" + (pk & 0xFFFF),
-                                        new int[]{cx, cz});
-                            }
-                        });
-                    } else if (SLVLS.matcher(fn).matches()) {
-                        slvlsFiles.add(p);
+            List<StorageFile> files = listStorageFiles(dir, false);
+            for (StorageFile file : files) {
+                if (!file.pointerFile()) continue;
+                int rx = file.rx(), rz = file.rz();
+                forEachEntry(file.path(), dir, rx, rz, 128, (idx, tag) -> {
+                    int cx = rx * 32 + (idx & 31), cz = rz * 32 + (idx >> 5);
+                    for (int pk : tag.getIntArray("pointers")) {
+                        refChunk.put(EntryKey.slotId(rx, rz, (pk >> 16) & 0xFFFF, pk & 0xFFFF),
+                                new int[]{cx, cz});
                     }
-                }
+                });
             }
-            for (Path p : slvlsFiles) {
-                Matcher m = SLVLS.matcher(p.getFileName().toString());
-                if (!m.matches()) continue;
-                int rx = Integer.parseInt(m.group(1)), rz = Integer.parseInt(m.group(2)), si = Integer.parseInt(m.group(3));
-                forEachEntry(p, dir, rx, rz, 4096, (idx, tag) -> {
+            for (StorageFile file : files) {
+                if (file.pointerFile()) continue;
+                int rx = file.rx(), rz = file.rz(), si = file.storage();
+                forEachEntry(file.path(), dir, rx, rz, 4096, (idx, tag) -> {
                     try {
                         UUID uuid = tag.getUUID("uuid");
                         if (!uuids.contains(uuid) || found.containsKey(uuid)) return;
-                        int[] rc = refChunk.get(rx + "." + rz + "." + si + ":" + idx);
+                        int[] rc = refChunk.get(EntryKey.slotId(rx, rz, si, idx));
                         if (rc == null) return; // 无指针引用的条目 snatch 不到,跳过
                         found.put(uuid, new LiveLocation(new EntryKey(dim, rx, rz, si, idx), rc[0], rc[1]));
                     } catch (Exception ignored) {
@@ -676,11 +641,7 @@ public final class DiskScanner {
                     ? new double[]{(wb.getDouble("minX") + wb.getDouble("maxX")) / 2, wb.getDouble("minY"),
                             (wb.getDouble("minZ") + wb.getDouble("maxZ")) / 2}
                     : new double[]{pose.getDouble("x"), pose.getDouble("y"), pose.getDouble("z")};
-            List<UUID> deps = new ArrayList<>();
-            if (tag.contains("loading_dependencies")) {
-                ListTag list = tag.getList("loading_dependencies", Tag.TAG_INT_ARRAY);
-                for (Tag t : list) deps.add(NbtUtils.loadUUID(t));
-            }
+            List<UUID> deps = dependencies(tag);
             CompoundTag plot = tag.getCompound("plot");
             Set<String> ids = new LinkedHashSet<>();
             int blocks = countBlocks(plot, ids);
