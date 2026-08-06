@@ -1,6 +1,10 @@
 'use strict';
 /* 全局共享状态:服务端数据快照 + 选中/多选 + 视图态(视图私有状态仍留在各视图文件) */
 let DATA = null, STATS = null, RECYCLE = null;
+/* 最近一次加载失败的原因(空串=没失败)。协议超限、网关挂了、token 失效都会走到这儿 ——
+   从前 bodies 失败只弹个 toast 就完事、回收站失败干脆写一份空数据,于是"加载失败"被
+   画成了"回收站为空"。用户看不出区别,只会反复刷新,把同样的压力再造一遍 */
+let BODIES_ERROR = '', RECYCLE_ERROR = '';
 let CLONE_SETS = new Map();
 let SEL = null, SELG = null, RSEL = null, RSELG = null, MESH_DATA = null, MESH_UUID = null, MESH_SOURCE = null;
 let VIEW = localStorage.getItem('spView') || 'dash';

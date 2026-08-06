@@ -5,7 +5,7 @@
  *   node src/test/js/frontend-races.mjs
  *
  * 覆盖:UI-01 终态契约、UI-02 并发登录、UI-03 切服隔离、UI-04 预览旧失败、
- *      PERF-03 忙碌轮询与注销、PERF-04 作业轮询与 bodies 解耦、PERF-05 批量收养只发一次请求刷一次、回收站版本/清除交互。
+ *      LOAD-01 加载失败不伪装成空、PERF-03 忙碌轮询与注销、PERF-04 作业轮询与 bodies 解耦、PERF-05 批量收养只发一次请求刷一次、回收站版本/清除交互。
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -531,6 +531,58 @@ test('回收站作业结束后自动刷新版本统计', async () => {
 
   assert.equal(recycleLoads, 1, '彻底删除完成后必须刷新组数和磁盘占用');
   assert.match(evalIn(sandbox, '__toasts[0][0]'), /missing-group: 回收组不存在/);
+});
+
+// LOAD-01:加载失败不得伪装成"没有数据"
+test('LOAD-01 首次加载失败要显示加载失败,不是空列表也不是永远加载中', async () => {
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies')) return errorResponse(500);
+    if (url.startsWith('/api/recycle')) return errorResponse(500);
+    return jsonResponse({ running: [], log: [], files: [] });
+  };
+  evalIn(sandbox, "authenticated = true; VIEW = 'bodies'; toast = () => {}");
+  await evalIn(sandbox, 'loadBodies')();
+  const list = evalIn(sandbox, "document.getElementById('list').innerHTML");
+  assert.match(list, /加载失败/, '服务端已经明确报错,界面不能停在"加载中…"');
+  assert.equal(evalIn(sandbox, 'DATA'), null);
+
+  evalIn(sandbox, "VIEW = 'recycle'");
+  await evalIn(sandbox, 'loadRecycle')();
+  await tick();
+  const rList = evalIn(sandbox, "document.getElementById('rList').innerHTML");
+  assert.match(rList, /加载失败/, '从前失败会写一份空数据,显示成"回收站为空"');
+  assert.doesNotMatch(rList, /回收站为空/, '"加载失败"和"真的没有备份"必须区分得开');
+  assert.equal(evalIn(sandbox, 'RECYCLE'), null, '失败不得伪造出一份空快照');
+});
+
+test('LOAD-01 已有数据时刷新失败要保留旧数据并标明是上次的结果', async () => {
+  let ok = true;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies')) return ok ? bodiesResponse({ total_bodies: 7 }) : errorResponse(500);
+    if (url.startsWith('/api/recycle')) {
+      return ok ? jsonResponse({ groups: [], block_palette: [], next_cursor: 'c1', total_groups: 3 })
+                : errorResponse(500);
+    }
+    return jsonResponse({ running: [], log: [], files: [] });
+  };
+  evalIn(sandbox, "authenticated = true; VIEW = 'bodies'; toast = () => {}");
+  await evalIn(sandbox, 'loadBodies')();
+  await evalIn(sandbox, 'loadRecycle')();
+  await tick();
+  assert.equal(evalIn(sandbox, 'DATA.total_bodies'), 7);
+
+  ok = false;
+  await evalIn(sandbox, 'loadBodies')();
+  assert.equal(evalIn(sandbox, 'DATA.total_bodies'), 7, '刷新失败不能把已有数据抹掉');
+  assert.match(evalIn(sandbox, "document.getElementById('toolbar').innerHTML"), /上一次的结果/);
+
+  evalIn(sandbox, "VIEW = 'recycle'");
+  await evalIn(sandbox, 'loadRecycle')(true);   // 加载更多失败
+  await tick();
+  assert.equal(evalIn(sandbox, 'RECYCLE_CURSOR'), 'c1', '加载更多失败要保留游标,能原地再点一次');
+  assert.equal(evalIn(sandbox, 'RECYCLE_LOADING'), false, '按钮不能卡在禁用态');
 });
 
 // UI-04:预览旧失败

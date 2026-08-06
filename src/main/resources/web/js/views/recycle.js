@@ -26,7 +26,13 @@ function recycleStateTag(state){
 function renderRecycle(){
   renderRecycleTabs();
   const list = document.getElementById('rList');
-  if (!RECYCLE) { list.innerHTML=`<div class="listEmpty">${t('loading')}</div>`; return; }
+  if (!RECYCLE) {
+    list.innerHTML = RECYCLE_ERROR
+      ? `<div class="listEmpty"><span class="big">⚠</span>${t('loadFail')}${esc(RECYCLE_ERROR)}</div>`
+      : `<div class="listEmpty">${t('loading')}</div>`;
+    renderRecycleToolbar(0, 0);
+    return;
+  }
   const needle = document.getElementById('rSearch').value.trim().toLowerCase();
   const states = new Set([...document.querySelectorAll('.rFState:checked')].map(x=>x.value));
   const sizes = new Set([...document.querySelectorAll('.rFSize:checked')].map(x=>x.value));
@@ -91,6 +97,9 @@ function expandRecycle(open){
 function renderRecycleToolbar(visible, total){
   const selectedGroups=[...R_SELECTED].map(id=>RECYCLE_BY_ID.get(id)).filter(Boolean);
   const selectedBodies=selectedGroups.reduce((sum,group)=>sum+group.members,0);
+  // 已有数据时刷新失败:旧列表照常可用,但要说明它是上一次的结果
+  const stale=RECYCLE&&RECYCLE_ERROR
+    ? `<span style="color:var(--bad)">· ${t('staleData')}${esc(RECYCLE_ERROR)}</span>` : '';
   const restoreable=selectedGroups.every(group=>group.state!=='incomplete');
   // 列表是分页拉的,所以要同时告诉用户"已加载多少 / 服务端一共多少",筛选只作用在已加载部分
   const loaded=(RECYCLE&&RECYCLE.groups.length)||0;
@@ -99,7 +108,7 @@ function renderRecycleToolbar(visible, total){
        <button onclick="loadMoreRecycle()" ${RECYCLE_LOADING?'disabled':''}>${
          RECYCLE_LOADING?t('rLoading'):t('rLoadMore')}</button>` : '';
   document.getElementById('rToolbar').innerHTML =
-    `<span>${t('rShowing')(visible,total)}</span>
+    `<span>${t('rShowing')(visible,total)}</span>${stale}
      <button onclick="expandRecycle(true)">${t('expandAll')}</button>
      <button onclick="expandRecycle(false)">${t('collapseAll')}</button>
      ${more}

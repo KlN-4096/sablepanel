@@ -85,6 +85,7 @@ const I18N = {
     limitConfirmMsg:(n,m)=>`当前有 ${n} 个备份文件。将上限降到 ${m} 不会删除已有备份，但在人工彻底删除到上限以内前，新的删除会被拒绝。`,
     copied:'已复制', showMore:(n)=>`显示其余 ${n} 组`, noMatch:'没有符合条件的物理体',
     loadFail:'加载失败: ',
+    staleData:'刷新失败,以下是上一次的结果: ',
     statPhys:'物理引擎', statLoaded:'加载体', statNone:'暂无数据', confirmMismatch:'输入不匹配,已取消',
     costRow:'性能开销', costVal:(ms)=>`${ms} ms/tick`,
     costHint:'该体每 tick 的 Java 逻辑耗时(方块实体、力、同步)',

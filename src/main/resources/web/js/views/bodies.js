@@ -141,7 +141,15 @@ function cloneSetOf(body){ return body && body.clone_set !== undefined ? CLONE_S
 function clonePeerCount(body){ const set=cloneSetOf(body); return set ? Math.max(0,(set.members||[]).length-1) : 0; }
 
 function render() {
-  if (!DATA || VIEW !== 'bodies') return;
+  if (VIEW !== 'bodies') return;
+  if (!DATA) {
+    // 从前这里直接 return,列表就永远停在初始的"加载中…" —— 服务端已经明确报错了,
+    // 用户却只能靠那一闪而过的 toast 判断,通常的反应是继续刷新
+    document.getElementById('list').innerHTML = BODIES_ERROR
+      ? `<div id="listEmpty"><span class="big">⚠</span>${t('loadFail')}${esc(BODIES_ERROR)}</div>`
+      : `<div id="listEmpty">${t('loading')}</div>`;
+    return;
+  }
   const states = checked('fState'), sizes = checked('fSize'), dims = checked('fDim');
   const search = document.getElementById('fSearch').value.toLowerCase();
   const namedOnly = document.getElementById('fNamedOnly').checked;
@@ -262,6 +270,8 @@ function render() {
 
 function renderToolbar(matched, tabTotal){
   const parts = [`<span>${t('filterBar')(matched, tabTotal)}</span>`];
+  // 有旧数据时刷新失败:留着旧数据,但必须说清这不是当前状态
+  if (BODIES_ERROR) parts.push(`<span style="color:var(--bad)">· ${t('staleData')}${esc(BODIES_ERROR)}</span>`);
   // 服务端对单次响应有硬上限。三种截断后果不同,分开说 —— 从前一律套"只显示 N / M 组"的
   // 模板,单个巨型组被按成员截断时会显示成自相矛盾的"只显示 3000 / 1 组"
   if (DATA && DATA.truncated) {

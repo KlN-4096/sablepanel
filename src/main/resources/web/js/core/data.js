@@ -30,6 +30,7 @@ async function loadBodies() {
     const result = await api('/api/bodies');
     if (request !== bodiesRequest || gen !== srvGen()) return;
     DATA = result;
+    BODIES_ERROR = '';
     BODY_BY_UUID = new Map();
     CLONE_SETS = new Map((DATA.clone_sets || []).map(set=>[Number(set.id), set]));
     PAUSED = new Set(DATA.paused || []);
@@ -50,7 +51,12 @@ async function loadBodies() {
     refreshTimer = 60;
     if (keepUuid) reselect(keepUuid);
   } catch (e) {
-    if (request === bodiesRequest && gen === srvGen()) toast(t('loadFail') + e.message, 'bad');
+    if (request === bodiesRequest && gen === srvGen()) {
+      // 有旧数据就留着并标记"这是上次的结果";没有的话要明说加载失败,不能停在"加载中…"
+      BODIES_ERROR = e.message || String(e);
+      toast(t('loadFail') + e.message, 'bad');
+      render();   // 只有列表和工具条要改口径,DATA 没变,别的面板不用重画
+    }
   } finally {
     bodiesInFlight = false;
     // 补跑要看认证状态:请求重叠期间用户注销的话,这一跑会带着空 token 发出去,
@@ -205,6 +211,7 @@ async function loadRecycle(append){
     // 必须在渲染之前清:下面的 renderRecycle 会照着 RECYCLE_LOADING 画按钮,
     // 留到 finally 里清就只改变量不重绘,"加载更多"会永久停在 disabled 的"加载中…"
     RECYCLE_LOADING = false;
+    RECYCLE_ERROR = '';
     const groups = page.groups || [];
     if (append && RECYCLE) {
       RECYCLE.groups = RECYCLE.groups.concat(groups);
@@ -234,11 +241,10 @@ async function loadRecycle(append){
   } catch(e){
     if (gen !== srvGen() || req !== RECYCLE_REQ) return;
     RECYCLE_LOADING = false;   // 同上:失败时也要在重绘之前清,否则按钮卡在禁用态
-    if (!append) {
-      RECYCLE = {groups:[],block_palette:[],file_count:0,disk_bytes:0,limit:500,latest_groups:0,old_groups:0};
-      RECYCLE_CURSOR=''; RECYCLE_TOTAL=0;
-    }
-    else toast(t('loadFail') + e.message, 'bad');
+    // 失败就是失败:既不写一份空数据(那会显示成"回收站为空"),也不动游标 ——
+    // "加载更多"要能原地再点一次
+    RECYCLE_ERROR = e.message || String(e);
+    if (append) toast(t('loadFail') + e.message, 'bad');
     if (VIEW==='recycle') renderRecycle();
   } finally {
     if (req === RECYCLE_REQ) RECYCLE_LOADING = false;
