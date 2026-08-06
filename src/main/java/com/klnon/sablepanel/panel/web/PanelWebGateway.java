@@ -7,7 +7,6 @@ import com.klnon.sablepanel.panel.PanelConfig;
 import com.klnon.sablepanel.panel.api.PanelRequest;
 import com.klnon.sablepanel.panel.api.PanelResponse;
 import com.klnon.sablepanel.panel.client.ClientPanelConfig;
-import com.klnon.sablepanel.panel.transport.CertificatePinException;
 import com.klnon.sablepanel.panel.transport.PanelEndpoint;
 import com.klnon.sablepanel.panel.transport.PanelEvent;
 import com.klnon.sablepanel.panel.transport.PanelNet;
@@ -21,46 +20,31 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/** 网页网关本体:HTTP 路由/静态资源/SSE 桥。上游 TLS 连接的生命周期在 {@link UpstreamConnection}。 */
 public final class PanelWebGateway implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(PanelWebGateway.class);
-    private static final int RECONNECT_SECONDS = 2;
-    private static final long RECONNECT_LOG_INTERVAL_MS = 60_000L;
     private final boolean clientMode;
     private final String bind;
     private final int port;
-    private final ClientPanelConfig clientConfig;
-    private final PanelEndpoint fixedEndpoint;
-    private final String fixedFingerprint;
+    private final UpstreamConnection connection;
     private volatile HttpServer http;
     private volatile ExecutorService httpPool;
     private volatile ExecutorService forwardPool;
-    private volatile ScheduledExecutorService reconnectExecutor;
     private volatile PanelEventStreams eventStreams;
-    private volatile PanelTcpClient upstream;
-    private volatile PanelEndpoint endpoint;
-    private volatile PanelEndpoint pendingEndpoint;
-    private volatile String pendingFingerprint;
     private volatile boolean closed = true;
-    private volatile long lastReconnectLogMs;
-    private volatile String eventToken;
-    private final AtomicBoolean reconnectPending = new AtomicBoolean();
 
     private PanelWebGateway(boolean clientMode, String bind, int port, ClientPanelConfig clientConfig,
                             PanelEndpoint fixedEndpoint, String fixedFingerprint) {
         this.clientMode = clientMode;
         this.bind = bind;
         this.port = port;
-        this.clientConfig = clientConfig;
-        this.fixedEndpoint = fixedEndpoint;
-        this.fixedFingerprint = fixedFingerprint;
+        this.connection = new UpstreamConnection(clientMode, fixedEndpoint, fixedFingerprint,
+                clientConfig, this::publishEvent, () -> this.eventStreams);
     }
 
     public static PanelWebGateway server(PanelConfig config, String fingerprint) {
@@ -76,7 +60,6 @@ public final class PanelWebGateway implements AutoCloseable {
         synchronized (this) {
             if (!this.closed || this.http != null) throw new IllegalStateException("网页网关已启动");
             this.closed = false;
-            this.reconnectPending.set(false);
             // 满了拒绝而不是 CallerRuns:后者把 HttpServer 的 dispatcher 线程拖进业务,
             // 公网上 68 个慢请求就能让整个端口停止接客
             this.httpPool = PanelNet.boundedPool("sablepanel-web", 4, 64);
@@ -85,19 +68,12 @@ public final class PanelWebGateway implements AutoCloseable {
             this.eventStreams = new PanelEventStreams();
         }
         try {
-            if (!this.clientMode) {
-                try {
-                    connect(this.fixedEndpoint, this.fixedFingerprint);
-                } catch (Exception error) {
-                    logReconnectFailure(error);
-                }
-            }
+            this.connection.open();
             HttpServer created = HttpServer.create(new InetSocketAddress(this.bind, this.port), 0);
             created.setExecutor(this.httpPool);
             created.createContext("/", this::handle);
             created.start();
             this.http = created;
-            if (!this.clientMode) startReconnectLoop();
             LOGGER.info("sablepanel: {} web gateway at http://{}:{}/",
                     this.clientMode ? "client" : "server", this.bind, this.port);
         } catch (Exception error) {
@@ -161,20 +137,19 @@ public final class PanelWebGateway implements AutoCloseable {
             sendError(exchange, 405, "需要 GET");
             return false;
         }
-        PanelTcpClient client = this.upstream;
-        if (client == null || !client.isActive()) {
-            requestReconnect();
+        PanelTcpClient client = this.connection.active();
+        if (client == null) {
             sendError(exchange, 503, "尚未连接服务器");
             return false;
         }
-        // 订阅等待不许拿实例锁:一个慢上游能把 connect/disconnect/close 全堵 10 秒
+        // 订阅等待不许拿锁:一个慢上游能把 connect/disconnect/close 全堵 10 秒
         String token = exchange.getRequestHeaders().getFirst("X-Token");
         PanelResponse response = client.subscribeEvents(token).get(10, TimeUnit.SECONDS);
         if (response.status() != 200) {
             HttpIo.send(exchange, response.status(), response.contentType(), response.body(), false);
             return false;
         }
-        PanelEventStreams streams = adoptEventToken(client, token);
+        PanelEventStreams streams = this.connection.adoptEventToken(client, token);
         if (streams == null) {
             sendError(exchange, 503, "服务器连接已变化");
             return false;
@@ -184,17 +159,6 @@ public final class PanelWebGateway implements AutoCloseable {
             return false;
         }
         return true;
-    }
-
-    /** 订阅成功后的记账。短锁:只比对上游身份并交换 eventToken,不做任何网络等待 */
-    private synchronized PanelEventStreams adoptEventToken(PanelTcpClient client, String token) {
-        if (client != this.upstream || !client.isActive()) return null;
-        PanelEventStreams streams = this.eventStreams;
-        if (streams == null) return null;
-        String previousToken = this.eventToken;
-        if (previousToken != null && !previousToken.equals(token)) streams.closeStreams();
-        this.eventToken = token;
-        return streams;
     }
 
     /**
@@ -239,9 +203,8 @@ public final class PanelWebGateway implements AutoCloseable {
             sendError(exchange, 401, "token 无效");
             return;
         }
-        PanelTcpClient client = this.upstream;
-        if (client == null || !client.isActive()) {
-            requestReconnect();
+        PanelTcpClient client = this.connection.active();
+        if (client == null) {
             sendError(exchange, 503, "尚未连接服务器");
             return;
         }
@@ -256,232 +219,67 @@ public final class PanelWebGateway implements AutoCloseable {
     private void sendState(HttpExchange exchange) throws IOException {
         JsonObject state = new JsonObject();
         state.addProperty("mode", this.clientMode ? "client" : "server");
-        state.addProperty("connected", this.upstream != null && this.upstream.isActive());
+        state.addProperty("connected", this.connection.isConnected());
         // 地址只回给客户端模式的本机页面(预填上次集群地址);服务端模式这是公网口,不泄露内部上游端点
         if (this.clientMode) {
-            state.addProperty("address", this.endpoint != null ? this.endpoint.toString()
-                    : this.clientConfig.lastAddress);
+            state.addProperty("address", this.connection.displayAddress());
         }
         HttpIo.send(exchange, 200, "application/json", state.toString().getBytes(StandardCharsets.UTF_8), false);
     }
 
-    private synchronized void connectClient(HttpExchange exchange) throws Exception {
+    private void connectClient(HttpExchange exchange) throws Exception {
         if (!this.clientMode) {
             sendError(exchange, 409, "服务端网关目标固定");
             return;
         }
         JsonObject body = HttpIo.readJsonBody(exchange);
-        PanelEndpoint requested = PanelEndpoint.parse(body.has("address") ? body.get("address").getAsString() : "", 25581);
-        if (this.upstream != null && this.upstream.isActive() && !requested.equals(this.endpoint)) {
-            sendError(exchange, 409, "请先断开当前集群");
+        PanelResponse failure = this.connection.connectRequested(
+                body.has("address") ? body.get("address").getAsString() : "",
+                body.has("accept_fingerprint") ? body.get("accept_fingerprint").getAsString() : "");
+        if (failure != null) {
+            HttpIo.send(exchange, failure.status(), failure.contentType(), failure.body(), false);
             return;
         }
-        closeUpstream();
-        String key = requested.toString();
-        String accepted = body.has("accept_fingerprint") ? body.get("accept_fingerprint").getAsString() : "";
-        if (!accepted.isBlank()) {
-            if (!requested.equals(this.pendingEndpoint)
-                    || this.pendingFingerprint == null
-                    || !accepted.equalsIgnoreCase(this.pendingFingerprint)) {
-                sendError(exchange, 409, "指纹确认已失效,请重新连接");
-                return;
-            }
-        }
-        String expected = accepted.isBlank() ? this.clientConfig.certificatePins.get(key) : accepted;
-        try {
-            connect(requested, expected);
-            if (!accepted.isBlank()) this.clientConfig.certificatePins.put(key, accepted);
-            this.clientConfig.lastAddress = key;
-            this.clientConfig.save();
-            clearPendingFingerprint();
-            HttpIo.send(exchange, 200, "application/json", "{\"ok\":true}".getBytes(StandardCharsets.UTF_8), false);
-        } catch (CertificatePinException pin) {
-            this.pendingEndpoint = requested;
-            this.pendingFingerprint = pin.fingerprint();
-            JsonObject response = new JsonObject();
-            response.addProperty("error", pin.changed() ? "certificate_changed" : "certificate_confirmation_required");
-            response.addProperty("fingerprint", pin.fingerprint());
-            HttpIo.send(exchange, 409, "application/json", response.toString().getBytes(StandardCharsets.UTF_8), false);
-        }
+        HttpIo.send(exchange, 200, "application/json", "{\"ok\":true}".getBytes(StandardCharsets.UTF_8), false);
     }
 
-    private synchronized void disconnectClient(HttpExchange exchange) throws IOException {
+    private void disconnectClient(HttpExchange exchange) throws IOException {
         if (!this.clientMode) {
             sendError(exchange, 409, "服务端网关不能断开本机 API");
             return;
         }
-        closeUpstream();
-        clearPendingFingerprint();
+        this.connection.disconnectRequested();
         HttpIo.send(exchange, 200, "application/json", "{\"ok\":true}".getBytes(StandardCharsets.UTF_8), false);
-    }
-
-    private void connect(PanelEndpoint endpoint, String fingerprint) throws Exception {
-        if (fingerprint == null || fingerprint.isBlank()) {
-            throw connectForFingerprint(endpoint);
-        }
-        PanelTcpClient connected = PanelTcpClient.connectManager(endpoint, fingerprint, this::publishEvent);
-        PanelTcpClient previous;
-        synchronized (this) {
-            if (this.closed) {
-                connected.close();
-                throw new IllegalStateException("网页网关已关闭");
-            }
-            previous = this.upstream;
-            this.upstream = connected;
-            this.endpoint = endpoint;
-        }
-        if (previous != null && previous != connected) previous.close();
-        restoreEventSubscription(connected);
-    }
-
-    private CertificatePinException connectForFingerprint(PanelEndpoint endpoint) throws Exception {
-        try {
-            PanelTcpClient.connectManager(endpoint, "").close();
-            throw new IllegalStateException("未取得服务器证书");
-        } catch (CertificatePinException pin) {
-            return pin;
-        }
     }
 
     @Override
     public void close() {
         HttpServer currentHttp;
-        PanelTcpClient currentUpstream;
         ExecutorService currentHttpPool;
         ExecutorService currentForwardPool;
-        ScheduledExecutorService currentReconnect;
         PanelEventStreams currentStreams;
         synchronized (this) {
-            if (this.closed && this.http == null && this.httpPool == null && this.reconnectExecutor == null
-                    && this.eventStreams == null) return;
+            if (this.closed && this.http == null && this.httpPool == null && this.eventStreams == null) return;
             this.closed = true;
             currentHttp = this.http;
-            currentUpstream = this.upstream;
             currentHttpPool = this.httpPool;
             currentForwardPool = this.forwardPool;
-            currentReconnect = this.reconnectExecutor;
             currentStreams = this.eventStreams;
             this.http = null;
-            this.upstream = null;
-            this.endpoint = null;
             this.httpPool = null;
             this.forwardPool = null;
-            this.reconnectExecutor = null;
             this.eventStreams = null;
-            this.eventToken = null;
         }
         if (currentHttp != null) currentHttp.stop(0);
         if (currentStreams != null) currentStreams.close();
-        PanelNet.shutdown(currentReconnect);
-        if (currentUpstream != null) currentUpstream.close();
+        this.connection.close();
         PanelNet.shutdown(currentForwardPool);
         PanelNet.shutdown(currentHttpPool);
-    }
-
-    private void closeUpstream() {
-        PanelTcpClient current;
-        synchronized (this) {
-            current = this.upstream;
-            this.upstream = null;
-            this.endpoint = null;
-            this.eventToken = null;
-        }
-        if (current != null) current.close();
-        PanelEventStreams streams = this.eventStreams;
-        if (streams != null) streams.closeStreams();
-    }
-
-    private void startReconnectLoop() {
-        ScheduledExecutorService reconnect = Executors.newSingleThreadScheduledExecutor(
-                PanelNet.daemonThreads("sablepanel-web-reconnect"));
-        synchronized (this) {
-            if (this.closed) {
-                reconnect.shutdownNow();
-                return;
-            }
-            this.reconnectExecutor = reconnect;
-        }
-        reconnect.scheduleWithFixedDelay(this::ensureServerUpstream,
-                RECONNECT_SECONDS, RECONNECT_SECONDS, TimeUnit.SECONDS);
-    }
-
-    private void requestReconnect() {
-        if (this.clientMode || this.closed) return;
-        ScheduledExecutorService reconnect = this.reconnectExecutor;
-        if (reconnect == null || reconnect.isShutdown()) return;
-        if (!this.reconnectPending.compareAndSet(false, true)) return;
-        try {
-            reconnect.execute(() -> {
-                try {
-                    ensureServerUpstream();
-                } finally {
-                    this.reconnectPending.set(false);
-                }
-            });
-        } catch (RejectedExecutionException rejected) {
-            this.reconnectPending.set(false);
-        }
-    }
-
-    private void ensureServerUpstream() {
-        if (this.clientMode || this.closed) return;
-        PanelTcpClient current = this.upstream;
-        if (current != null && current.isActive()) return;
-
-        PanelTcpClient connected;
-        try {
-            connected = PanelTcpClient.connectManager(this.fixedEndpoint, this.fixedFingerprint, this::publishEvent);
-        } catch (Exception error) {
-            logReconnectFailure(error);
-            return;
-        }
-
-        PanelTcpClient stale = null;
-        boolean keep;
-        synchronized (this) {
-            keep = !this.closed && !this.clientMode
-                    && (this.upstream == null || !this.upstream.isActive());
-            if (keep) {
-                stale = this.upstream;
-                this.upstream = connected;
-                this.endpoint = this.fixedEndpoint;
-                this.lastReconnectLogMs = 0;
-            }
-        }
-        if (!keep) {
-            connected.close();
-            return;
-        }
-        if (stale != null) stale.close();
-        restoreEventSubscription(connected);
-        LOGGER.info("sablepanel: server web gateway reconnected to {}", this.fixedEndpoint);
-    }
-
-    /** 只读 volatile 字段,不拿实例锁:10 秒的订阅等待不能挡住 connect/close */
-    private void restoreEventSubscription(PanelTcpClient client) {
-        String token = this.eventToken;
-        if (token == null || token.isBlank()) return;
-        try {
-            PanelResponse response = client.subscribeEvents(token).get(10, TimeUnit.SECONDS);
-            if (response.status() == 200) {
-                PanelEventStreams streams = this.eventStreams;
-                if (streams != null) streams.resync();
-            }
-        } catch (Exception error) {
-            LOGGER.warn("sablepanel: event subscription restore failed: {}", messageOf(error));
-        }
     }
 
     private void publishEvent(PanelEvent event) {
         PanelEventStreams streams = this.eventStreams;
         if (streams != null) streams.publish(event);
-    }
-
-    private void logReconnectFailure(Throwable error) {
-        long now = System.currentTimeMillis();
-        if (now - this.lastReconnectLogMs < RECONNECT_LOG_INTERVAL_MS) return;
-        this.lastReconnectLogMs = now;
-        LOGGER.warn("sablepanel: server web gateway upstream unavailable: {}", messageOf(error));
     }
 
     private boolean allowLocalControlRequest(HttpExchange exchange) throws IOException {
@@ -507,11 +305,6 @@ public final class PanelWebGateway implements AutoCloseable {
             return false;
         }
         return true;
-    }
-
-    private void clearPendingFingerprint() {
-        this.pendingEndpoint = null;
-        this.pendingFingerprint = null;
     }
 
     private static String localApiHost(String bind) {
