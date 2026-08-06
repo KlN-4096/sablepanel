@@ -1,5 +1,7 @@
 package com.klnon.sablepanel.panel.service;
 
+import static com.klnon.sablepanel.panel.api.PanelResponse.messageOf;
+
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.SablePanel;
@@ -39,8 +41,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
 /** Standalone, removable consistency audit and explicit repair for Sable 2.0.3 metadata. */
 public final class ConsistencyService {
@@ -99,7 +99,7 @@ public final class ConsistencyService {
             operationError = attempt.error;
             backup = attempt.backup;
         } catch (Exception error) {
-            operationError = error.getMessage() == null ? error.toString() : error.getMessage();
+            operationError = messageOf(error);
         }
 
         Report verified;
@@ -177,7 +177,7 @@ public final class ConsistencyService {
             for (UUID uuid : forced) ForceLoadService.removeOnMain(this.server, uuid);
             if (!paused.isEmpty()) PauseService.applyOnMain(this.server, paused, false);
         } catch (Exception failure) {
-            error = failure.getMessage() == null ? failure.toString() : failure.getMessage();
+            error = messageOf(failure);
         }
         return new RepairAttempt(Set.copyOf(skipped), error, backup);
     }
@@ -353,16 +353,7 @@ public final class ConsistencyService {
     }
 
     private <T> T onMain(Callable<T> task) throws Exception {
-        if (this.server.isSameThread()) return task.call();
-        CompletableFuture<T> future = new CompletableFuture<>();
-        this.server.execute(() -> {
-            try {
-                future.complete(task.call());
-            } catch (Throwable error) {
-                future.completeExceptionally(error);
-            }
-        });
-        return future.get(60, TimeUnit.SECONDS);
+        return MainThread.on(this.server, 60, task);
     }
 
     private static Field loadedChunksField() {

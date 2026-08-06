@@ -20,4 +20,11 @@ public record PanelResponse(int status, String contentType, byte[] body, boolean
         error.addProperty("error", message);
         return json(status, error, false);
     }
+
+    /** 全仓统一的异常文案提取:钻到根因取 message。从前 7 个类各写一份、3 处内联,语义还不一致 */
+    public static String messageOf(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null) current = current.getCause();
+        return current.getMessage() != null ? current.getMessage() : current.toString();
+    }
 }

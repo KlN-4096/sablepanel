@@ -1,5 +1,7 @@
 package com.klnon.sablepanel.panel.service;
 
+import static com.klnon.sablepanel.panel.api.PanelResponse.messageOf;
+
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -555,9 +557,4 @@ public final class JobService implements AutoCloseable {
         return text.toString();
     }
 
-    private static String messageOf(Throwable error) {
-        Throwable current = error;
-        while (current.getCause() != null) current = current.getCause();
-        return current.getMessage() != null ? current.getMessage() : current.toString();
-    }
 }

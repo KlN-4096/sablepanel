@@ -1,5 +1,7 @@
 package com.klnon.sablepanel.panel.service;
 
+import static com.klnon.sablepanel.panel.api.PanelResponse.messageOf;
+
 import com.klnon.sablepanel.panel.PanelConfig;
 import com.klnon.sablepanel.panel.data.BodyIndex;
 import com.klnon.sablepanel.panel.data.CopyVersionScanner;
@@ -38,8 +40,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 面板操作(sable 交互全部主线程执行):传送/删除/收养。
@@ -1451,10 +1451,6 @@ public final class OpsService {
         return String.join(", ", values);
     }
 
-    private static String messageOf(Throwable error) {
-        return String.valueOf(error.getMessage() != null ? error.getMessage() : error);
-    }
-
     private static JsonArray numberArray(double[] values) {
         JsonArray out = new JsonArray();
         for (double value : values) out.add(value);
@@ -2356,22 +2352,10 @@ public final class OpsService {
     }
 
     private JsonObject onMain(Callable<JsonObject> task) throws Exception {
-        return submitMain(task).get(20, TimeUnit.SECONDS);
+        return MainThread.on(this.server, 20, task);
     }
 
     private JsonObject onMainUntilComplete(Callable<JsonObject> task) throws Exception {
-        return submitMain(task).get();
-    }
-
-    private CompletableFuture<JsonObject> submitMain(Callable<JsonObject> task) {
-        CompletableFuture<JsonObject> fut = new CompletableFuture<>();
-        this.server.execute(() -> {
-            try {
-                fut.complete(task.call());
-            } catch (Throwable t) {
-                fut.completeExceptionally(t);
-            }
-        });
-        return fut;
+        return MainThread.onUntilComplete(this.server, task);
     }
 }

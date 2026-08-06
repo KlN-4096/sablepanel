@@ -1,5 +1,7 @@
 package com.klnon.sablepanel.panel.transport;
 
+import static com.klnon.sablepanel.panel.api.PanelResponse.messageOf;
+
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.panel.api.PanelRequest;
 import com.klnon.sablepanel.panel.api.PanelResponse;
@@ -502,9 +504,4 @@ public final class PanelTcpServer implements AutoCloseable {
         }
     }
 
-    private static String messageOf(Throwable error) {
-        Throwable current = error;
-        while (current.getCause() != null) current = current.getCause();
-        return current.getMessage() != null ? current.getMessage() : current.toString();
-    }
 }

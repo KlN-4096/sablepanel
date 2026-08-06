@@ -484,7 +484,7 @@ public final class RecycleStore {
                 removedBytes += bytes;
             } catch (Exception error) {
                 result.addProperty("ok", false);
-                result.addProperty("error", error.getMessage() == null ? error.toString() : error.getMessage());
+                result.addProperty("error", com.klnon.sablepanel.panel.api.PanelResponse.messageOf(error));
             }
             results.add(result);
         }

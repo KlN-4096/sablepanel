@@ -1,5 +1,7 @@
 package com.klnon.sablepanel.panel.transport;
 
+import static com.klnon.sablepanel.panel.api.PanelResponse.messageOf;
+
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.SablePanel;
@@ -260,9 +262,4 @@ public final class PanelClusterNode implements AutoCloseable {
         if (this.closed) throw new IllegalStateException("面板节点已关闭");
     }
 
-    private static String messageOf(Throwable error) {
-        Throwable current = error;
-        while (current.getCause() != null) current = current.getCause();
-        return current.getMessage() != null ? current.getMessage() : current.toString();
-    }
 }

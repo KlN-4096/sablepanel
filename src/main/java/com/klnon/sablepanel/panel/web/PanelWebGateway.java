@@ -1,5 +1,7 @@
 package com.klnon.sablepanel.panel.web;
 
+import static com.klnon.sablepanel.panel.api.PanelResponse.messageOf;
+
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.panel.PanelConfig;
 import com.klnon.sablepanel.panel.api.PanelRequest;
@@ -545,9 +547,4 @@ public final class PanelWebGateway implements AutoCloseable {
         return error.toString().getBytes(StandardCharsets.UTF_8);
     }
 
-    private static String messageOf(Throwable error) {
-        Throwable current = error;
-        while (current.getCause() != null) current = current.getCause();
-        return current.getMessage() != null ? current.getMessage() : current.toString();
-    }
 }
