@@ -227,10 +227,9 @@ public final class ConsistencyService {
 
     private Report collect(boolean startup) throws Exception {
         List<String> warnings = new ArrayList<>();
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> metadata = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
-        Set<DiskScanner.EntryKey> payloads = payloadKeys(metadata);
-        List<PointerIssue> allPointers = danglingPointers(dimensions, payloads, warnings);
+        ScanSession scan = ScanSession.strict(this.server, warnings);
+        Set<DiskScanner.EntryKey> payloads = payloadKeys(scan.meta());
+        List<PointerIssue> allPointers = danglingPointers(scan.dims(), payloads, warnings);
         List<PointerIssue> pointers = allPointers.stream().limit(MAX_ISSUES).toList();
 
         RuntimeState runtime = onMain(() -> {
@@ -246,7 +245,7 @@ public final class ConsistencyService {
             for (UUID uuid : operational) if (runtimeExistsOnMain(uuid)) loaded.add(uuid);
             return new RuntimeState(loaded, forced);
         });
-        Set<UUID> existing = new LinkedHashSet<>(metadata.keySet());
+        Set<UUID> existing = new LinkedHashSet<>(scan.meta().keySet());
         existing.addAll(runtime.loaded);
         List<UUID> staleForced = runtime.forced.stream().filter(uuid -> !existing.contains(uuid)).sorted().toList();
         List<UUID> stalePaused = PauseService.snapshot().stream().filter(uuid -> !existing.contains(uuid)).sorted().toList();

@@ -404,19 +404,17 @@ public final class OpsService {
 
     private List<DeleteComponent> prepareDeleteComponents(List<UUID> targets, List<String> warnings)
             throws Exception {
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        ScanSession scan = ScanSession.strict(this.server, warnings);
         // 纯运行时新体(刚生成、盘上还没有条目)先落一次盘再删:内存里的方块不落盘就无从备份
-        if (flushUnsavedTargets(targets, meta)) {
-            dimensions = DiskScanner.sublevelDirsStrict(this.server);
-            meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        if (flushUnsavedTargets(targets, scan.meta())) {
+            scan = ScanSession.strict(this.server, warnings);
         }
-        List<Set<UUID>> selectedGroups = DiskScanner.selectedDependencyComponents(meta, targets);
+        List<Set<UUID>> selectedGroups = DiskScanner.selectedDependencyComponents(scan.meta(), targets);
         Set<UUID> selected = new LinkedHashSet<>();
         for (Set<UUID> group : selectedGroups) {
             selected.addAll(group);
         }
-        Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(dimensions, meta, selected, warnings);
+        Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(scan, selected, warnings);
 
         List<DeleteComponent> components = new ArrayList<>();
         for (Set<UUID> group : selectedGroups) {
@@ -510,21 +508,20 @@ public final class OpsService {
     }
 
     /** 只为指定成员重读完整 NBT；重读时验 UUID，避免准备期间槽位被 Sable 复用。 */
-    private Map<UUID, List<DeleteCopy>> readDeleteCopies(
-            Map<String, Path> dimensions, Map<UUID, List<DiskScanner.EntryMeta>> meta,
-            Set<UUID> targets, List<String> warnings) throws Exception {
+    private Map<UUID, List<DeleteCopy>> readDeleteCopies(ScanSession scan, Set<UUID> targets,
+                                                         List<String> warnings) throws Exception {
         Map<DiskScanner.EntryKey, CompoundTag> tags = new LinkedHashMap<>();
         for (UUID target : targets) {
-            for (DiskScanner.EntryMeta copy : meta.getOrDefault(target, List.of())) {
-                tags.put(copy.key(), readVerifiedTag(dimensions, target, copy.key()));
+            for (DiskScanner.EntryMeta copy : scan.entriesOf(target)) {
+                tags.put(copy.key(), readVerifiedTag(scan.dims(), target, copy.key()));
             }
         }
         Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
-                DiskScanner.locatePointersStrict(dimensions, tags.keySet(), warnings);
+                DiskScanner.locatePointersStrict(scan.dims(), tags.keySet(), warnings);
         Map<UUID, List<DeleteCopy>> result = new LinkedHashMap<>();
         for (UUID target : targets) {
             List<DeleteCopy> copies = new ArrayList<>();
-            for (DiskScanner.EntryMeta copy : meta.getOrDefault(target, List.of())) {
+            for (DiskScanner.EntryMeta copy : scan.entriesOf(target)) {
                 CompoundTag tag = tags.get(copy.key());
                 copies.add(new DeleteCopy(copy.key(), tag,
                         DiskScanner.countBlocks(tag.getCompound("plot"), null),
@@ -664,16 +661,13 @@ public final class OpsService {
     }
 
     private void validatePreparedSnapshotOnMain(DeleteComponent component) throws Exception {
-        DiskScanner.invalidateCache();
         List<String> warnings = new ArrayList<>();
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> metadata =
-                DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        ScanSession scan = ScanSession.fresh(this.server, warnings);
         if (!warnings.isEmpty()) {
             throw new IOException("删除前存储校验失败: " + String.join("; ", warnings));
         }
         UUID seed = component.targets.iterator().next();
-        Set<UUID> currentMembers = CopyVersionScanner.members(metadata, seed);
+        Set<UUID> currentMembers = CopyVersionScanner.members(scan.meta(), seed);
         Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>> expectedEntries = new LinkedHashMap<>();
         Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>> currentEntries = new LinkedHashMap<>();
         Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> expectedPointers = new LinkedHashMap<>();
@@ -687,15 +681,15 @@ public final class OpsService {
             }
             expectedEntries.put(uuid, expected);
             Map<DiskScanner.EntryKey, CompoundTag> current = new LinkedHashMap<>();
-            for (DiskScanner.EntryMeta entry : metadata.getOrDefault(uuid, List.of())) {
-                current.put(entry.key(), readVerifiedTag(dimensions, uuid, entry.key()));
+            for (DiskScanner.EntryMeta entry : scan.entriesOf(uuid)) {
+                current.put(entry.key(), readVerifiedTag(scan.dims(), uuid, entry.key()));
                 keys.add(entry.key());
             }
             currentEntries.put(uuid, current);
         }
 
         Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> currentPointers =
-                DiskScanner.locatePointersStrict(dimensions, keys, warnings);
+                DiskScanner.locatePointersStrict(scan.dims(), keys, warnings);
         if (!warnings.isEmpty()) {
             throw new IOException("删除前指针校验失败: " + String.join("; ", warnings));
         }
@@ -975,16 +969,14 @@ public final class OpsService {
 
     private DiskVerification scanRemainingEntries(Map<UUID, DeleteStatus> statuses, List<String> warnings)
             throws Exception {
-        DiskScanner.invalidateCache();
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        ScanSession scan = ScanSession.fresh(this.server, warnings);
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         Map<UUID, Integer> entries = new HashMap<>();
         for (DeleteStatus status : statuses.values()) {
             keys.addAll(status.entryKeys);
-            entries.put(status.uuid, meta.getOrDefault(status.uuid, List.of()).size());
+            entries.put(status.uuid, scan.entriesOf(status.uuid).size());
         }
-        return new DiskVerification(entries, DiskScanner.countPointersStrict(dimensions, keys, warnings));
+        return new DiskVerification(entries, DiskScanner.countPointersStrict(scan.dims(), keys, warnings));
     }
 
     /** 删除后验收用:loaded/holding/paused/forced */
@@ -1015,13 +1007,11 @@ public final class OpsService {
 
     private DeleteComponent prepareExactDeleteComponent(Set<UUID> targets, List<String> warnings)
             throws Exception {
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
-        if (flushUnsavedTargets(new ArrayList<>(targets), meta)) {
-            dimensions = DiskScanner.sublevelDirsStrict(this.server);
-            meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        ScanSession scan = ScanSession.strict(this.server, warnings);
+        if (flushUnsavedTargets(new ArrayList<>(targets), scan.meta())) {
+            scan = ScanSession.strict(this.server, warnings);
         }
-        Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(dimensions, meta, targets, warnings);
+        Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(scan, targets, warnings);
         DeleteComponent component = new DeleteComponent();
         for (UUID target : targets) {
             List<DeleteCopy> copies = prepared.getOrDefault(target, List.of());
@@ -1035,12 +1025,10 @@ public final class OpsService {
     }
 
     private void requireTargetsAbsent(Set<UUID> targets, List<String> warnings) throws Exception {
-        DiskScanner.invalidateCache();
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        ScanSession scan = ScanSession.fresh(this.server, warnings);
         JsonObject runtime = readRuntimeStates(targets);
         for (UUID uuid : targets) {
-            if (!meta.getOrDefault(uuid, List.of()).isEmpty()) {
+            if (!scan.entriesOf(uuid).isEmpty()) {
                 throw new IllegalStateException("回滚前仍有磁盘条目: " + uuid);
             }
             JsonObject state = runtime.getAsJsonObject(uuid.toString());
@@ -1223,10 +1211,9 @@ public final class OpsService {
         Set<UUID> targets = new LinkedHashSet<>();
         for (RecycleStore.RestoreBody body : group.bodies()) targets.add(body.uuid());
         if (replaceExisting) purgeRestoreTargets(targets, warnings);
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        ScanSession scan = ScanSession.strict(this.server, warnings);
         Map<UUID, Integer> existingEntries = new HashMap<>();
-        for (UUID uuid : targets) existingEntries.put(uuid, meta.getOrDefault(uuid, List.of()).size());
+        for (UUID uuid : targets) existingEntries.put(uuid, scan.entriesOf(uuid).size());
         if (!replaceExisting) requireRestoreTargetsFree(targets, existingEntries);
         onMainUntilComplete(() -> {
             clearOperationalStateOnMain(targets);
@@ -1234,7 +1221,7 @@ public final class OpsService {
         });
         // 同一趟扫描顺路建 plot 槽位占用表:删除释放的槽位会被 sable 按首位适配复用给新体,
         // 而恢复用的 allocateSubLevel 只查加载态 —— 不拦下来就会造出"同槽双体"(加载互斥)
-        Map<DiskScanner.PlotKey, Set<UUID>> plotOwners = DiskScanner.plotOwners(meta);
+        Map<DiskScanner.PlotKey, Set<UUID>> plotOwners = DiskScanner.plotOwners(scan.meta());
         List<ServerSubLevel> created = new ArrayList<>();
         Set<ServerLevel> touched = new LinkedHashSet<>();
         try {
@@ -1347,18 +1334,16 @@ public final class OpsService {
             targets.add(body.uuid());
             expected.put(body.uuid(), body);
         }
-        DiskScanner.invalidateCache();
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
+        ScanSession scan = ScanSession.fresh(this.server, warnings);
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         for (UUID uuid : targets) {
-            for (DiskScanner.EntryMeta copy : meta.getOrDefault(uuid, List.of())) keys.add(copy.key());
+            for (DiskScanner.EntryMeta copy : scan.entriesOf(uuid)) keys.add(copy.key());
         }
         Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
-                DiskScanner.locatePointersStrict(dimensions, keys, warnings);
+                DiskScanner.locatePointersStrict(scan.dims(), keys, warnings);
         JsonObject runtime = readRuntimeStates(targets);
         for (UUID uuid : targets) {
-            List<DiskScanner.EntryMeta> copies = meta.getOrDefault(uuid, List.of());
+            List<DiskScanner.EntryMeta> copies = scan.entriesOf(uuid);
             if (copies.isEmpty()) throw new IllegalStateException("恢复后磁盘条目缺失: " + uuid);
             if (copies.size() != 1) throw new IllegalStateException("恢复后存在 " + copies.size() + " 个磁盘条目: " + uuid);
             RecycleStore.RestoreBody body = expected.get(uuid);
@@ -1573,11 +1558,10 @@ public final class OpsService {
     }
 
     private CopyVersionScanner.Scan inspectVersionState(UUID uuid, List<String> warnings) throws Exception {
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> metadata = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
-        Set<UUID> members = CopyVersionScanner.members(metadata, uuid);
+        ScanSession scan = ScanSession.strict(this.server, warnings);
+        Set<UUID> members = CopyVersionScanner.members(scan.meta(), uuid);
         JsonObject runtime = readOperationalMetadata(members);
-        return CopyVersionScanner.scan(dimensions, metadata, uuid, activeEntries(runtime, members), warnings);
+        return CopyVersionScanner.scan(scan.dims(), scan.meta(), uuid, activeEntries(runtime, members), warnings);
     }
 
     private static CopyVersionScanner.Version requireVersion(CopyVersionScanner.Scan scan, String versionId,
@@ -1671,14 +1655,11 @@ public final class OpsService {
     }
 
     private PreparedCopyResolution prepareCopyResolution(UUID uuid, List<String> warnings) throws Exception {
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> metadata =
-                DiskScanner.scanEntryMetaStrict(dimensions, warnings);
-        Set<UUID> members = CopyVersionScanner.members(metadata, uuid);
+        ScanSession scan = ScanSession.strict(this.server, warnings);
+        Set<UUID> members = CopyVersionScanner.members(scan.meta(), uuid);
         flushLoadedTargets(members);
-        dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        metadata = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
-        members = CopyVersionScanner.members(metadata, uuid);
+        scan = ScanSession.strict(this.server, warnings);
+        members = CopyVersionScanner.members(scan.meta(), uuid);
         DeleteComponent component = prepareExactDeleteComponent(members, warnings);
         if (!component.targets.equals(members)) {
             throw new IllegalStateException("副本依赖组缺少可读取的磁盘条目，未执行副本处理");
@@ -1701,8 +1682,8 @@ public final class OpsService {
                         copy.pointers()));
             }
         }
-        CopyVersionScanner.Scan scan = CopyVersionScanner.assemble(uuid, members, copies, active);
-        return new PreparedCopyResolution(component, scan, states);
+        CopyVersionScanner.Scan versions = CopyVersionScanner.assemble(uuid, members, copies, active);
+        return new PreparedCopyResolution(component, versions, states);
     }
 
     public synchronized JsonObject resolveCopyVersion(UUID uuid, String versionId) throws Exception {
@@ -1997,14 +1978,13 @@ public final class OpsService {
     }
 
     private CopyInspection inspectCopyState(UUID uuid, List<String> warnings) throws Exception {
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
-        Map<UUID, List<DiskScanner.EntryMeta>> meta = DiskScanner.scanEntryMetaStrict(dimensions, warnings);
-        List<DiskScanner.EntryMeta> entries = meta.getOrDefault(uuid, List.of());
+        ScanSession scan = ScanSession.strict(this.server, warnings);
+        List<DiskScanner.EntryMeta> entries = scan.entriesOf(uuid);
         if (entries.isEmpty()) throw new IllegalStateException("找不到该体的磁盘条目");
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         for (DiskScanner.EntryMeta entry : entries) keys.add(entry.key());
         Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
-                DiskScanner.locatePointersStrict(dimensions, keys, warnings);
+                DiskScanner.locatePointersStrict(scan.dims(), keys, warnings);
         JsonObject activeState = onMain(() -> {
             JsonObject out = new JsonObject();
             String id = activePointerEntryId(uuid);
@@ -2015,7 +1995,7 @@ public final class OpsService {
 
         List<CopyCandidate> copies = new ArrayList<>();
         for (DiskScanner.EntryMeta entry : entries) {
-            CompoundTag tag = readVerified(dimensions, uuid, entry.key());
+            CompoundTag tag = readVerified(scan.dims(), uuid, entry.key());
             if (tag == null) throw new IOException("副本槽位已经变化: " + entry.key().id());
             copies.add(new CopyCandidate(entry.key(), tag,
                     DiskScanner.countBlocks(tag.getCompound("plot"), null),
@@ -2024,7 +2004,7 @@ public final class OpsService {
         copies.sort(canonicalOrder(CopyCandidate::key, CopyCandidate::pointers, active));
         CopyCandidate keep = copies.get(0);
         boolean identical = copies.stream().allMatch(copy -> copy.tag().equals(keep.tag()));
-        return new CopyInspection(dimensions, List.copyOf(copies), keep, identical);
+        return new CopyInspection(scan.dims(), List.copyOf(copies), keep, identical);
     }
 
     private JsonObject copiesJson(CopyInspection inspection) {
