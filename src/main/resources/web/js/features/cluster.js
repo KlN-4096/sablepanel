@@ -42,15 +42,15 @@ async function switchServer(id){
   RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
   EXPAND_STATE.clear(); tpFilledFor = null; loadFav();
   PLAYERS = []; playersFetchedAt = 0; PAUSED = new Set(); FORCED = new Set();
-  // 日志页立刻进空态,不能留着上一个服的记录等 loadAll 回来
-  if (VIEW === 'jobs') renderJobs();
   document.getElementById('dbody').innerHTML =
     `<div id="detailEmpty"><span class="big">⬢</span><span>${t('pickBody')}</span></div>`;
   document.getElementById('ops').style.display = 'none';
   clearRecycleDetail();
-  // 顶栏和总览横幅立刻切过去 —— 数据还在路上时也别显示旧服务器名
+  // 顶栏立刻切过去 —— 数据还在路上时也别显示旧服务器名
   renderServerPicker(self ? self.id : id);
-  renderDashServer();
+  // 状态清空之后必须立刻整页重画。只画横幅的话,总览的图表、"最吃性能"、日志页
+  // 都还挂着上一个服的 HTML,一直挂到 loadAll 回来 —— 点一下就是拿旧服的 uuid 查新服
+  renderAll();
   await loadAll(true);
   CONSISTENCY=null; scheduleStartupConsistency();
   // A→B 快速连切时,A 那次的慢请求回来后界面已经是 B 了,再弹"已切换到 A"就是骗人。

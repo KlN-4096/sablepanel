@@ -361,6 +361,7 @@ function updateSelUI(){
 }
 function focusBody(uuid){
   setView('bodies', {tab:'all', reset:true});
+  if (!DATA) return;   // 入口来自可能过期的 DOM(总览"最吃性能"),切服后 DATA 是空的
   const found = DATA.groups.find(g => g.bodies.some(b => b.uuid === uuid));
   if (!found) return;
   select(found.bodies.find(b=>b.uuid===uuid), found);

@@ -288,6 +288,39 @@ test('UI-03 切服后旧服的 recycle/jobs 慢响应都不落地', async () => 
   assert.equal(evalIn(sandbox, 'CURSRV'), '');
 });
 
+test('UI-03 切服后总览不得留着上一个服的图表和"最吃性能"', async () => {
+  // 从前 switchServer 清完 DATA/STATS 只画横幅,总览的 physLegend / dashTopCost / toolCard
+  // 都还是 A 的 HTML —— 在"最吃性能"里点一下 A 的体,focusBody 撞上 DATA===null 抛异常
+  const slowB = deferred();
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.includes('server=B')) return slowB.promise;
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    if (url.startsWith('/api/stats')) {
+      return jsonResponse({ t: [], phys: { 'minecraft:overworld': [] }, phys_1m: {}, loaded: {},
+        body_cost_total: 1.5, top_cost: [{ uuid: 'OLD_SERVER_BODY', name: 'A 的巨型体', cost: 9 }] });
+    }
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ self: 'A', servers: [{ id: 'A', self: true }, { id: 'B' }], running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; VIEW = 'dash'; SERVERS = [{id:'A',self:true},{id:'B'}]");
+  await evalIn(sandbox, 'loadBodies')();
+  await evalIn(sandbox, 'loadStats')();
+  assert.match(evalIn(sandbox, "document.getElementById('dashTopCost').innerHTML"), /OLD_SERVER_BODY/);
+
+  const switching = evalIn(sandbox, 'switchServer')('B');   // B 的 bodies 还没回来
+  await tick();
+  assert.doesNotMatch(evalIn(sandbox, "document.getElementById('dashTopCost').innerHTML"), /OLD_SERVER_BODY/,
+    '切服后"最吃性能"必须立刻清空,不能等 loadAll 回来');
+  assert.equal(evalIn(sandbox, "document.getElementById('physLegend').innerHTML"), '',
+    '图例同理');
+  // 就算 DOM 上还残留旧条目,点它也不能把页面搞崩
+  evalIn(sandbox, "DATA = null");
+  evalIn(sandbox, 'focusBody')('OLD_SERVER_BODY');
+  slowB.resolve(bodiesResponse());
+  await switching;
+});
+
 test('UI-03 切服清空作业 watch、忙碌定时器和日志页', async () => {
   const { sandbox, state } = setup();
   state.fetch = async (url) => {

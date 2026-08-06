@@ -72,13 +72,15 @@ function renderDash(){
   if (stale) document.getElementById('dashSrv').innerHTML +=
     `<div class="srvHint" style="color:var(--bad)">${t('staleData')}${esc(stale)}</div>`;
   // 首屏就失败:从前直接 return,总览是一片空白,用户只看到一闪而过的 toast
+  renderDashClean();   // RECYCLE 驱动
+  renderDashTools();   // 静态,但每次都要写
+  renderDashStats();   // STATS 驱动
   if (!DATA) {
     document.getElementById('dashTop').innerHTML = BODIES_ERROR
       ? `<div class="card"><h4>${t('dashBodies')}</h4>
            <div class="sub" style="color:var(--bad)">⚠ ${t('loadFail')}${esc(BODIES_ERROR)}</div></div>`
       : `<div class="card"><div class="sub">${t('loading')}</div></div>`;
     document.getElementById('dashMid').innerHTML = '';
-    renderDashClean();
     return;
   }
   const s = summarize();
@@ -115,7 +117,8 @@ function renderDash(){
         <div class="k"><i class="dot" style="background:var(--warn)"></i>${t('dashHolding')}</div><div class="v">${s.state.holding}</div>
       </div></div>`;
 
-  renderDashClean();
+}
+function renderDashTools(){
   document.getElementById('toolCard').innerHTML = `
     <h4>${t('tools')}</h4>
     <div style="display:flex;gap:9px;flex-wrap:wrap">
@@ -127,15 +130,19 @@ function renderDash(){
     </div>
     <div class="hint">${t('scanInfo')}</div>
     <div class="hint">${t('tokenHint')}</div>`;
-
-  drawPhysChart(document.getElementById('physChart'), true);
+}
+/* 物理图表这三块归 STATS 管,不归 DATA。从前写在 renderDash 的有数据分支里,
+   切服后 DATA 和 STATS 都清了,它们却还留着上一个服的 HTML —— 在"最吃性能"里
+   点一下旧服的体,focusBody 就撞上 DATA===null */
+function renderDashStats(){
+  drawPhysChart(document.getElementById('physChart'), true);   // STATS 为空时它自己 clearRect
   const dims = STATS ? Object.keys(STATS.phys||{}) : [];
   document.getElementById('physLegend').innerHTML = STATS
     ? dims.map((d,i)=>`<span><i style="background:${DIM_COLORS[i%DIM_COLORS.length]}"></i>${esc(d.replace('minecraft:',''))}
         <b>${(STATS.phys_1m?.[d]??0).toFixed(2)} ms</b></span>`).join('')
       + `<span><i style="background:${BODY_COLOR}"></i>${t('physBodies')} <b>${(STATS.body_cost_total??0).toFixed(2)} ms</b></span>`
     : '';
-  document.getElementById('dashTopCost').innerHTML = topCostTable(8);
+  document.getElementById('dashTopCost').innerHTML = topCostTable(8);   // STATS 为空时是"暂无数据"
 }
 function topCostTable(n){
   const tc = (STATS && STATS.top_cost) || [];
