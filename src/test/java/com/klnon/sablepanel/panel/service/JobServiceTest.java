@@ -60,14 +60,14 @@ class JobServiceTest {
             assertTrue(accepted.size() >= jobs.maxWorkers(), "被拒之前至少要装满 worker");
 
             // 过载不能留下脏记录:被拒的目标体既不在 busy 里,也不该在 active 列表里
-            JsonArray busy = jobs.busyView();
+            JsonArray busy = running(jobs);
             UUID missing = rejectedTarget;
             assertFalse(containsTarget(busy, missing), "被拒作业不得残留在 active/busy 中");
             assertEquals(accepted.size(), busy.size(), "active 条数应当等于成功入队的作业数");
 
             release.countDown();
             // 放开后队列腾空,同一个体可以重新提交(说明 busy 也回滚干净了)
-            assertTrue(waitUntil(() -> jobs.busyView().isEmpty(), 20_000), "作业应当全部结束");
+            assertTrue(waitUntil(() -> running(jobs).isEmpty(), 20_000), "作业应当全部结束");
             assertNotNull(jobs.submit("阻塞", List.of(missing), "", () -> new JsonObject()));
         } finally {
             release.countDown();
@@ -86,7 +86,7 @@ class JobServiceTest {
             // 不同的全局操作互不影响
             assertNotNull(jobs.submit("回收站恢复", List.of(), "", blockOn(release)));
             release.countDown();
-            assertTrue(waitUntil(() -> jobs.busyView().isEmpty(), 20_000));
+            assertTrue(waitUntil(() -> running(jobs).isEmpty(), 20_000));
             // 上一轮结束后同名全局操作可以再提交
             assertNotNull(jobs.submit("重扫磁盘", List.of(), "", () -> new JsonObject()));
         } finally {
@@ -238,6 +238,11 @@ class JobServiceTest {
     }
 
     // ---------- 工具 ----------
+
+    /** /api/jobs 里的活动作业清单;前端的忙碌徽章读的就是这一段 */
+    private static JsonArray running(JobService jobs) {
+        return jobs.view().getAsJsonArray("running");
+    }
 
     private static JsonObject okTotal(int ok, int total) {
         JsonObject result = new JsonObject();

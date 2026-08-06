@@ -637,9 +637,9 @@ public final class BodyIndex {
         out.add("block_palette", paletteArr);
         out.add("clone_sets", cloneSetArr);
         out.add("groups", groupArr);
-        // 上面每个发送点都记账了,但记账是靠人写对的。这道闸兜住"下一个还没被发现的口子":
-        // 它响就说明有字段没记进预算(要修的 bug),但页面还打得开,不至于整个列表发不出去
-        return ResponseGuard.enforce("/api/bodies", out, "groups", "clone_sets", "block_palette", "paused", "forced");
+        // 这里的字节预算是内容目标,只算这个方法自己产出的部分 —— 调用方还会往上追加
+        // busy/reach。真正不可绕过的上限在 PanelResponse.capped(),按最终序列化字节判
+        return out;
     }
 
     public void setConfig(PanelConfig config) {

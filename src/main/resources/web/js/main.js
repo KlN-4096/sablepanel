@@ -68,7 +68,7 @@ setInterval(() => {
   if (!authenticated || document.hidden) return;
   refreshTimer--;
   document.getElementById('countdown').textContent = refreshTimer > 0 ? refreshTimer + 's' : '';
-  if (refreshTimer <= 0) { refreshTimer = 60; loadBodies(); }
+  if (refreshTimer <= 0) { refreshTimer = 60; loadBodies(); pollJobs(); }
 }, 1000);
 // 后台关闭事件流；切回前台先补真值，再重连并接收后续变化。
 document.addEventListener('visibilitychange', () => {
@@ -76,4 +76,5 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) { stopEventStream(); return; }
   if (CHART.live) loadStats();
   loadBodies().finally(startEventStream);
+  pollJobs();   // 后台期间别的客户端可能起了作业,回前台要立刻看到
 });

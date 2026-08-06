@@ -330,6 +330,55 @@ class RecycleStorePagingTest {
         }
     }
 
+    /**
+     * 声明的单页预算是 2 MiB,但从前只累计候选组和新增调色板 —— 外层统计字段、两个数组的
+     * 括号键名、组之间的逗号都没记账,所以真实上限是"2 MiB 加一份没人算过的外壳"。
+     * 走正常准入路径(每组自己都装得下)时,整页必须落在声明的边界内。
+     * <p>
+     * 唯一的例外是"单组自己就超预算":那一条无条件发出,否则它永远翻不过去。
+     * 那条路径由 {@code oversizedSingleGroupStillMakesProgress} 覆盖,断言的是另一个界。
+     */
+    @Test
+    void everyOrdinaryPageStaysInsideTheDeclaredTwoMiBBudget() throws Exception {
+        for (int i = 1; i <= 6; i++) writeGroup("2026010" + i + "-000000-000", 60, 1500, 200);
+        RecycleStore store = store();
+        String cursor = "";
+        int pages = 0;
+        do {
+            JsonObject page = store.view(cursor, 200);
+            // 退让标记就是例外路径的指纹;本用例的每组自己都装得下,一个都不该出现
+            for (var element : page.getAsJsonArray("groups")) {
+                JsonObject group = element.getAsJsonObject();
+                assertFalse(group.has("blocks_omitted") || group.has("bodies_omitted"),
+                        "不该走单组强行发出那条例外路径: " + group.get("id").getAsString());
+            }
+            assertTrue(pageBytes(page) < 2 * 1024 * 1024,
+                    "第 " + pages + " 页越过声明的 2 MiB 预算,实际 " + pageBytes(page));
+            cursor = page.get("next_cursor").getAsString();
+        } while (!cursor.isEmpty() && ++pages < 12);
+        assertTrue(pages > 0, "用例必须真的翻了页,否则上面的断言是空的");
+    }
+
+    /**
+     * 目录清单只按写入失效,不带 TTL。
+     * <p>
+     * 这里钉的是取消 TTL 之后唯一会坏的东西:失效点是否完整。回收目录由本模块独占,
+     * 背着 store 直接铺到磁盘的目录本来就不该被看见 —— 从前靠 30 秒 TTL "碰巧"能看见,
+     * 代价是一个没有任何写入的回收站每 30 秒重扫一次全盘。
+     */
+    @Test
+    void theDirectoryIndexIsCachedUntilAWriteNotUntilATimerExpires() throws Exception {
+        String first = writeGroup("20260101-000000-000", 1, 2);
+        RecycleStore store = store();
+        assertEquals(List.of(first), ids(store.view("", 100)));
+
+        writeGroup("20260102-000000-000", 1, 2);
+        assertEquals(List.of(first), ids(store.view("", 100)), "没有经过本模块的写入就不该重扫全盘");
+
+        store.markRestored(first);   // 一次真正的写入
+        assertEquals(2, ids(store.view("", 100)).size(), "写入之后必须立刻反映,不能等 TTL");
+    }
+
     private static void deleteTree(Path directory) throws Exception {
         try (var stream = Files.walk(directory)) {
             for (Path path : stream.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);

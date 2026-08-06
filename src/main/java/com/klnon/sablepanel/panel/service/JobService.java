@@ -61,6 +61,10 @@ public final class JobService implements AutoCloseable {
     private static final int LOG_KEEP_FILES = 20;
     /** 历史日志只从文件尾部读这么多字节,堆峰值与文件大小无关 */
     private static final long TAIL_BYTES = 4L << 20;
+    /** 出口文本上限,见 {@link #clip} */
+    private static final int MAX_TEXT_CHARS = 200;
+    /** 单个作业最多回报这么多条警告,其余折成一句"另有 N 条" */
+    private static final int MAX_WARNINGS = 50;
 
     /** 翻存档全局串行。磁盘竞争是 JVM 级的,每个服务端一个面板,静态即可 */
     private static final Semaphore LOCATE = new Semaphore(1);
@@ -201,7 +205,7 @@ public final class JobService implements AutoCloseable {
         job.startedAt = System.currentTimeMillis();
         try {
             JsonObject result = work.call();
-            // state 是别的线程(busyView / /api/jobs 轮询)用来判"结束了没"的那个标志,
+            // state 是别的线程(/api/jobs 轮询)用来判"结束了没"的那个标志,
             // 所以派生字段必须先写完再翻 state,否则会被看到"已完成但没有终态"
             job.outcome = outcomeOf(result);
             job.message = summarize(result);
@@ -273,33 +277,6 @@ public final class JobService implements AutoCloseable {
 
     // ---------- 读取 ----------
 
-    /**
-     * 给 /api/bodies 用:正在排队/执行的作业,<b>每个作业一条</b>,受影响的体放在 targets 里。
-     * <p>
-     * 早先是按体展开的,于是"回收站恢复""重扫磁盘"这类没有目标体的作业一条都不输出 ——
-     * 界面上既看不到进度、也判不出它结束了(前端靠"从 busy 消失"认完成,它压根没进去过)。
-     * 体已经被删掉时本来就没有行可以挂徽章,指示器不能依赖体行存在。
-     */
-    public JsonArray busyView() {
-        JsonArray arr = new JsonArray();
-        synchronized (this.lock) {
-            for (Job job : this.active.values()) {
-                JsonObject o = new JsonObject();
-                o.addProperty("seq", job.seq);
-                o.addProperty("op", job.op);
-                o.addProperty("state", job.state.name().toLowerCase());
-                o.addProperty("phase", job.display());
-                o.addProperty("since", job.startedAt > 0 ? job.startedAt : job.queuedAt);
-                if (!job.targetName.isEmpty()) o.addProperty("name", job.targetName);
-                JsonArray targets = new JsonArray();
-                for (UUID target : job.targets) targets.add(target.toString());
-                o.add("targets", targets);
-                arr.add(o);
-            }
-        }
-        return arr;
-    }
-
     /** 日志页:内存里的当前一轮(正在跑的 + 最近完成的) */
     public JsonObject view() {
         JsonObject out = new JsonObject();
@@ -330,20 +307,48 @@ public final class JobService implements AutoCloseable {
             o.addProperty("ended_at", job.endedAt);
             o.addProperty("ms", job.endedAt - job.startedAt);
         }
-        if (!job.targetName.isEmpty()) o.addProperty("name", job.targetName);
-        if (!job.message.isEmpty()) o.addProperty("message", job.message);
+        if (!job.targetName.isEmpty()) o.addProperty("name", clip(job.targetName));
+        if (!job.message.isEmpty()) o.addProperty("message", clip(job.message));
         if (!job.outcome.isEmpty()) o.addProperty("outcome", job.outcome);
-        o.addProperty("phase", job.display());
+        o.addProperty("phase", clip(job.display()));
         JsonArray targets = new JsonArray();
         for (UUID target : job.targets) targets.add(target.toString());
         o.add("targets", targets);
         JsonArray trail = new JsonArray();
         synchronized (job.trail) {
-            for (String step : job.trail) trail.add(step);
+            for (String step : job.trail) trail.add(clip(step));
         }
         o.add("trail", trail);
-        if (job.warnings != null && !job.warnings.isEmpty()) o.add("warnings", job.warnings);
+        if (job.warnings != null && !job.warnings.isEmpty()) o.add("warnings", clipAll(job.warnings));
         return o;
+    }
+
+    /**
+     * 面板要显示的文本一律在出口截断。
+     * <p>
+     * {@code op} 和 {@code phase} 眼下都是内部常量,但 {@code targetName} 直接来自 NBT 的显示名、
+     * {@code message} 和 {@code warnings} 会带上体名和异常文本,都没有长度上限。资源约束放在资源
+     * 所有者这里,而不是指望每个读取方各自记账 —— 从前 busy 是在 {@code /api/bodies} 的字节预算
+     * 跑完之后才追加的,预算里根本看不到它:满队列配 65,000 字符的名称,单是 busy 就有 28.9 MiB
+     * (Gson 默认把 {@code <} 转义成 6 字节的 {@code <})。
+     */
+    private static String clip(String text) {
+        return text.length() <= MAX_TEXT_CHARS ? text : text.substring(0, MAX_TEXT_CHARS) + "…";
+    }
+
+    /** warnings 是每个问题一条,组数多时条数本身也是无界的 */
+    private static JsonArray clipAll(JsonArray values) {
+        if (values.size() <= MAX_WARNINGS && values.asList().stream()
+                .allMatch(v -> !v.isJsonPrimitive() || v.getAsString().length() <= MAX_TEXT_CHARS)) {
+            return values;
+        }
+        JsonArray out = new JsonArray();
+        for (int i = 0; i < Math.min(values.size(), MAX_WARNINGS); i++) {
+            var value = values.get(i);
+            out.add(value.isJsonPrimitive() ? new com.google.gson.JsonPrimitive(clip(value.getAsString())) : value);
+        }
+        if (values.size() > MAX_WARNINGS) out.add("……另有 " + (values.size() - MAX_WARNINGS) + " 条");
+        return out;
     }
 
     // ---------- 持久化(每次重启一个新文件,便于事后查证) ----------
@@ -375,14 +380,14 @@ public final class JobService implements AutoCloseable {
         }
     }
 
-    /** 历史日志文件名,新的在前 */
+    /** 历史日志文件名,新的在前。日志目录是可选的:它出问题不该让整个作业页打不开 */
     public static List<String> logFiles() {
         List<String> names = new ArrayList<>();
         try (var stream = Files.list(EventLog.logDir())) {
             stream.map(path -> path.getFileName().toString())
                     .filter(name -> LOG_FILE.matcher(name).matches())
                     .forEach(names::add);
-        } catch (IOException ignored) {
+        } catch (Exception ignored) {
             return List.of();
         }
         names.sort(Collections.reverseOrder());

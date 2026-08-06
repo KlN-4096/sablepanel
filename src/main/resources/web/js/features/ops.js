@@ -10,7 +10,7 @@ async function submitJob(path, opts, label){
   try {
     const r = await api(path, opts);
     if (r && r.job) JOB_WATCH.set(r.job, r.op || label || '');
-    await loadBodies();   // 立刻把"处理中"画出来,不再靠写死的 setTimeout 等
+    await pollJobs();   // 立刻把"处理中"画出来,不再靠写死的 setTimeout 等
     return r;
   } catch(e){
     toast((label ? label + ' · ' : '') + e.message, 'bad');

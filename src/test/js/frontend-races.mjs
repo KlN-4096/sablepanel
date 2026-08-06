@@ -5,7 +5,7 @@
  *   node src/test/js/frontend-races.mjs
  *
  * 覆盖:UI-01 终态契约、UI-02 并发登录、UI-03 切服隔离、UI-04 预览旧失败、
- *      PERF-03 忙碌轮询与注销、PERF-05 批量收养只发一次请求刷一次、回收站版本/清除交互。
+ *      LOAD-01 加载失败不伪装成空、PERF-03 忙碌轮询与注销、PERF-04 作业轮询与 bodies 解耦、PERF-05 批量收养只发一次请求刷一次、回收站版本/清除交互。
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -126,7 +126,7 @@ const tick = () => new Promise(res => setImmediate(res));
 /** /api/bodies 的真实响应形状。缺字段会让渲染在 loadBodies 的 catch 里静悄悄变成"加载失败" */
 const bodiesResponse = (extra = {}) => jsonResponse({
   scan_time: 0, total_bodies: 0, total_entries: 0, total_groups: 0, shown_groups: 0,
-  groups: [], block_palette: [], clone_sets: [], paused: [], forced: [], busy: [],
+  groups: [], block_palette: [], clone_sets: [], paused: [], forced: [],
   rec_policy: { blocks: 20, types: 4, be: 3 }, reach: { void_below: -64, sky_above: 1000 },
   ...extra,
 });
@@ -287,6 +287,63 @@ test('PERF-03 注销后忙碌轮询必须停止', () => {
   assert.equal(evalIn(sandbox, 'ACTIVE_JOBS').length, 0);
 });
 
+test('PERF-04 作业期间的轮询只打 /api/jobs,不重建 bodies 快照', async () => {
+  // 从前忙碌轮询打的是 /api/bodies:作业跑十分钟就是 300 次全量重建 + 序列化 + 下发,
+  // 而变的只有 busy 那一小段。bodies 快照上限 12 MiB,这是纯烧 CPU 和带宽
+  const hits = [];
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    hits.push(url.split('?')[0]);
+    if (url.startsWith('/api/jobs')) {
+      return jsonResponse({ running: [{ seq: 1, op: '批量删除', state: 'running',
+        phase: '定位磁盘条目', started_at: 1, queued_at: 0, targets: ['u1'] }], log: [], files: [] });
+    }
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    return jsonResponse({});
+  };
+  evalIn(sandbox, 'authenticated = true');
+  await evalIn(sandbox, 'pollJobs')();
+  await tick();
+  assert.deepEqual(hits, ['/api/jobs'], '一轮轮询只该有一次 /api/jobs');
+  assert.equal(evalIn(sandbox, 'ACTIVE_JOBS').length, 1);
+  assert.equal(evalIn(sandbox, "BUSY.has('u1')"), true, 'targets 要展开成行徽章');
+  // /api/jobs 给的是 started_at/queued_at,顶栏指示器读的是 since —— 漏了归一化就是 "NaNs"
+  assert.equal(evalIn(sandbox, 'ACTIVE_JOBS[0].since'), 1, 'since 必须从 started_at 归一化过来');
+  assert.notEqual(evalIn(sandbox, 'busyTimer'), null, '有作业就要续上下一轮');
+
+  // 续期的那一轮也必须打 /api/jobs。只断言"定时器存在"是不够的:把回调改回
+  // loadBodies 照样有定时器,测试照样绿 —— 得把它真的执行一次
+  evalIn(sandbox, 'clearBusyTimer(); __fired = null; setTimeout = fn => { __fired = fn; return 7; }');
+  evalIn(sandbox, 'syncBusyPolling()');
+  hits.length = 0;
+  await evalIn(sandbox, '__fired')();
+  await tick();
+  assert.deepEqual(hits, ['/api/jobs'], '2 秒续期那一轮也不该重建 bodies 快照');
+});
+
+test('PERF-04 作业从有到无时才刷新一次 bodies', async () => {
+  let bodies = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/jobs')) return jsonResponse({ running: [], log: [], files: [] });
+    if (url.startsWith('/api/bodies')) { bodies++; return bodiesResponse(); }
+    return jsonResponse({});
+  };
+  evalIn(sandbox, 'authenticated = true');
+
+  // 本来就没有作业:不该白拉一次快照
+  await evalIn(sandbox, 'pollJobs')();
+  await tick();
+  assert.equal(bodies, 0, '没有作业结束就不该刷新列表');
+
+  // 有作业 → 这轮空了:乐观更新过的字段要用服务端真值纠正回来
+  evalIn(sandbox, "ACTIVE_JOBS = [{seq:1, op:'批量删除', targets:[], since:0, state:'running'}]");
+  await evalIn(sandbox, 'pollJobs')();
+  await tick();
+  assert.equal(bodies, 1, '作业跑完必须刷新一次,而且只刷一次');
+  assert.equal(evalIn(sandbox, 'busyTimer'), null, '没作业了要停掉轮询');
+});
+
 test('PERF-03 慢响应期间不重叠请求,期间的请求合并成完事后再跑一次', async () => {
   const slow = deferred();
   let calls = 0, live = 0, maxLive = 0;
@@ -358,10 +415,10 @@ test('PERF-03/UI-01 作业跑完时完成 toast 不会被轮询自己清掉', as
   evalIn(sandbox, 'toast = (msg, cls) => globalThis.__toasts.push([msg, cls])');
   evalIn(sandbox, '__toasts = []');
   evalIn(sandbox, "JOB_WATCH.set(9, '批量删除')");
-  await evalIn(sandbox, 'loadBodies')();
+  await evalIn(sandbox, 'pollJobs')();
   await tick();
   toasts.push(...evalIn(sandbox, '__toasts'));
-  assert.equal(bodiesCalls, 1);
+  assert.equal(bodiesCalls, 0, '作业已经跑完但本来就没在跑,不该白拉一次快照');
   assert.equal(toasts.length, 1, '作业结束必须弹一次终态 toast');
   assert.match(toasts[0][0], /批量删除/);
   assert.match(toasts[0][0], /失败/);
@@ -371,11 +428,12 @@ test('PERF-03/UI-01 作业跑完时完成 toast 不会被轮询自己清掉', as
 // PERF-05:批量收养
 test('PERF-05 批量收养只发一次请求、只刷一次列表', async () => {
   const posts = [];
-  let bodiesLoads = 0;
+  let jobPolls = 0;
   const { sandbox, state } = setup();
   state.fetch = async (url, opts) => {
     if (opts && opts.method === 'POST') { posts.push(url); return jsonResponse({ ok: true, accepted: true, job: 1, op: '批量收养' }); }
-    if (url.startsWith('/api/bodies')) { bodiesLoads++; return bodiesResponse(); }
+    if (url.startsWith('/api/jobs')) { jobPolls++; return jsonResponse({ running: [], log: [], files: [] }); }
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
     return jsonResponse({});
   };
   evalIn(sandbox, 'authenticated = true');
@@ -390,7 +448,7 @@ test('PERF-05 批量收养只发一次请求、只刷一次列表', async () => 
   await evalIn(sandbox, 'doAdoptSelected')();
   assert.equal(posts.length, 1, '3 个孤儿体从前会产生 3 次 POST');
   assert.equal(posts[0], '/api/ops/batch_adopt');
-  assert.equal(bodiesLoads, 1, '3 个孤儿体从前会产生 3 次全量刷新');
+  assert.equal(jobPolls, 1, '3 个孤儿体从前会产生 3 次全量刷新');
 });
 
 test('回收站切换版本页签会清选择但保留筛选条件', async () => {
@@ -467,7 +525,7 @@ test('回收站作业结束后自动刷新版本统计', async () => {
     __toasts = []; toast = (message, cls) => __toasts.push([message, cls]);
   `);
 
-  await evalIn(sandbox, 'loadBodies')();
+  await evalIn(sandbox, 'pollJobs')();
   await tick();
   await tick();
 
@@ -518,6 +576,58 @@ test('副本面板即使已知当前版本也必须由用户显式选择', async
 
   assert.equal(evalIn(sandbox, 'COPY_VERSION'), null);
   assert.equal(evalIn(sandbox, "document.getElementById('dedupeConfirm').disabled"), true);
+});
+
+// LOAD-01:加载失败不得伪装成"没有数据"
+test('LOAD-01 首次加载失败要显示加载失败,不是空列表也不是永远加载中', async () => {
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies')) return errorResponse(500);
+    if (url.startsWith('/api/recycle')) return errorResponse(500);
+    return jsonResponse({ running: [], log: [], files: [] });
+  };
+  evalIn(sandbox, "authenticated = true; VIEW = 'bodies'; toast = () => {}");
+  await evalIn(sandbox, 'loadBodies')();
+  const list = evalIn(sandbox, "document.getElementById('list').innerHTML");
+  assert.match(list, /加载失败/, '服务端已经明确报错,界面不能停在"加载中…"');
+  assert.equal(evalIn(sandbox, 'DATA'), null);
+
+  evalIn(sandbox, "VIEW = 'recycle'");
+  await evalIn(sandbox, 'loadRecycle')();
+  await tick();
+  const rList = evalIn(sandbox, "document.getElementById('rList').innerHTML");
+  assert.match(rList, /加载失败/, '从前失败会写一份空数据,显示成"回收站为空"');
+  assert.doesNotMatch(rList, /回收站为空/, '"加载失败"和"真的没有备份"必须区分得开');
+  assert.equal(evalIn(sandbox, 'RECYCLE'), null, '失败不得伪造出一份空快照');
+});
+
+test('LOAD-01 已有数据时刷新失败要保留旧数据并标明是上次的结果', async () => {
+  let ok = true;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies')) return ok ? bodiesResponse({ total_bodies: 7 }) : errorResponse(500);
+    if (url.startsWith('/api/recycle')) {
+      return ok ? jsonResponse({ groups: [], block_palette: [], next_cursor: 'c1', total_groups: 3 })
+                : errorResponse(500);
+    }
+    return jsonResponse({ running: [], log: [], files: [] });
+  };
+  evalIn(sandbox, "authenticated = true; VIEW = 'bodies'; toast = () => {}");
+  await evalIn(sandbox, 'loadBodies')();
+  await evalIn(sandbox, 'loadRecycle')();
+  await tick();
+  assert.equal(evalIn(sandbox, 'DATA.total_bodies'), 7);
+
+  ok = false;
+  await evalIn(sandbox, 'loadBodies')();
+  assert.equal(evalIn(sandbox, 'DATA.total_bodies'), 7, '刷新失败不能把已有数据抹掉');
+  assert.match(evalIn(sandbox, "document.getElementById('toolbar').innerHTML"), /上一次的结果/);
+
+  evalIn(sandbox, "VIEW = 'recycle'");
+  await evalIn(sandbox, 'loadRecycle')(true);   // 加载更多失败
+  await tick();
+  assert.equal(evalIn(sandbox, 'RECYCLE_CURSOR'), 'c1', '加载更多失败要保留游标,能原地再点一次');
+  assert.equal(evalIn(sandbox, 'RECYCLE_LOADING'), false, '按钮不能卡在禁用态');
 });
 
 // UI-04:预览旧失败

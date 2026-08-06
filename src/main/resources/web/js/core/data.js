@@ -12,6 +12,7 @@ async function loadServers(){
 /* ===================== 数据 ===================== */
 async function loadAll(manual){
   await loadBodies();
+  pollJobs();
   loadStats();
   if (manual) loadRecycle();
   if (manual && VIEW === 'jobs') loadJobs();   // 切服后日志页不能留着上一个服的记录等手动刷新
@@ -29,19 +30,12 @@ async function loadBodies() {
     const result = await api('/api/bodies');
     if (request !== bodiesRequest || gen !== srvGen()) return;
     DATA = result;
+    BODIES_ERROR = '';
     BODY_BY_UUID = new Map();
     CLONE_SETS = new Map((DATA.clone_sets || []).map(set=>[Number(set.id), set]));
     PAUSED = new Set(DATA.paused || []);
     FORCED = new Set(DATA.forced || []);
-    // 每个作业一条,按 targets 展开成"体 → 作业"给行徽章用;
-    // 没有目标体的作业(回收站恢复/重扫磁盘)只进 ACTIVE_JOBS,靠顶栏指示器显示
-    ACTIVE_JOBS = DATA.busy || [];
-    BUSY = new Map();
-    for (const job of ACTIVE_JOBS) for (const u of (job.targets || [])) BUSY.set(u, job);
     REACH = DATA.reach || REACH;
-    renderJobPill();
-    syncBusyPolling();
-    reapFinishedJobs();
     DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));
     SELECTED = new Set([...SELECTED].filter(u => BODY_BY_UUID.has(u)));
     const dims = new Set();
@@ -57,7 +51,12 @@ async function loadBodies() {
     refreshTimer = 60;
     if (keepUuid) reselect(keepUuid);
   } catch (e) {
-    if (request === bodiesRequest && gen === srvGen()) toast(t('loadFail') + e.message, 'bad');
+    if (request === bodiesRequest && gen === srvGen()) {
+      // 有旧数据就留着并标记"这是上次的结果";没有的话要明说加载失败,不能停在"加载中…"
+      BODIES_ERROR = e.message || String(e);
+      toast(t('loadFail') + e.message, 'bad');
+      render();   // 只有列表和工具条要改口径,DATA 没变,别的面板不用重画
+    }
   } finally {
     bodiesInFlight = false;
     // 补跑要看认证状态:请求重叠期间用户注销的话,这一跑会带着空 token 发出去,
@@ -65,7 +64,35 @@ async function loadBodies() {
     if (bodiesRerun) { bodiesRerun = false; if (authenticated) loadBodies(); }
   }
 }
-/* 有作业在跑时把列表刷新加速到 2 秒,跑完自动停。
+/* 作业状态。打 /api/jobs 而不是 /api/bodies —— running[] 里就有忙碌徽章需要的
+   seq/op/state/phase/name/targets,而 bodies 快照最大 12 MiB,作业期间每 2 秒
+   重建、序列化、下发一整份纯属白烧 CPU 和带宽。作业从有到无时才刷新一次列表。
+   失败什么都不改:轮询本来就会再来一轮,没必要为一次抖动清掉进度显示。 */
+async function pollJobs(){
+  const gen = srvGen();
+  let result;
+  try { result = await api('/api/jobs'); } catch(e){ return; }
+  if (gen !== srvGen() || !authenticated) return;
+  const had = ACTIVE_JOBS.length;
+  applyJobs(result.running || []);
+  reapFinishedJobs(result.log || []);
+  // 作业刚跑完:这时候的列表才是服务端真值(乐观更新过的字段要纠正回来)
+  if (had && !ACTIVE_JOBS.length) loadBodies();
+  syncBusyPolling();
+}
+/* 每个作业一条,按 targets 展开成"体 → 作业"给行徽章用;
+   没有目标体的作业(回收站恢复/重扫磁盘)只进 ACTIVE_JOBS,靠顶栏指示器显示 */
+function applyJobs(list){
+  // /api/jobs 给的是 started_at / queued_at 两个字段,顶栏指示器算已耗时用的是 since。
+  // 不归一化的话 Date.now() - undefined 就是 NaN,界面上显示 "NaNs"
+  ACTIVE_JOBS = list.map(job => job.since === undefined
+    ? {...job, since: job.started_at || job.queued_at || 0} : job);
+  BUSY = new Map();
+  for (const job of ACTIVE_JOBS) for (const u of (job.targets || [])) BUSY.set(u, job);
+  renderJobPill();
+  renderAll();
+}
+/* 有作业在跑时把作业状态轮询加速到 2 秒,跑完自动停。
    取代从前散落在各操作里的 setTimeout(loadBodies, 1200/1500/4000) —— 那些是对
    "多久能好"的猜测,猜短了看不到结果,猜长了白等,巨型体两头都不对。
    用 setTimeout 自续期而不是 setInterval:上一轮真的回来了才排下一轮,请求不会重叠。 */
@@ -77,7 +104,7 @@ function syncBusyPolling(){
   const gen = srvGen();
   busyTimer = setTimeout(() => {
     busyTimer = null;
-    if (authenticated && gen === srvGen()) loadBodies();
+    if (authenticated && gen === srvGen()) pollJobs();
   }, 2000);
 }
 function clearBusyTimer(){
@@ -103,16 +130,14 @@ function renderJobPill(){
     + `<span class="muted">${esc(label)} ${secs}s</span>`
     + (ACTIVE_JOBS.length > 1 ? `<span class="tag">+${ACTIVE_JOBS.length - 1}</span>` : '');
 }
-/* 作业结束回报:本页提交过的作业一旦从活动列表消失,去日志取终态弹一次 toast */
-async function reapFinishedJobs(){
+/* 作业结束回报:本页提交过的作业一旦从活动列表消失,从同一次 /api/jobs 的日志里取终态弹一次
+   toast。日志由调用方传进来 —— 它和 running[] 本来就是同一个响应,再单独请求一次是白跑一趟,
+   还多一个"切服后旧服结果弹在新服界面上"的时间窗 */
+function reapFinishedJobs(log){
   if (!JOB_WATCH.size) return;
   const running = new Set(ACTIVE_JOBS.map(job => job.seq));
   const finished = [...JOB_WATCH.keys()].filter(seq => !running.has(seq));
   if (!finished.length) return;
-  const gen = srvGen();
-  let log;
-  try { log = (await api('/api/jobs')).log || []; } catch(e){ return; }
-  if (gen !== srvGen()) return;   // 切服后旧服的作业结果不该弹在新服的界面上
   let refreshRecycle = false;
   for (const seq of finished) {
     JOB_WATCH.delete(seq);
@@ -186,6 +211,7 @@ async function loadRecycle(append){
     // 必须在渲染之前清:下面的 renderRecycle 会照着 RECYCLE_LOADING 画按钮,
     // 留到 finally 里清就只改变量不重绘,"加载更多"会永久停在 disabled 的"加载中…"
     RECYCLE_LOADING = false;
+    RECYCLE_ERROR = '';
     const groups = page.groups || [];
     if (append && RECYCLE) {
       RECYCLE.groups = RECYCLE.groups.concat(groups);
@@ -215,11 +241,10 @@ async function loadRecycle(append){
   } catch(e){
     if (gen !== srvGen() || req !== RECYCLE_REQ) return;
     RECYCLE_LOADING = false;   // 同上:失败时也要在重绘之前清,否则按钮卡在禁用态
-    if (!append) {
-      RECYCLE = {groups:[],block_palette:[],file_count:0,disk_bytes:0,limit:500,latest_groups:0,old_groups:0};
-      RECYCLE_CURSOR=''; RECYCLE_TOTAL=0;
-    }
-    else toast(t('loadFail') + e.message, 'bad');
+    // 失败就是失败:既不写一份空数据(那会显示成"回收站为空"),也不动游标 ——
+    // "加载更多"要能原地再点一次
+    RECYCLE_ERROR = e.message || String(e);
+    if (append) toast(t('loadFail') + e.message, 'bad');
     if (VIEW==='recycle') renderRecycle();
   } finally {
     if (req === RECYCLE_REQ) RECYCLE_LOADING = false;
