@@ -108,6 +108,9 @@ final class UpstreamConnection implements AutoCloseable {
     /**
      * 客户端模式:按页面请求连接集群。返回 null 表示成功;否则为应回给页面的失败响应
      * (409 冲突 / 指纹确认要求,HTTP 形状由网关原样转发)。
+     * <p>
+     * 网关关停瞬间在飞的连接请求可能先成功回 200、随即被 {@link #close} 拆掉(网关锁与
+     * 连接锁之间的窗口):无泄漏,upstream 总会被关,接受现状,不为此加跨对象锁。
      */
     synchronized PanelResponse connectRequested(String address, String accepted) throws Exception {
         PanelEndpoint requested = PanelEndpoint.parse(address, 25581);
