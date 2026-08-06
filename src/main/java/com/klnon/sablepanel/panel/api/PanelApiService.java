@@ -320,10 +320,12 @@ public final class PanelApiService {
         }
     }
 
+    /**
+     * volatile 快照读,不排 {@link #setToken} 的队:事件路径在 Netty 事件循环上取 token,
+     * 换 token 事务(写盘+失败回滚)期间读到瞬时旧值无害——changeToken 随后总会吊销全部订阅。
+     */
     public String token() {
-        synchronized (this.tokenLock) {
-            return this.config.token;
-        }
+        return this.config.token;
     }
 
     public String selfId() {

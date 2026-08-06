@@ -85,6 +85,8 @@ public final class PanelWebGateway implements AutoCloseable {
             if (!this.closed || this.http != null) throw new IllegalStateException("网页网关已启动");
             this.closed = false;
             this.reconnectPending.set(false);
+            // 满了拒绝而不是 CallerRuns:后者把 HttpServer 的 dispatcher 线程拖进业务,
+            // 公网上 68 个慢请求就能让整个端口停止接客
             this.httpPool = new ThreadPoolExecutor(
                     HTTP_THREADS, HTTP_THREADS, 0L, TimeUnit.MILLISECONDS,
                     new ArrayBlockingQueue<>(HTTP_QUEUE_CAPACITY), runnable -> {
@@ -92,7 +94,7 @@ public final class PanelWebGateway implements AutoCloseable {
                                 "sablepanel-web-" + HTTP_THREAD_IDS.incrementAndGet());
                         thread.setDaemon(true);
                         return thread;
-                    }, new ThreadPoolExecutor.CallerRunsPolicy());
+                    }, new ThreadPoolExecutor.AbortPolicy());
             // 跨服转发单独一个池;满了直接 503,不用 CallerRunsPolicy —— 那等于又把 HTTP 线程还回去阻塞
             this.forwardPool = new ThreadPoolExecutor(
                     FORWARD_THREADS, FORWARD_THREADS, 0L, TimeUnit.MILLISECONDS,
@@ -176,7 +178,7 @@ public final class PanelWebGateway implements AutoCloseable {
         }
     }
 
-    private synchronized boolean openEventStream(HttpExchange exchange) throws Exception {
+    private boolean openEventStream(HttpExchange exchange) throws Exception {
         if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
             HttpIo.send(exchange, 405, "application/json", errorJson("需要 GET"), false);
             return false;
@@ -187,29 +189,34 @@ public final class PanelWebGateway implements AutoCloseable {
             HttpIo.send(exchange, 503, "application/json", errorJson("尚未连接服务器"), false);
             return false;
         }
+        // 订阅等待不许拿实例锁:一个慢上游能把 connect/disconnect/close 全堵 10 秒
         String token = exchange.getRequestHeaders().getFirst("X-Token");
         PanelResponse response = client.subscribeEvents(token).get(10, TimeUnit.SECONDS);
         if (response.status() != 200) {
             HttpIo.send(exchange, response.status(), response.contentType(), response.body(), false);
             return false;
         }
-        if (client != this.upstream || !client.isActive()) {
+        PanelEventStreams streams = adoptEventToken(client, token);
+        if (streams == null) {
             HttpIo.send(exchange, 503, "application/json", errorJson("服务器连接已变化"), false);
             return false;
         }
-        PanelEventStreams streams = this.eventStreams;
-        if (streams == null) {
-            HttpIo.send(exchange, 503, "application/json", errorJson("事件服务不可用"), false);
-            return false;
-        }
-        String previousToken = this.eventToken;
-        if (previousToken != null && !previousToken.equals(token)) streams.closeStreams();
-        this.eventToken = token;
         if (!streams.open(exchange)) {
             HttpIo.send(exchange, 503, "application/json", errorJson("事件连接数已满"), false);
             return false;
         }
         return true;
+    }
+
+    /** 订阅成功后的记账。短锁:只比对上游身份并交换 eventToken,不做任何网络等待 */
+    private synchronized PanelEventStreams adoptEventToken(PanelTcpClient client, String token) {
+        if (client != this.upstream || !client.isActive()) return null;
+        PanelEventStreams streams = this.eventStreams;
+        if (streams == null) return null;
+        String previousToken = this.eventToken;
+        if (previousToken != null && !previousToken.equals(token)) streams.closeStreams();
+        this.eventToken = token;
+        return streams;
     }
 
     /**
@@ -247,6 +254,12 @@ public final class PanelWebGateway implements AutoCloseable {
     }
 
     private void proxyApi(HttpExchange exchange) throws Exception {
+        // 公网口最小前置:连 token 都不带的请求不读体、不占上游,直接 401(上游对空 token 同样 401)
+        String token = exchange.getRequestHeaders().getFirst("X-Token");
+        if (token == null || token.isBlank()) {
+            HttpIo.send(exchange, 401, "application/json", errorJson("token 无效"), false);
+            return;
+        }
         PanelTcpClient client = this.upstream;
         if (client == null || !client.isActive()) {
             requestReconnect();
@@ -255,7 +268,6 @@ public final class PanelWebGateway implements AutoCloseable {
         }
         Map<String, String> query = new java.util.HashMap<>(HttpIo.query(exchange.getRequestURI()));
         String target = query.remove("server");
-        String token = exchange.getRequestHeaders().getFirst("X-Token");
         byte[] body = "GET".equalsIgnoreCase(exchange.getRequestMethod()) ? new byte[0] : HttpIo.readBody(exchange);
         PanelRequest request = new PanelRequest(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
                 query, body, token, target);
@@ -268,9 +280,11 @@ public final class PanelWebGateway implements AutoCloseable {
         JsonObject state = new JsonObject();
         state.addProperty("mode", this.clientMode ? "client" : "server");
         state.addProperty("connected", this.upstream != null && this.upstream.isActive());
-        String address = this.endpoint != null ? this.endpoint.toString()
-                : this.clientConfig != null ? this.clientConfig.lastAddress : "";
-        state.addProperty("address", address);
+        // 地址只回给客户端模式的本机页面(预填上次集群地址);服务端模式这是公网口,不泄露内部上游端点
+        if (this.clientMode) {
+            state.addProperty("address", this.endpoint != null ? this.endpoint.toString()
+                    : this.clientConfig.lastAddress);
+        }
         HttpIo.send(exchange, 200, "application/json", state.toString().getBytes(StandardCharsets.UTF_8), false);
     }
 
@@ -469,7 +483,8 @@ public final class PanelWebGateway implements AutoCloseable {
         LOGGER.info("sablepanel: server web gateway reconnected to {}", this.fixedEndpoint);
     }
 
-    private synchronized void restoreEventSubscription(PanelTcpClient client) {
+    /** 只读 volatile 字段,不拿实例锁:10 秒的订阅等待不能挡住 connect/close */
+    private void restoreEventSubscription(PanelTcpClient client) {
         String token = this.eventToken;
         if (token == null || token.isBlank()) return;
         try {

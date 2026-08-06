@@ -132,7 +132,9 @@ public final class PanelClusterNode implements AutoCloseable {
     }
 
     private boolean tryBecomeHostLocked() {
-        PanelTcpServer candidate = new PanelTcpServer(this.api.selfId(), this::handle, this::clusterToken);
+        // token 读路径直连 api::token(volatile 读):事件校验跑在 Netty 事件循环上,
+        // 决不能排在 changeToken 锁内逐 peer 等 10 秒的队伍后面
+        PanelTcpServer candidate = new PanelTcpServer(this.api.selfId(), this::handle, this.api::token);
         candidate.setPeerEvents(this::forwardPeerEvent);
         try {
             candidate.start(this.config.apiBind, this.config.apiPort, this.identity.serverContext());
@@ -250,12 +252,6 @@ public final class PanelClusterNode implements AutoCloseable {
 
     private boolean isHostLocked() {
         return this.host != null && this.host.isActive();
-    }
-
-    private String clusterToken() {
-        synchronized (this.tokenLock) {
-            return this.api.token();
-        }
     }
 
     private void ensureOpen() {

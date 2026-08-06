@@ -16,6 +16,7 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.LengthFieldPrepender;
 import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
 import org.slf4j.Logger;
@@ -49,6 +50,13 @@ public final class PanelTcpServer implements AutoCloseable {
     private static final int FORWARD_THREADS = 4;
     private static final int FORWARD_QUEUE_CAPACITY = 64;
     private static final int MAX_IN_FLIGHT_PER_CONNECTION = 4;
+    /** 并发连接上限:HOST 只服务网关+少数 PEER,公网上多出来的都是占坑的 */
+    private static final int MAX_CONNECTIONS = 64;
+    /**
+     * 握手后首帧期限。握手本身归 SslHandler 默认 10s 超时管;这里管握手完成后的静默连接。
+     * 合法对端(网关/PEER)最迟 20s 写空闲就会发 PING,30s 一帧不发的只能是占坑的。
+     */
+    private static final int FIRST_FRAME_DEADLINE_SECONDS = 30;
     private static final int DEFAULT_READER_IDLE_SECONDS = 45;
     private static final int DEFAULT_WRITER_IDLE_SECONDS = 20;
     private static final int DEFAULT_PONG_TIMEOUT_SECONDS = 10;
@@ -212,16 +220,24 @@ public final class PanelTcpServer implements AutoCloseable {
         private volatile String peerId;
         private volatile String subscribedToken;
         private volatile boolean inactive;
+        private volatile boolean receivedFrame;
         private long awaitingPongId;
 
         @Override
         public void handlerAdded(ChannelHandlerContext context) {
             this.context = context;
+            // 松散计数即可:并发窗口里多放行一两个无妨,上限挡的是堆积
+            if (connections.size() >= MAX_CONNECTIONS) {
+                this.inactive = true;
+                context.close();
+                return;
+            }
             connections.add(this);
         }
 
         @Override
         protected void channelRead0(ChannelHandlerContext context, PanelFrame frame) {
+            this.receivedFrame = true;
             try {
                 switch (frame.type()) {
                     case PanelFrame.PEER_REGISTER -> registerPeer(context, frame);
@@ -318,12 +334,10 @@ public final class PanelTcpServer implements AutoCloseable {
 
         private void registerPeer(ChannelHandlerContext context, PanelFrame frame) {
             InetSocketAddress remote = (InetSocketAddress) context.channel().remoteAddress();
-            if (!remote.getAddress().isLoopbackAddress()) {
-                context.close();
-                return;
-            }
-            String id = frame.meta().get("id").getAsString();
-            if (id.equals(selfId)) {
+            String id = frame.meta().has("id") ? frame.meta().get("id").getAsString() : "";
+            // 256 与 PanelEvent 的 serverId 上限一致:更长的 id 后续事件也会被拒,不如注册就挡
+            if (!remote.getAddress().isLoopbackAddress() || id.isBlank() || id.length() > 256
+                    || id.equals(selfId)) {
                 context.close();
                 return;
             }
@@ -449,6 +463,14 @@ public final class PanelTcpServer implements AutoCloseable {
 
         @Override
         public void userEventTriggered(ChannelHandlerContext context, Object event) throws Exception {
+            if (event instanceof SslHandshakeCompletionEvent handshake) {
+                if (handshake.isSuccess()) {
+                    context.executor().schedule(() -> {
+                        if (!this.receivedFrame && context.channel().isActive()) context.close();
+                    }, FIRST_FRAME_DEADLINE_SECONDS, TimeUnit.SECONDS);
+                }
+                return;
+            }
             if (event instanceof IdleStateEvent) {
                 sendPingOrClose(context);
                 return;
