@@ -769,6 +769,36 @@ test('PERF-03 切服时新服的加载不会被旧服的在途请求吞掉', asy
   assert.ok(seen.some(url => !url.includes('server=')), '应当真的对新服发过一次请求');
 });
 
+test('PERF-03 旧服的 bodies 请求挂住时,新服的加载不能跟着一起挂', async () => {
+  // 在途标记从前是个跨服务器的布尔,合并没有代次概念:新服那次只能设个"完事后补跑",
+  // 而补跑要等旧请求进 finally。对端进程还在、TCP 不回包时,那一刻永远不会到 ——
+  // 界面就一直停在"加载中",连 60 秒兜底都救不了(兜底走的也是同一个锁)
+  const stuck = deferred();
+  const seen = [];
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/bodies')) {
+      seen.push(url);
+      return url.includes('server=B') ? stuck.promise : bodiesResponse({ marker: 'A' });
+    }
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ self: 'A', servers: [{ id: 'A', self: true }, { id: 'B' }], running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; toast = () => {}");
+  evalIn(sandbox, "CURSRV = 'B'; SERVERS = [{id:'A',self:true},{id:'B',self:false}]");
+  const stuckOld = evalIn(sandbox, 'loadBodies')();   // 发在 B 上,再也不回来
+  await evalIn(sandbox, 'switchServer')('A');
+  await tick();
+  assert.ok(seen.some(url => !url.includes('server=')), 'B 卡着不回,A 的请求也必须真的发出去');
+  assert.equal(evalIn(sandbox, 'DATA && DATA.marker'), 'A');
+
+  // 真回来了(比如几分钟后超时)也不能反过来接管:它属于上一个代次
+  stuck.resolve(bodiesResponse({ marker: 'B' }));
+  await stuckOld;
+  await tick();
+  assert.equal(evalIn(sandbox, 'DATA && DATA.marker'), 'A');
+});
+
 test('PERF-03/UI-01 作业跑完时完成 toast 不会被轮询自己清掉', async () => {
   const toasts = [];
   const { sandbox, state } = setup();
@@ -1231,7 +1261,9 @@ test('UI-03 快速连切时旧那次的成功 toast 不能弹出来', async () =
   const slowA = deferred();
   const { sandbox, state } = setup();
   state.fetch = async (url) => {
-    if (url.startsWith('/api/bodies')) return url.includes('server=') ? slowA.promise : bodiesResponse();
+    // 只有 A 回得慢。不能按 server= 一概而论 —— 切到 B 之后 B 会真的自己发一次请求
+    // (在途合并按代次隔离),那次要是也返回 A 的 deferred,整个用例就死等在这儿
+    if (url.startsWith('/api/bodies')) return url.includes('server=A') ? slowA.promise : bodiesResponse();
     if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
     return jsonResponse({ servers: [], self: 'S' });
   };

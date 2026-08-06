@@ -1,6 +1,9 @@
 'use strict';
 /* 数据编排层:从后端拉取 bodies/stats/recycle/servers 并更新全局状态、触发渲染 */
-let bodiesInFlight = false, bodiesRerun = false;
+/* 在途的那次 bodies 属于哪个服务器代次(-1=没有在途)。这个记号不能是布尔:
+   合并逻辑靠它,而跨代次合并就是"新服的加载排在旧服后面" —— 旧服要是假死
+   (对端进程还在、TCP 不回包),那次请求永远进不了 finally,新服的列表就永远停在"加载中" */
+let bodiesInFlightGen = -1, bodiesRerun = false;
 
 /* 每个加载器都要做同样三件事:丢弃过期响应、失败时记下原因、然后重绘。
    这三件事从前在七个加载器里各写各的 —— bodiesRequest / CHART.request / RECYCLE_REQ
@@ -55,9 +58,11 @@ async function loadAll(manual){
 async function loadBodies() {
   // 同一时刻只允许一个在途请求(/api/bodies 慢过 2 秒时忙碌轮询会一轮压一轮),
   // 但期间来的请求要合并成"完事后再跑一次" —— 直接丢掉的话,切服时新服的那次加载会被
-  // 旧服还没回来的请求吞掉,列表一直空到 60 秒兜底刷新
-  if (bodiesInFlight) { bodiesRerun = true; return; }
-  bodiesInFlight = true;
+  // 旧服还没回来的请求吞掉,列表一直空到 60 秒兜底刷新。
+  // 合并只在同一个服务器代次里成立:换了服就直接发,不跟旧服那次排队
+  if (bodiesInFlightGen === srvGen()) { bodiesRerun = true; return; }
+  const gen = bodiesInFlightGen = srvGen();
+  bodiesRerun = false;   // 补跑标记属于上一代次,跟着一起翻篇
   const keepUuid = SEL && SEL.uuid;
   try {
     await load('bodies', () => api('/api/bodies'), result => {
@@ -87,10 +92,14 @@ async function loadBodies() {
       renderAll();   // 总览也要改口径:从前只调 render(),不在 bodies 页就什么都不画
     });
   } finally {
-    bodiesInFlight = false;
-    // 补跑要看认证状态:请求重叠期间用户注销的话,这一跑会带着空 token 发出去,
-    // 白吃一个 401 再把人往登录流程里推一次
-    if (bodiesRerun) { bodiesRerun = false; if (authenticated) loadBodies(); }
+    // 只有自己还是当前那一次才收尾。切服之后新的那次已经接管了记号,旧的这次
+    // (可能晚几分钟才超时)不能把它清掉,更不能替它补跑
+    if (bodiesInFlightGen === gen) {
+      bodiesInFlightGen = -1;
+      // 补跑要看认证状态:请求重叠期间用户注销的话,这一跑会带着空 token 发出去,
+      // 白吃一个 401 再把人往登录流程里推一次
+      if (bodiesRerun) { bodiesRerun = false; if (authenticated) loadBodies(); }
+    }
   }
 }
 /* 作业状态。打 /api/jobs 而不是 /api/bodies —— running[] 里就有忙碌徽章需要的
