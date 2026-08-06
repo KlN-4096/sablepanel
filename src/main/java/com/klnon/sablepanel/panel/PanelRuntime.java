@@ -79,7 +79,7 @@ public final class PanelRuntime implements AutoCloseable {
             Runnable requestScan = mergedRunner(this.scanPending, executor,
                     () -> isLifecycleCurrent(generation) && !executor.isShutdown(), scanOnce);
             OpsService ops = new OpsService(server, this.bodyIndex, requestScan, config);
-            StatsCollector.INSTANCE.start(config);
+            StatsCollector.INSTANCE.start();
             JobService jobs = new JobService(this::requestRuntimeRefresh);
             this.jobService = jobs;
             SablePanel.LOGGER.info("sablepanel: operation workers <= {} ({} cores)",
@@ -170,7 +170,6 @@ public final class PanelRuntime implements AutoCloseable {
         if (node != null) node.close();
         if (jobs != null) jobs.close();
         shutdownExecutor(executor);
-        StatsCollector.INSTANCE.stop();
         PauseService.reset();
         this.scanPauseLogged = false;
         this.scanPending.set(false);
@@ -279,7 +278,6 @@ public final class PanelRuntime implements AutoCloseable {
         if (node != null) node.close();
         if (jobs != null) jobs.close();
         shutdownExecutor(executor);
-        StatsCollector.INSTANCE.stop();
         PauseService.reset();
         this.scanPauseLogged = false;
         this.scanPending.set(false);

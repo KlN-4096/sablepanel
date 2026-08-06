@@ -101,21 +101,7 @@ public final class PanelApiService {
                 return PanelResponse.json(200, this.ops.listPlayers(), false);
             }
             case "/api/stats" -> {
-                Map<String, String> values = request.query();
-                JsonObject stats;
-                if (values.containsKey("from") || values.containsKey("to")) {
-                    if (!values.containsKey("from") || !values.containsKey("to")) {
-                        throw new IllegalArgumentException("from 和 to 必须同时提供");
-                    }
-                    long from = Long.parseLong(values.get("from"));
-                    long to = Long.parseLong(values.get("to"));
-                    int maxPoints = values.containsKey("max_points")
-                            ? Integer.parseInt(values.get("max_points")) : 2000;
-                    stats = StatsCollector.INSTANCE.toJson(from, to, maxPoints);
-                } else {
-                    stats = StatsCollector.INSTANCE.toJson(300);
-                }
-                return PanelResponse.json(200, stats, true);
+                return PanelResponse.json(200, StatsCollector.INSTANCE.toJson(), true);
             }
             case "/api/recycle" -> {
                 // 游标分页:cursor 是上一页最后一个组的 id,服务端只读这一页的 manifest

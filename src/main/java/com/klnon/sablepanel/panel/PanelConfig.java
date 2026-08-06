@@ -18,8 +18,6 @@ public final class PanelConfig {
     public static final String DEFAULT_TOKEN = "sablepanel";
     public static final int DEFAULT_RECYCLE_MAX_FILES = 500;
     public static final int MAX_RECYCLE_FILES = 1_000_000;
-    public static final int DEFAULT_STATS_RETENTION_DAYS = 30;
-    public static final int MAX_STATS_RETENTION_DAYS = 365;
 
     public boolean enabled = true;
     public boolean webEnabled = true;
@@ -30,8 +28,6 @@ public final class PanelConfig {
     public volatile String token = DEFAULT_TOKEN;
     /** 回收站中实际 NBT 备份文件的硬上限；超出时按删除日期清理最早的完整依赖组。 */
     public int recycleMaxFiles = DEFAULT_RECYCLE_MAX_FILES;
-    /** 每秒性能历史保留天数；历史文件位于 config/sablepanel/stats。 */
-    public int statsRetentionDays = DEFAULT_STATS_RETENTION_DAYS;
 
     /**
      * 本服在面板里的显示名,留空则取服务端目录名。
@@ -105,9 +101,6 @@ public final class PanelConfig {
                     if (cfg.apiPort < 1 || cfg.apiPort > 65535) cfg.apiPort = 25581;
                     if (cfg.recycleMaxFiles < 1 || cfg.recycleMaxFiles > MAX_RECYCLE_FILES) {
                         cfg.recycleMaxFiles = DEFAULT_RECYCLE_MAX_FILES;
-                    }
-                    if (cfg.statsRetentionDays < 1 || cfg.statsRetentionDays > MAX_STATS_RETENTION_DAYS) {
-                        cfg.statsRetentionDays = DEFAULT_STATS_RETENTION_DAYS;
                     }
                     // 上下阈值反了会让两个筛选同时命中所有体,直接退回默认
                     if (cfg.voidBelowY >= cfg.skyAboveY) {
