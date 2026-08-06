@@ -389,12 +389,13 @@ public final class PanelApiService {
 
     private void cache(String key, byte[] value) {
         synchronized (this.meshCache) {
-            this.meshCache.put(key, value);
-            this.meshCacheBytes += value.length;
+            // 单项都装不进总预算时只服务本次请求,不能让它绕过缓存硬上限。
+            if (value.length > MESH_CACHE_LIMIT) return;
+            byte[] previous = this.meshCache.put(key, value);
+            this.meshCacheBytes += value.length - (previous != null ? previous.length : 0);
             var iterator = this.meshCache.entrySet().iterator();
             while (this.meshCacheBytes > MESH_CACHE_LIMIT && iterator.hasNext()) {
                 var victim = iterator.next();
-                if (victim.getKey().equals(key)) continue;
                 this.meshCacheBytes -= victim.getValue().length;
                 iterator.remove();
             }
