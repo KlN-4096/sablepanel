@@ -76,6 +76,10 @@ function modalConfirm(){ modalCb && modalCb(true); }
 function modalCancel(){ modalCb && modalCb(false); }
 document.getElementById('modalInput').addEventListener('keydown', e => { if (e.key === 'Enter') modalConfirm(); });
 function busy(text){ document.getElementById('busyText').textContent = text || ''; document.getElementById('busy').style.display = text ? 'flex' : 'none'; }
+/* 加载失败/过期提示的统一文案与载体:hasOld=true 表示还留着上一份数据("上次的结果"),
+   false 表示没有可展示的旧值("加载失败")。载体统一为 class:stale + title */
+function staleLabel(err, hasOld){ return err ? (hasOld ? t('staleData') : t('loadFail')) + err : ''; }
+function staleMark(el, status){ if (el) { el.classList.toggle('stale', !!status); el.title = status || ''; } }
 function copyText(s){
   (navigator.clipboard ? navigator.clipboard.writeText(s) : Promise.reject()).then(
     ()=>toast(t('copied'),'ok'),

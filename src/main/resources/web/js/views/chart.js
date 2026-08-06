@@ -16,14 +16,11 @@ function renderChartPresets(){
    上一个服的数字,统计弹层里还是上一个服的体,新服的统计请求要是失败就永远挂着。
    顶栏和弹层在所有视图共享,所以这里不看 VIEW。 */
 function statsErrorLabel(){
-  if (!STATS_ERROR) return '';
-  return (STATS ? t('staleData') : t('loadFail')) + STATS_ERROR;
+  return staleLabel(STATS_ERROR, !!STATS);
 }
 function renderStats(){
-  const pill = document.getElementById('loadPill');
   const status = statsErrorLabel();
-  pill.classList.toggle('stale', !!status);
-  pill.title = status;
+  staleMark(document.getElementById('loadPill'), status);
   document.getElementById('pillCost').textContent =
     STATS ? (STATS.body_cost_total ?? 0).toFixed(2) : '--';
   document.getElementById('pillLoaded').textContent =

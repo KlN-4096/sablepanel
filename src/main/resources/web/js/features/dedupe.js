@@ -20,8 +20,7 @@ async function openDedupe(){
   return load('copies', () => api(`/api/body/${uuid}/copies`), result => {
     if (COPY_UUID !== uuid || result.uuid !== uuid) return;
     COPY_SCAN = result;
-    COPY_VERSION = null;
-    renderDedupe(result);
+    renderDedupe(result);   // COPY_VERSION 在本函数开头已归零,在途期间没人能改它
   }, message => {
     if (COPY_UUID !== uuid) return;
     document.getElementById('copyPanelBody').innerHTML = `<div class="empty" style="color:var(--bad)">${esc(message)}</div>`;

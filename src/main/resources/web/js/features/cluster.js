@@ -7,9 +7,8 @@ function renderServerPicker(selfId){
   wrap.style.display = 'block';
   const cur = CURSRV || selfId;
   const button = document.getElementById('srvBtn');
-  const status = SERVERS_ERROR ? `${t('loadFail')}${SERVERS_ERROR}` : '';
-  button.classList.toggle('stale', !!status);
-  button.title = status;
+  const status = staleLabel(SERVERS_ERROR, false);
+  staleMark(button, status);
   button.innerHTML =
     `<span style="color:var(--acc)">◆</span> ${esc(cur)} ${status ? '<span style="color:var(--warn)">⚠</span>' : ''}`
       + ` <span style="opacity:.55">▾</span>`;

@@ -410,7 +410,7 @@ function focusBody(uuid){
 /* ===================== 详情 ===================== */
 function select(b, g) {
   const sameMesh = SEL && SEL.uuid === b.uuid;
-  if (!sameMesh) compExpanded = {compList:false, rCompList:false, fsComp:false};
+  if (!sameMesh) compExpanded = {compList:false, rCompList:false, copyComp:false, fsComp:false};
   SEL = b; SELG = g;
   document.querySelectorAll('.member.sel').forEach(x=>x.classList.remove('sel'));
   document.querySelector(`.member[data-uuid="${b.uuid}"]`)?.classList.add('sel');
@@ -515,9 +515,8 @@ function renderPlayerSelect(){
   const sel = document.getElementById('tpPlayer');
   if (!sel) return;
   const cur = sel.value;
-  const status = PLAYERS_ERROR ? `${t('loadFail')}${PLAYERS_ERROR}` : '';
-  sel.classList.toggle('stale', !!status);
-  sel.title = status;
+  const status = staleLabel(PLAYERS_ERROR, false);
+  staleMark(sel, status);
   const notice = status && PLAYERS.length ? `<option value="" disabled>${esc(status)}</option>` : '';
   sel.innerHTML = PLAYERS.length
     ? notice + PLAYERS.map(p=>`<option value="${p.uuid}" ${p.uuid===cur?'selected':''}>${esc(p.name)}</option>`).join('')
