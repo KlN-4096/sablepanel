@@ -502,14 +502,18 @@ function fillCurrentPos(){
   document.getElementById('ty').value = pos[1]|0;
   document.getElementById('tz').value = pos[2]|0;
 }
-/* 传送玩家下拉:保留已选玩家,列表为空时禁用按钮 */
+/* 传送玩家下拉:保留已选玩家,列表为空时禁用按钮。请求失败不能伪装成无人在线。 */
 function renderPlayerSelect(){
   const sel = document.getElementById('tpPlayer');
   if (!sel) return;
   const cur = sel.value;
+  const status = PLAYERS_ERROR ? `${t('loadFail')}${PLAYERS_ERROR}` : '';
+  sel.classList.toggle('stale', !!status);
+  sel.title = status;
+  const notice = status && PLAYERS.length ? `<option value="" disabled>${esc(status)}</option>` : '';
   sel.innerHTML = PLAYERS.length
-    ? PLAYERS.map(p=>`<option value="${p.uuid}" ${p.uuid===cur?'selected':''}>${esc(p.name)}</option>`).join('')
-    : `<option value="">${t('tpNoPlayers')}</option>`;
+    ? notice + PLAYERS.map(p=>`<option value="${p.uuid}" ${p.uuid===cur?'selected':''}>${esc(p.name)}</option>`).join('')
+    : `<option value="">${esc(status || t('tpNoPlayers'))}</option>`;
   sel.disabled = !PLAYERS.length;
   const btn = document.getElementById('tpPlayerBtn');
   if (btn) btn.disabled = !PLAYERS.length;

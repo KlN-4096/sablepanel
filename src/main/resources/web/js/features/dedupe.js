@@ -17,17 +17,16 @@ async function openDedupe(){
   document.getElementById('pvInfo').textContent = t('copyPreviewPending');
   renderComposition();
   resizeGL();
-  try {
-    const result = await api(`/api/body/${uuid}/copies`);
+  return load('copies', () => api(`/api/body/${uuid}/copies`), result => {
     if (COPY_UUID !== uuid || result.uuid !== uuid) return;
     COPY_SCAN = result;
     COPY_VERSION = null;
     renderDedupe(result);
-  } catch(e) {
+  }, message => {
     if (COPY_UUID !== uuid) return;
-    document.getElementById('copyPanelBody').innerHTML = `<div class="empty" style="color:var(--bad)">${esc(e.message)}</div>`;
-    document.getElementById('copyPanelStatus').textContent = t('dedupeFail') + e.message;
-  }
+    document.getElementById('copyPanelBody').innerHTML = `<div class="empty" style="color:var(--bad)">${esc(message)}</div>`;
+    document.getElementById('copyPanelStatus').textContent = t('dedupeFail') + message;
+  });
 }
 function renderDedupe(scan){
   const versions = scan.versions || [];

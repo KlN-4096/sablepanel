@@ -4,11 +4,14 @@ let CONSISTENCY = null, CONSISTENCY_POLL_GEN = 0;
 function consistencyDismissKey(){ return `spConsistencyDismissed:${CURSRV||'self'}`; }
 async function scheduleStartupConsistency(){
   const gen = ++CONSISTENCY_POLL_GEN;
+  const server = srvGen(), auth = authSeq;
+  const fresh = () => authenticated && gen===CONSISTENCY_POLL_GEN
+    && server===srvGen() && auth===authSeq;
   for (let attempt=0;attempt<45;attempt++) {
-    if (!authenticated || gen!==CONSISTENCY_POLL_GEN) return;
+    if (!fresh()) return;
     try {
       const report = await api('/api/consistency');
-      if (gen!==CONSISTENCY_POLL_GEN) return;
+      if (!fresh()) return;
       if (report.ready) {
         CONSISTENCY = report;
         const dismissed = localStorage.getItem(consistencyDismissKey());
@@ -84,11 +87,15 @@ async function runConsistencyScan(){
 }
 async function waitForConsistencyChange(previous,open){
   const gen=++CONSISTENCY_POLL_GEN;
+  const server=srvGen(), auth=authSeq;
+  const fresh=()=>authenticated&&gen===CONSISTENCY_POLL_GEN
+    &&server===srvGen()&&auth===authSeq;
   for (let attempt=0;attempt<90;attempt++) {
     await new Promise(resolve=>setTimeout(resolve,1000));
-    if (!authenticated||gen!==CONSISTENCY_POLL_GEN) return;
+    if (!fresh()) return;
     try {
       const report=await api('/api/consistency');
+      if (!fresh()) return;
       if (report.ready&&report.scan_id&&report.scan_id!==previous) {
         CONSISTENCY=report;
         if (open) openConsistency(report);

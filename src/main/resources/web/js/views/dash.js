@@ -153,11 +153,13 @@ function topCostTable(n){
 }
 function renderStatPop(){
   const pop = document.getElementById('statPop');
-  if (!STATS) { pop.innerHTML = `<div class="empty">${t('statNone')}</div>`; return; }
+  const status = statsErrorLabel();
+  const notice = status ? `<div class="staleHint">${esc(status)}</div>` : '';
+  if (!STATS) { pop.innerHTML = notice + `<div class="empty">${t('statNone')}</div>`; return; }
   const dims = new Set([...Object.keys(STATS.phys_1m||{}), ...Object.keys(STATS.loaded||{})]);
   const rows = [...dims].map(d =>
     `<tr><td>${esc(d.replace('minecraft:',''))}</td><td>${(STATS.phys_1m?.[d]??0).toFixed(2)} ms</td><td>${STATS.loaded?.[d]??0}</td></tr>`).join('');
-  pop.innerHTML = `<b style="font-size:12px">${t('physEngine')}</b>
+  pop.innerHTML = notice + `<b style="font-size:12px">${t('physEngine')}</b>
     <table><tr class="muted"><td></td><td>${t('statPhys')}</td><td>${t('statLoaded')}</td></tr>
     ${rows || `<tr><td colspan=3 class="muted">${t('statNone')}</td></tr>`}</table>
     <b style="font-size:12px;display:block;margin-top:11px">${t('topCost')}</b><div class="mini">${topCostTable(5)}</div>`;

@@ -1,9 +1,14 @@
 'use strict';
 /* 数据编排层:从后端拉取 bodies/stats/recycle/servers 并更新全局状态、触发渲染 */
-/* 在途的那次 bodies 属于哪个服务器代次(-1=没有在途)。这个记号不能是布尔:
-   合并逻辑靠它,而跨代次合并就是"新服的加载排在旧服后面" —— 旧服要是假死
-   (对端进程还在、TCP 不回包),那次请求永远进不了 finally,新服的列表就永远停在"加载中" */
-let bodiesInFlightGen = -1, bodiesRerun = false;
+/* 同一上下文的 bodies 请求合并,换服/换凭据就取消旧的那次。只记一个活动请求:
+   旧服假死时不能让新服排队,快速连切也不能把每一代的 12 MiB 请求都留在网络层。 */
+let bodiesFlight = null, bodiesRerun = false;
+
+function cancelBodiesFlight(){
+  if (bodiesFlight) bodiesFlight.controller.abort();
+  bodiesFlight = null;
+  bodiesRerun = false;
+}
 
 /* 每个加载器都要做同样三件事:丢弃过期响应、失败时记下原因、然后重绘。
    这三件事从前在七个加载器里各写各的 —— bodiesRequest / CHART.request / RECYCLE_REQ
@@ -28,8 +33,8 @@ async function load(key, request, apply, onFail){
     if (fresh() && onFail) onFail(e.message || String(e));
   }
 }
-/* 成员表低频变化,失败什么都不改:抖一下就把切服器藏起来,用户会以为集群掉了。
-   真断开由 showLogin 和网关状态负责 */
+/* 成员表低频变化,失败保留旧表并标记过期:抖一下就把切服器藏起来,用户会以为集群掉了。
+   真断开由 showLogin 和网关状态负责。 */
 function loadServers(){
   return load('servers', () => api('/api/servers'), r => {
     // 正在看的服从成员表里消失了(停服/被接管)。applyServersResponse 只会把 CURSRV 清空,
@@ -45,6 +50,10 @@ function loadServers(){
     applyServersResponse(r);
     maybeWarnDefaultToken(r);
     if (gone) { toast(t('srvGone')(lost), 'bad'); switchServer(r.self); }
+  }, message => {
+    SERVERS_ERROR = message;
+    const self = SERVERS.find(server => server.self);
+    renderServerPicker(self ? self.id : CURSRV);
   });
 }
 /* ===================== 数据 ===================== */
@@ -59,13 +68,18 @@ async function loadBodies() {
   // 同一时刻只允许一个在途请求(/api/bodies 慢过 2 秒时忙碌轮询会一轮压一轮),
   // 但期间来的请求要合并成"完事后再跑一次" —— 直接丢掉的话,切服时新服的那次加载会被
   // 旧服还没回来的请求吞掉,列表一直空到 60 秒兜底刷新。
-  // 合并只在同一个服务器代次里成立:换了服就直接发,不跟旧服那次排队
-  if (bodiesInFlightGen === srvGen()) { bodiesRerun = true; return; }
-  const gen = bodiesInFlightGen = srvGen();
-  bodiesRerun = false;   // 补跑标记属于上一代次,跟着一起翻篇
+  // 合并只在同一个服务器 + 会话代次里成立:换了上下文就取消旧的那次
+  const context = {server: srvGen(), auth: authSeq};
+  if (bodiesFlight && bodiesFlight.server === context.server && bodiesFlight.auth === context.auth) {
+    bodiesRerun = true;
+    return;
+  }
+  cancelBodiesFlight();
+  const run = {...context, controller: new AbortController()};
+  bodiesFlight = run;
   const keepUuid = SEL && SEL.uuid;
   try {
-    await load('bodies', () => api('/api/bodies'), result => {
+    await load('bodies', () => api('/api/bodies', {signal:run.controller.signal}), result => {
       // 先确认这是一份快照再发布 DATA。渲染层(summarize/renderTabs/render)一律假设
       // "DATA 非空 = groups 和 block_palette 都在";从前是先赋值后使用,网关或版本不匹配
       // 返回一个 200 的别的东西时,DATA 会留下半份,连"加载失败"那块提示自己都会再崩一次
@@ -92,13 +106,15 @@ async function loadBodies() {
       renderAll();   // 总览也要改口径:从前只调 render(),不在 bodies 页就什么都不画
     });
   } finally {
-    // 只有自己还是当前那一次才收尾。切服之后新的那次已经接管了记号,旧的这次
-    // (可能晚几分钟才超时)不能把它清掉,更不能替它补跑
-    if (bodiesInFlightGen === gen) {
-      bodiesInFlightGen = -1;
+    // 只有自己还是当前那一次才收尾。旧请求的 abort/迟到不能清掉新请求的记号,
+    // 也不能替新上下文补跑
+    if (bodiesFlight === run) {
+      bodiesFlight = null;
       // 补跑要看认证状态:请求重叠期间用户注销的话,这一跑会带着空 token 发出去,
       // 白吃一个 401 再把人往登录流程里推一次
-      if (bodiesRerun) { bodiesRerun = false; if (authenticated) loadBodies(); }
+      const rerun = bodiesRerun;
+      bodiesRerun = false;
+      if (rerun && authenticated && context.server === srvGen() && context.auth === authSeq) loadBodies();
     }
   }
 }
@@ -208,25 +224,30 @@ function reselect(uuid){
   }
   SEL = null; SELG = null;
 }
-/* 统计失败不影响主体操作,所以没有 onFail:图表留着上一次的,下一轮 15 秒后自己回来 */
+/* 统计失败不影响主体操作,保留上一次的数值但记录错误,由 renderStats() 常驻标记过期状态。
+   不能只弹 toast:轮询失败时 toast 会消失,用户会把旧服/旧时间段的数字当成实时值。 */
 function loadStats(){
   const now = Math.floor(Date.now()/1000);
   if (CHART.live) { CHART.to = now; CHART.from = now - CHART.span; }
   return load('stats', () => api(`/api/stats?from=${CHART.from}&to=${CHART.to}&max_points=2000`), result => {
     STATS = result;
+    STATS_ERROR = '';
     CHART.from = Number(STATS.range_from ?? CHART.from);
     CHART.to = Number(STATS.range_to ?? CHART.to);
     renderStats();   // 写完状态就交给它,顶栏那几块归它管
     if (VIEW === 'dash') renderDash();
+  }, message => {
+    STATS_ERROR = message;
+    renderStats();
   });
 }
-/* 在线玩家列表:15s 节流,失败静默(下拉显示"没有在线玩家") */
+/* 在线玩家列表:15s 节流,失败保留旧列表并显式标记,不能把网络错误伪装成"没有在线玩家" */
 function loadPlayers(force){
   if (!force && Date.now() - playersFetchedAt < 15000) { renderPlayerSelect(); return; }
   playersFetchedAt = Date.now();
   return load('players', () => api('/api/players'),
-    r => { PLAYERS = r.players || []; renderPlayerSelect(); },
-    () => { PLAYERS = []; renderPlayerSelect(); });
+    r => { PLAYERS = r.players || []; PLAYERS_ERROR = ''; renderPlayerSelect(); },
+    message => { PLAYERS_ERROR = message; renderPlayerSelect(); });
 }
 /* 回收站游标分页。append=false 是重新从第一页拉(切服/删除/恢复之后),true 是"加载更多"。
    服务端一页只读这一页的 manifest,不会像从前那样先把全部备份建成一个对象再发。 */

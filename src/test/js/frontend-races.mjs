@@ -486,6 +486,29 @@ test('UI-03 切服后顶栏统计和统计弹层也要立刻清空', async () =>
   slowStats.resolve(jsonResponse({ t: [], phys: {}, phys_1m: {}, loaded: {}, body_cost_total: 0, top_cost: [] }));
 });
 
+test('LOAD-01 统计刷新失败保留旧值但必须显式标为过期', async () => {
+  let fail = false;
+  const { sandbox, state } = setup();
+  state.fetch = async url => {
+    if (!url.startsWith('/api/stats')) return jsonResponse({});
+    if (fail) return errorResponse(503);
+    return jsonResponse({ t: [], phys: {}, phys_1m: {}, loaded: { overworld: 4 },
+      body_cost_total: 7.5, top_cost: [] });
+  };
+  evalIn(sandbox, 'authenticated = true; VIEW = "dash"; toast = () => {}');
+  await evalIn(sandbox, 'loadStats')();
+  fail = true;
+  await evalIn(sandbox, 'loadStats')();
+
+  assert.equal(evalIn(sandbox, 'STATS.body_cost_total'), 7.5,
+    '统计失败时保留旧值，避免瞬时网络抖动把图表清空');
+  assert.notEqual(evalIn(sandbox, 'STATS_ERROR'), '', '失败原因必须进入可渲染状态');
+  assert.match(evalIn(sandbox, "document.getElementById('chartMeta').textContent"), /刷新失败/,
+    '图表元信息必须说明当前是上一次的结果');
+  assert.match(evalIn(sandbox, "document.getElementById('statPop').innerHTML"), /刷新失败/,
+    '统计弹层打开时也必须说明数据已过期');
+});
+
 test('UI-03 断开远端再登录时,旧远端的界面不能再露出来', async () => {
   // disconnectGateway 从前只清 DATA/STATS/RECYCLE,也不重画;而 authenticate 在
   // await loadAll 之前就 remove('locked') —— 新远端的 bodies 慢一点,旧远端的顶栏数字、
@@ -785,10 +808,12 @@ test('PERF-03 旧服的 bodies 请求挂住时,新服的加载不能跟着一起
   // 界面就一直停在"加载中",连 60 秒兜底都救不了(兜底走的也是同一个锁)
   const stuck = deferred();
   const seen = [];
+  let oldSignal;
   const { sandbox, state } = setup();
-  state.fetch = async (url) => {
+  state.fetch = async (url, opts) => {
     if (url.startsWith('/api/bodies')) {
       seen.push(url);
+      if (url.includes('server=B')) oldSignal = opts.signal;
       return url.includes('server=B') ? stuck.promise : bodiesResponse({ marker: 'A' });
     }
     if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
@@ -799,6 +824,7 @@ test('PERF-03 旧服的 bodies 请求挂住时,新服的加载不能跟着一起
   const stuckOld = evalIn(sandbox, 'loadBodies')();   // 发在 B 上,再也不回来
   await evalIn(sandbox, 'switchServer')('A');
   await tick();
+  assert.equal(oldSignal.aborted, true, '换服必须取消旧快照,不能只把它从状态表里遗忘');
   assert.ok(seen.some(url => !url.includes('server=')), 'B 卡着不回,A 的请求也必须真的发出去');
   assert.equal(evalIn(sandbox, 'DATA && DATA.marker'), 'A');
 
@@ -807,6 +833,33 @@ test('PERF-03 旧服的 bodies 请求挂住时,新服的加载不能跟着一起
   await stuckOld;
   await tick();
   assert.equal(evalIn(sandbox, 'DATA && DATA.marker'), 'A');
+});
+
+test('PERF-04 旧服作业的接受响应不能写进新服的 watch', async () => {
+  const accepted = deferred();
+  let bPolls = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async url => {
+    if (url.startsWith('/api/rescan')) return accepted.promise;
+    if (url.startsWith('/api/jobs')) {
+      if (url.includes('server=B')) bPolls++;
+      return jsonResponse({ running: [], log: [] });
+    }
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ self: 'A', servers: [{ id: 'A', self: true }, { id: 'B' }] });
+  };
+  evalIn(sandbox, "authenticated = true; CURSRV = 'A'; SERVERS = [{id:'A',self:true},{id:'B'}]; toast = () => {}");
+
+  const pending = evalIn(sandbox, 'submitJob')('/api/rescan', {method:'POST'}, 'rescan');
+  await tick();
+  await evalIn(sandbox, 'switchServer')('B');
+  const before = bPolls;
+  accepted.resolve(jsonResponse({ job: 9, marker: 'A' }));
+
+  assert.equal(await pending, null, '旧服的接受结果必须被静默丢弃');
+  assert.equal(bPolls, before, '旧服响应不能再触发新服的作业轮询');
+  assert.equal(evalIn(sandbox, 'JOB_WATCH.size'), 0, '旧 job 不能写进新服 watch');
 });
 
 test('PERF-03/UI-01 作业跑完时完成 toast 不会被轮询自己清掉', async () => {
@@ -1099,6 +1152,36 @@ test('LOAD-01 成员表加载失败要保留上一次的结果', async () => {
   assert.equal(evalIn(sandbox, 'SERVERS').length, 2, '20 秒轮询抖一下不能让成员表清空');
   assert.notEqual(evalIn(sandbox, "document.getElementById('srvWrap').style.display"), 'none',
     '切服器不能因为一次失败就整个消失 —— 用户会以为集群掉了');
+  assert.match(evalIn(sandbox, "document.getElementById('srvBtn').innerHTML"), /> A </,
+    '重绘过期状态时仍要显示旧成员表里的当前服务器');
+  assert.match(evalIn(sandbox, "document.getElementById('srvBtn').title"), /加载失败/,
+    '保留旧成员表时也必须明确标记它已过期');
+  assert.match(evalIn(sandbox, "document.getElementById('srvBtn').innerHTML"), /⚠/,
+    '过期状态不能只藏在悬停标题里');
+});
+
+test('LOAD-01 在线玩家加载失败不能伪装成无人在线', async () => {
+  let ok = true;
+  const { sandbox, state } = setup();
+  state.fetch = async () => ok
+    ? jsonResponse({ players: [{ uuid: 'player-1', name: 'Alice' }] })
+    : errorResponse(500);
+  evalIn(sandbox, 'authenticated = true');
+  await evalIn(sandbox, 'loadPlayers')(true);
+  assert.equal(evalIn(sandbox, 'PLAYERS.length'), 1);
+
+  ok = false;
+  await evalIn(sandbox, 'loadPlayers')(true);
+  assert.equal(evalIn(sandbox, 'PLAYERS.length'), 1, '刷新失败时保留上一次的玩家列表');
+  assert.match(evalIn(sandbox, "document.getElementById('tpPlayer').innerHTML"), /Alice/);
+  assert.match(evalIn(sandbox, "document.getElementById('tpPlayer').title"), /加载失败/,
+    '旧玩家列表必须明确标为过期');
+
+  evalIn(sandbox, 'PLAYERS = []');
+  await evalIn(sandbox, 'loadPlayers')(true);
+  assert.match(evalIn(sandbox, "document.getElementById('tpPlayer').innerHTML"), /加载失败/,
+    '没有旧数据时要显示加载失败,不能显示没有在线玩家');
+  assert.doesNotMatch(evalIn(sandbox, "document.getElementById('tpPlayer').innerHTML"), /没有在线玩家/);
 });
 
 test('UI-03 PEER 消失时替用户收起的一致性报告,不算用户读过', async () => {
@@ -1246,6 +1329,26 @@ test('LOAD-01 一致性报告的等待循环失败一次不能整个放弃', asy
   assert.equal(evalIn(sandbox, 'CONSISTENCY.scan_id'), 's2', '恢复之后要拿到报告');
 });
 
+test('UI-03 旧会话的一致性等待不能在重新登录后继续', async () => {
+  let consistencyCalls = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async url => {
+    if (url.startsWith('/api/consistency')) {
+      consistencyCalls++;
+      return jsonResponse({ ready: true, scan_id: 'new', issue_count: 1 });
+    }
+    return jsonResponse({});
+  };
+  evalIn(sandbox, "token = 'old'; authenticated = true; CURSRV = 'A'; CONSISTENCY = {scan_id:'old'}; __opened = false; openConsistency = () => { __opened = true; }");
+  evalIn(sandbox, "__timers = []; setTimeout = fn => { __timers.push(fn); return __timers.length; }");
+  const waiting = evalIn(sandbox, 'waitForConsistencyChange')('old', true);
+  await tick();
+  evalIn(sandbox, "showLogin('expired'); authenticated = true; __timers.shift()()");
+  await waiting;
+  assert.equal(consistencyCalls, 0, '重新登录后不能继续请求旧会话的一致性结果');
+  assert.equal(evalIn(sandbox, '__opened'), false, '旧会话不能打开新会话的报告');
+});
+
 // UI-04:预览旧失败
 test('UI-04 同一个体连点两次时,先发的 mesh 响应不得盖掉后发的', async () => {
   // isCurrent() 只看 SEL.uuid,认不出是哪一次请求:X→Y→X 之后 X 的第一次响应照样满足它,
@@ -1369,6 +1472,42 @@ test('PERF-03 注销后不得补跑一次带空 token 的 bodies 请求', async 
 
   assert.equal(urls.length, 1, '注销后补跑的那次会带空 token 出去,白吃 401 再把人推进登录流程');
   assert.equal(evalIn(sandbox, 'authenticated'), false, '注销状态不能被补跑翻回来');
+});
+
+test('PERF-03 旧会话的挂死快照不能阻塞重新登录,旧弹层也不能复活', async () => {
+  const oldBodies = deferred();
+  let bodyCalls = 0, oldSignal;
+  const { sandbox, state } = setup();
+  state.fetch = async (url, opts) => {
+    if (url.startsWith('/api/bodies')) {
+      bodyCalls++;
+      if (bodyCalls === 1) { oldSignal = opts.signal; return oldBodies.promise; }
+      return bodiesResponse({ marker: 'new-session' });
+    }
+    if (url.startsWith('/api/servers'))
+      return jsonResponse({ self: 'A', servers: [{ id: 'A', self: true }] });
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    if (url.startsWith('/api/jobs')) return jsonResponse({ running: [], log: [] });
+    if (url.startsWith('/api/consistency')) return jsonResponse({ ready: true, issue_count: 0 });
+    return jsonResponse({});
+  };
+  evalIn(sandbox, "token = 'old'; authenticated = true; CURSRV = 'A'; toast = () => {}");
+  const staleModal = evalIn(sandbox, 'realAskModal')('旧操作', '旧会话', false);
+  const oldLoad = evalIn(sandbox, 'loadBodies')();
+  await tick();
+
+  evalIn(sandbox, "showLogin('expired')");
+  assert.equal(oldSignal.aborted, true, '认证失效必须取消旧会话的快照请求');
+  assert.equal(await evalIn(sandbox, 'authenticate')('new', false), true);
+  assert.equal(bodyCalls, 2, '重新登录必须发新 token 的 bodies 请求');
+  assert.equal(evalIn(sandbox, 'DATA && DATA.marker'), 'new-session');
+  assert.equal(evalIn(sandbox, "document.getElementById('modalBack').style.display"), 'none',
+    '重新登录后不能重新露出旧会话的确认框');
+
+  oldBodies.resolve(bodiesResponse({ marker: 'old-session' }));
+  await oldLoad;
+  await staleModal;
+  assert.equal(evalIn(sandbox, 'DATA && DATA.marker'), 'new-session', '旧会话迟到响应不得落地');
 });
 
 test('UI-02 旧请求晚到的 401 不能注销已经重新登录的会话', async () => {
@@ -1510,6 +1649,121 @@ test('LIMIT-01 摘要组(bodies 为空)不能让回收站整页崩掉', () => {
   assert.ok(html.includes(evalIn(sandbox, "t('rBodiesOmitted')")), '要说明成员明细被省略');
   // 摘要组没有成员,按维度筛选时不能把它静默滤掉
   assert.ok(evalIn(sandbox, 'RECYCLE.groups').length === 2);
+});
+
+test('UI-03 切服后尚未执行的延迟预览不能把旧 uuid 发到新服', async () => {
+  const meshRequests = [];
+  const { sandbox, state } = setup();
+  state.fetch = async url => {
+    if (url.includes('/mesh')) {
+      meshRequests.push(url);
+      return jsonResponse({shell:0,total:0,voxels:[],palette:[]});
+    }
+    return jsonResponse({});
+  };
+  evalIn(sandbox, `
+    authenticated = true; CURSRV = 'A'; SEL = {uuid:'old-body'};
+    __timers = []; setTimeout = fn => { __timers.push(fn); return __timers.length; };
+    clearTimeout = () => {};
+    setView('bodies');
+    CURSRV = 'B'; resetServerContext();
+    while (__timers.length) __timers.shift()();
+  `);
+  await tick();
+  assert.deepEqual(meshRequests, [], '延迟回调执行时必须重新核对视图、选择和服务器代次');
+});
+
+test('UI-04 同一 uuid 关闭再重开副本面板时旧扫描不能覆盖新扫描', async () => {
+  const first = deferred();
+  let calls = 0;
+  const uuid = '00000000-0000-0000-0000-000000000001';
+  const scan = marker => jsonResponse({
+    uuid, marker, current_state:'known', current_version:'', members:1,
+    active_members:1, incomplete:[], versions:[],
+  });
+  const { sandbox, state } = setup();
+  state.fetch = async url => {
+    if (url.includes('/copies')) return ++calls === 1 ? first.promise : scan('new');
+    return jsonResponse({});
+  };
+  evalIn(sandbox, `authenticated = true; SEL = {uuid:'${uuid}',name:'测试体'}`);
+
+  const stale = evalIn(sandbox, 'openDedupe')();
+  await tick();
+  evalIn(sandbox, 'closeDedupe')(false);
+  await evalIn(sandbox, 'openDedupe')();
+  assert.equal(evalIn(sandbox, 'COPY_SCAN && COPY_SCAN.marker'), 'new');
+
+  first.resolve(scan('old'));
+  await stale;
+  assert.equal(evalIn(sandbox, 'COPY_SCAN && COPY_SCAN.marker'), 'new',
+    '只比较 uuid 认不出这是上一次打开面板时发出的请求');
+});
+
+test('UI-02 注销要立即清空旧快照、忙碌层和延迟警告', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    authenticated = true; DATA = {groups:[],block_palette:[]}; STATS = {marker:'old'};
+    RECYCLE = {groups:[],block_palette:[]}; CHART.fetchTimer = 77;
+    busy('旧会话写入中');
+    __timers = []; setTimeout = fn => { __timers.push(fn); return __timers.length; };
+    clearTimeout = () => {};
+    maybeWarnDefaultToken({using_default_token:true});
+    showLogin('expired');
+    while (__timers.length) __timers.shift()();
+  `);
+  await tick();
+  assert.equal(evalIn(sandbox, 'DATA'), null, '登录门打开后不能还保留上一会话的服务器快照');
+  assert.equal(evalIn(sandbox, 'STATS'), null);
+  assert.equal(evalIn(sandbox, 'RECYCLE'), null);
+  assert.equal(evalIn(sandbox, 'CHART.fetchTimer'), null, '旧图表防抖不能在新会话发请求');
+  assert.equal(evalIn(sandbox, "document.getElementById('busy').style.display"), 'none',
+    '旧写入未返回时也不能用 busy 层盖住登录门');
+  assert.notEqual(evalIn(sandbox, "document.getElementById('modalBack').style.display"), 'flex',
+    '注销前排队的默认口令警告不能在登录门后复活');
+});
+
+test('UI-03 回收站上限的旧服响应不能刷新新服', async () => {
+  const saved = deferred();
+  let recycleLoads = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async url => {
+    if (url.startsWith('/api/recycle/config')) return saved.promise;
+    if (url.startsWith('/api/recycle')) {
+      recycleLoads++;
+      return jsonResponse({groups:[],block_palette:[],next_cursor:''});
+    }
+    return jsonResponse({});
+  };
+  evalIn(sandbox, `
+    authenticated = true; CURSRV = 'A'; document.getElementById('rLimit').value = '10';
+    __toasts = []; toast = message => __toasts.push(message);
+  `);
+  const pending = evalIn(sandbox, 'saveRecycleLimit')();
+  await tick();
+  evalIn(sandbox, "CURSRV = 'B'; resetServerContext()");
+  saved.resolve(jsonResponse({ok:true}));
+  await pending;
+
+  assert.equal(recycleLoads, 0, 'A 的保存响应不能触发一次 B 的回收站加载');
+  assert.equal(evalIn(sandbox, '__toasts.length'), 0, '切服后不能再提示旧服保存成功');
+});
+
+test('UI-02 旧会话的改口令响应不能覆盖新登录凭据', async () => {
+  const changed = deferred();
+  const { sandbox, state } = setup();
+  state.fetch = async url => url.startsWith('/api/cluster/token') ? changed.promise : jsonResponse({});
+  evalIn(sandbox, `
+    authenticated = true; token = 'old';
+    document.getElementById('modalInput').value = 'requested';
+  `);
+  const pending = evalIn(sandbox, 'doChangeToken')();
+  await tick();
+  evalIn(sandbox, "authSeq++; token = 'new-session'; authenticated = true");
+  changed.resolve(jsonResponse({token:'requested'}));
+  await pending;
+
+  assert.equal(evalIn(sandbox, 'token'), 'new-session', '旧响应不得重写新会话的 token');
 });
 
 /* ---------- 运行 ---------- */

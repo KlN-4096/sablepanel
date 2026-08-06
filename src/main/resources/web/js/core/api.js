@@ -31,13 +31,18 @@ async function api(path, opts) {
 }
 
 function showLogin(message){
+  // 认证代次就是一份新的服务器上下文:弹层先按旧上下文收掉,随后统一归零。
+  // 只停轮询/请求还不够,否则登录门再次解锁到新快照回来之间会露出上一会话的数据。
+  closeServerModals();
   stopEventStream();
-  stopBusyPolling();
   authSeq++;               // 作废在途的登录尝试,别让它稍后又把界面解锁
   authenticated = false;
   token = '';
+  defaultTokenWarningShown = false;
   localStorage.removeItem(TOKEN_STORAGE_KEY);
   document.body.classList.add('locked');
+  busy(null);              // 旧配置写入卡住时,忙碌层不能盖住登录门
+  resetServerContext();
   const input = document.getElementById('loginToken');
   input.value = '';
   document.getElementById('loginError').textContent = message || '';
@@ -46,6 +51,7 @@ function showLogin(message){
 
 function applyServersResponse(r){
   SERVERS = r.servers || [];
+  SERVERS_ERROR = '';
   if (CURSRV && !SERVERS.some(s => s.id === CURSRV)) CURSRV = '';
   renderServerPicker(r.self);
   if (VIEW === 'dash') renderDashServer();
@@ -130,11 +136,9 @@ async function disconnectGateway(){
   }).catch(()=>{});
   gatewayConnected = false;
   closeServerModals();      // 要在改 CURSRV 之前
-  SERVERS = []; CURSRV = '';
+  SERVERS = []; SERVERS_ERROR = ''; CURSRV = '';
   localStorage.removeItem('spServer');
-  // 断开等于换服,归零走跟切服同一套。从前这里只清 DATA/STATS/RECYCLE 也不重画,
-  // 而 authenticate 在 loadAll 之前就解锁 —— 新远端的 bodies 慢一点,旧远端的界面会再露一次
-  resetServerContext();
+  // showLogin 会走完整的 resetServerContext；这里不再重复清理和重画一次。
   renderServerPicker('');
   document.getElementById('gatewayDisconnect').style.display = 'none';
   showLogin('');

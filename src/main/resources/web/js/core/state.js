@@ -4,7 +4,7 @@ let DATA = null, STATS = null, RECYCLE = null;
 /* 最近一次加载失败的原因(空串=没失败)。协议超限、网关挂了、token 失效都会走到这儿 ——
    从前 bodies 失败只弹个 toast 就完事、回收站失败干脆写一份空数据,于是"加载失败"被
    画成了"回收站为空"。用户看不出区别,只会反复刷新,把同样的压力再造一遍 */
-let BODIES_ERROR = '', RECYCLE_ERROR = '';
+let BODIES_ERROR = '', RECYCLE_ERROR = '', STATS_ERROR = '';
 let CLONE_SETS = new Map();
 let SEL = null, SELG = null, RSEL = null, RSELG = null, MESH_DATA = null, MESH_UUID = null, MESH_SOURCE = null;
 let VIEW = localStorage.getItem('spView') || 'dash';
@@ -16,14 +16,14 @@ let CHART = {from:0,to:0,span:300,live:true,preset:300,hoverIndex:-1,fetchTimer:
 let COPY_SCAN = null, COPY_UUID = null, COPY_VERSION = null, MANUAL_TAB = 'states';
 
 /* 集群:同机多服共用 apiPort,顶栏切换;CURSRV 为空表示"本机 HOST 自己" */
-let SERVERS = [], CURSRV = localStorage.getItem('spServer') || '';
+let SERVERS = [], SERVERS_ERROR = '', CURSRV = localStorage.getItem('spServer') || '';
 /* 服务器代次:每次切服 +1。所有异步加载在提交时捕获、落地时校验 —— 否则切到 B 之后
    A 的慢响应回来会直接盖掉界面,而 job seq 在每个服务端都从 1 开始,还会张冠李戴 */
 let SRVGEN = 0;
 function srvGen(){ return SRVGEN; }
 
 /* 在线玩家(传送玩家用):选中体时拉取,15s 节流;切服作废 */
-let PLAYERS = [], playersFetchedAt = 0;
+let PLAYERS = [], PLAYERS_ERROR = '', playersFetchedAt = 0;
 
 /* 暂停集合:以 /api/bodies 的 paused 为单一事实源,操作成功后本地乐观更新 */
 let PAUSED = new Set();

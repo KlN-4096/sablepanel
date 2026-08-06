@@ -6,8 +6,13 @@ function renderServerPicker(selfId){
   // 始终显示 —— 一眼知道自己正在看哪个服,是多服场景最容易搞错的事
   wrap.style.display = 'block';
   const cur = CURSRV || selfId;
-  document.getElementById('srvBtn').innerHTML =
-    `<span style="color:var(--acc)">◆</span> ${esc(cur)} <span style="opacity:.55">▾</span>`;
+  const button = document.getElementById('srvBtn');
+  const status = SERVERS_ERROR ? `${t('loadFail')}${SERVERS_ERROR}` : '';
+  button.classList.toggle('stale', !!status);
+  button.title = status;
+  button.innerHTML =
+    `<span style="color:var(--acc)">◆</span> ${esc(cur)} ${status ? '<span style="color:var(--warn)">⚠</span>' : ''}`
+      + ` <span style="opacity:.55">▾</span>`;
   // 服务器名是用户可填的任意字符串,别往 onclick 里拼 —— 走下标派发
   document.getElementById('srvPop').innerHTML = SERVERS.map((s, i) =>
     `<div class="srv ${s.id===cur?'on':''}" onclick="switchServer(SERVERS[${i}].id)">
@@ -39,13 +44,14 @@ function resetServerContext(){
   // 代次先自增:在途的 bodies/recycle/stats/players/jobs 响应从这一刻起全部作废,
   // 否则旧服的慢响应回来会直接盖掉新服的界面
   SRVGEN++;
+  cancelBodiesFlight();
   // 作业状态按服务器隔离:JobService 的 seq 在每个服务端都从 1 开始,不清就会张冠李戴
   stopBusyPolling();
   JOBS = null; JOBS_ERROR = ''; jobsFile = ''; jobsExpanded.clear();
   CONSISTENCY = null; CONSISTENCY_POLL_GEN++;   // 作废还在等新报告的那个循环
   // 换了一整套数据,旧的一律作废
   DATA = STATS = RECYCLE = null; SEL = SELG = RSEL = RSELG = null;
-  BODIES_ERROR = RECYCLE_ERROR = '';   // 旧服的失败提示不能挂在新服界面上
+  BODIES_ERROR = RECYCLE_ERROR = STATS_ERROR = '';   // 旧服的失败提示不能挂在新服界面上
   // 3D 预览也是服务器级的:只把 MESH_* 置空的话,场景里的几何体还在(GPU 资源不释放),
   // 全屏层还开着并显示旧服的体名,pvInfo 还停在上一次的文字
   if (fsMode) closePreviewFs();
@@ -54,6 +60,7 @@ function resetServerContext(){
   hideTip();
   document.getElementById('pvInfo').textContent = '';
   CLONE_SETS = new Map();
+  clearTimeout(CHART.fetchTimer); CHART.fetchTimer = null;
   // from/to 也要清:updateChartControls 优先用非零区间,不清的话页面写着"实时 5 分钟",
   // 日期输入框里还是上一个服的自定义区间
   CHART.live = true; CHART.span = 300; CHART.preset = 300; CHART.hoverIndex = -1;
@@ -66,7 +73,7 @@ function resetServerContext(){
   // 光清集合不够 —— renderRecycleDims 会先从 #rDims 里的 .rFDim 反向重建它,
   // 那批 DOM 由下面 renderAll() 的回收站空态清掉,顺序不能反
   EXPAND_STATE.clear(); R_DIM_DISABLED.clear(); tpFilledFor = null; loadFav();
-  PLAYERS = []; playersFetchedAt = 0; PAUSED = new Set(); FORCED = new Set();
+  PLAYERS = []; PLAYERS_ERROR = ''; playersFetchedAt = 0; PAUSED = new Set(); FORCED = new Set();
   document.getElementById('dbody').innerHTML =
     `<div id="detailEmpty"><span class="big">⬢</span><span>${t('pickBody')}</span></div>`;
   document.getElementById('ops').style.display = 'none';

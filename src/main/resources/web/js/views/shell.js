@@ -4,6 +4,17 @@
    前端测试沙箱只能整份排除它 —— 于是 renderAll() 在测试里一直是个空操作,
    任何"界面上应该出现 X"的断言都恒真。分发逻辑正好是最需要被测的那部分。 */
 /* ===================== 视图 ===================== */
+function scheduleSelectedPreview(view, uuid, groupId){
+  const gen=srvGen(), auth=authSeq;
+  setTimeout(()=>{
+    if (!authenticated||view!==VIEW||gen!==srvGen()||auth!==authSeq) return;
+    if (view==='recycle') {
+      if (RSEL?.uuid===uuid&&RSELG?.id===groupId) loadRecycleMesh(groupId,uuid);
+      return;
+    }
+    if (SEL?.uuid===uuid) loadMesh(uuid);
+  },30);
+}
 function setView(v, opts){
   if (!['dash','bodies','recycle','jobs'].includes(v)) v = 'dash';
   VIEW = v;
@@ -17,11 +28,11 @@ function setView(v, opts){
   const preview = document.getElementById('previewWrap');
   if (!fsMode && preview.parentElement !== previewHost) previewHost.appendChild(preview);
   const selectedPreview = v==='recycle' ? RSEL : v==='bodies' ? SEL : null;
-  const expectedSource = v==='recycle'&&RSELG ? `recycle:${RSELG.id}` : v==='bodies' ? 'body' : null;
+  const previewGroup = v==='recycle'&&RSELG ? RSELG.id : null;
+  const expectedSource = previewGroup ? `recycle:${previewGroup}` : v==='bodies' ? 'body' : null;
   if ((v==='recycle'||v==='bodies') && (!selectedPreview||MESH_UUID!==selectedPreview.uuid||MESH_SOURCE!==expectedSource)) {
     disposeMesh(); MESH_DATA=null; MESH_UUID=MESH_SOURCE=null; document.getElementById('pvInfo').textContent='';
-    if (selectedPreview) setTimeout(()=>v==='recycle'
-      ?loadRecycleMesh(RSELG.id,selectedPreview.uuid):loadMesh(selectedPreview.uuid),30);
+    if (selectedPreview) scheduleSelectedPreview(v,selectedPreview.uuid,previewGroup);
   }
   if (opts && opts.tab) { TAB = opts.tab; renderLimit = 400; }
   if (opts && opts.sortCost) { sortCfg = [{k:'cost',d:-1}]; saveSort(); renderSortRows(); }

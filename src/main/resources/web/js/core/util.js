@@ -65,7 +65,12 @@ function maybeWarnDefaultToken(serverData){
   if (!serverData.using_default_token || defaultTokenWarningShown
       || localStorage.getItem(DEFAULT_TOKEN_WARNING_KEY) === '1') return;
   defaultTokenWarningShown = true;
-  setTimeout(async()=>{ if (await askDefaultTokenWarning()) doChangeToken(); }, 0);
+  const auth = authSeq;
+  setTimeout(async()=>{
+    if (!authenticated || auth !== authSeq) return;
+    const change = await askDefaultTokenWarning();
+    if (change && authenticated && auth === authSeq) doChangeToken();
+  }, 0);
 }
 function modalConfirm(){ modalCb && modalCb(true); }
 function modalCancel(){ modalCb && modalCb(false); }
