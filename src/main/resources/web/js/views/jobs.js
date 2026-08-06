@@ -16,7 +16,15 @@ function loadJobs(){
     result => { JOBS = result; JOBS_ERROR = ''; renderJobs(); },
     message => { JOBS_ERROR = message; toast(t('loadFail') + message, 'bad'); renderJobs(); });
 }
-function setJobsFile(name){ jobsFile = name; jobsExpanded.clear(); loadJobs(); }
+/* 换文件先清空再拉。不清的话请求失败时 renderJobs 只在 JOBS===null 才显示错误,
+   旧文件的记录就原样留在页面上冒充新文件的内容,而且没有任何提示。
+   清了之后 JOBS 恒等于 jobsFile 的内容 —— 晚到的旧文件响应由 load() 的序号挡掉,
+   不需要再给数据带一个来源字段 */
+function setJobsFile(name){
+  jobsFile = name; jobsExpanded.clear();
+  JOBS = null; JOBS_ERROR = '';
+  renderJobs(); loadJobs();
+}
 function toggleJobsFailed(){ jobsOnlyFailed = !jobsOnlyFailed; renderJobs(); }
 function toggleJobRow(seq){
   jobsExpanded.has(seq) ? jobsExpanded.delete(seq) : jobsExpanded.add(seq);
@@ -61,15 +69,18 @@ function renderJobs(){
     document.getElementById('jobsList').innerHTML = JOBS_ERROR
       ? `<div id="listEmpty"><span class="big">⚠</span>${t('loadFail')}${esc(JOBS_ERROR)}</div>`
       : `<div id="listEmpty">${t('loading')}</div>`;
-    document.getElementById('jobsWorkers').textContent = '';
+    document.getElementById('jobsWorkers').innerHTML = '';
     return;
   }
   const files = JOBS.files || [];
   document.getElementById('jobsFileSel').innerHTML =
     `<option value="">${t('jobsCurrent')}</option>` + files.map(name =>
       `<option value="${esc(name)}" ${name === jobsFile ? 'selected' : ''}>${esc(name)}</option>`).join('');
-  document.getElementById('jobsWorkers').textContent =
-    JOBS.workers ? t('jobsWorkers')(JOBS.workers) : '';
+  // 同一个文件刷新失败:旧记录照常显示,但要说明它是上一次的结果
+  const workers = JOBS.workers ? t('jobsWorkers')(JOBS.workers) : '';
+  document.getElementById('jobsWorkers').innerHTML = JOBS_ERROR
+    ? `<span style="color:var(--bad)">${t('staleData')}${esc(JOBS_ERROR)}</span> ${esc(workers)}`
+    : esc(workers);
   document.getElementById('jobsFailedBtn').classList.toggle('on', jobsOnlyFailed);
 
   // 进行中的排在最前:正在跑的作业本来就是用户最想看的

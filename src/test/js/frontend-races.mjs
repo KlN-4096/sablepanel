@@ -822,6 +822,40 @@ test('LOAD-01 日志页加载失败要说明,不能停在"加载中…"', async 
     '从前只弹一下 toast,页面永远停在"加载中…"');
 });
 
+test('LOAD-01 切换日志文件失败,不能拿旧文件的内容冒充新文件', async () => {
+  let ok = true;
+  const { sandbox, state } = setup();
+  state.fetch = async () => ok
+    ? jsonResponse({ running: [], log: [{ seq: 1, op: 'OLD_FILE_ROW', state: 'done', queued_at: 0 }], files: [] })
+    : errorResponse(500);
+  evalIn(sandbox, "authenticated = true; VIEW = 'jobs'; toast = () => {}");
+  await evalIn(sandbox, 'loadJobs')();
+  assert.match(evalIn(sandbox, "document.getElementById('jobsList').innerHTML"), /OLD_FILE_ROW/);
+
+  ok = false;
+  await evalIn(sandbox, 'setJobsFile')('jobs-20260101-000000.jsonl');
+  await tick();
+  const list = evalIn(sandbox, "document.getElementById('jobsList').innerHTML");
+  assert.doesNotMatch(list, /OLD_FILE_ROW/, '换文件失败时旧文件的记录必须先消失');
+  assert.match(list, /加载失败/, '而且要说明失败了,不能只留一条 toast');
+});
+
+test('LOAD-01 同一个日志文件刷新失败保留旧记录,但标明是上一次的结果', async () => {
+  let ok = true;
+  const { sandbox, state } = setup();
+  state.fetch = async () => ok
+    ? jsonResponse({ running: [], log: [{ seq: 1, op: 'SAME_FILE_ROW', state: 'done', queued_at: 0 }],
+        files: [], workers: 4 })
+    : errorResponse(500);
+  evalIn(sandbox, "authenticated = true; VIEW = 'jobs'; toast = () => {}");
+  await evalIn(sandbox, 'loadJobs')();
+  ok = false;
+  await evalIn(sandbox, 'loadJobs')();
+  assert.match(evalIn(sandbox, "document.getElementById('jobsList').innerHTML"), /SAME_FILE_ROW/,
+    '同一个文件刷新失败不该把已有记录抹掉');
+  assert.match(evalIn(sandbox, "document.getElementById('jobsWorkers').innerHTML"), /上一次的结果/);
+});
+
 test('日志页和作业轮询各用各的请求序号,不能互相作废', async () => {
   const { sandbox, state } = setup();
   state.fetch = async url => url.includes('poll=1')
