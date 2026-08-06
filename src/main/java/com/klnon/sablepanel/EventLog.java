@@ -76,7 +76,12 @@ public final class EventLog {
      * 序号形式排在下一秒之前({@code -120000-1} < {@code -120001}),{@link #prune} 的字典序仍是时间序。
      */
     public static Path nextFile(Path dir, String prefix) throws IOException {
-        String stamp = prefix + TS.format(LocalDateTime.now());
+        return nextFile(dir, prefix, TS.format(LocalDateTime.now()));
+    }
+
+    /** 时间戳单独传:精确到秒的话,测试要靠"几次调用恰好落在同一秒"才成立,那是竞态不是用例 */
+    static Path nextFile(Path dir, String prefix, String time) throws IOException {
+        String stamp = prefix + time;
         Path file = dir.resolve(stamp + ".jsonl");
         for (int n = 1; Files.exists(file) && Files.size(file) >= MAX_LOG_BYTES; n++) {
             file = dir.resolve(stamp + "-" + n + ".jsonl");

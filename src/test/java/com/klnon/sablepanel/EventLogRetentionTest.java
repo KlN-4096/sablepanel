@@ -48,17 +48,20 @@ class EventLogRetentionTest {
      */
     @Test
     void nextFileSkipsFilesThatAreAlreadyFull() throws Exception {
-        Path first = EventLog.nextFile(this.dir, "events-");
+        // 时间戳写死:用 now() 的话,fill() 期间跨过一秒就会拿到新名字,
+        // 本该测的"同秒撞名"路径根本没走到 —— 这条用例从前 5 次里挂 1 次
+        String time = "20260101-120000";
+        Path first = EventLog.nextFile(this.dir, "events-", time);
         // 没写满就继续用它,不能每调用一次就开一个新分片
-        assertEquals(first, EventLog.nextFile(this.dir, "events-"));
+        assertEquals(first, EventLog.nextFile(this.dir, "events-", time));
 
         fill(first);
-        Path second = EventLog.nextFile(this.dir, "events-");
+        Path second = EventLog.nextFile(this.dir, "events-", time);
         assertNotEquals(first, second, "同秒内写满必须换名字,否则会追加回同一个文件");
         assertTrue(second.getFileName().toString().endsWith("-1.jsonl"), second.getFileName().toString());
 
         fill(second);
-        assertTrue(EventLog.nextFile(this.dir, "events-").getFileName().toString().endsWith("-2.jsonl"));
+        assertTrue(EventLog.nextFile(this.dir, "events-", time).getFileName().toString().endsWith("-2.jsonl"));
 
         // 分片名必须排在下一秒之前,prune 的字典序才仍然是时间序
         assertTrue("events-20260101-120000-1.jsonl".compareTo("events-20260101-120001.jsonl") < 0);
