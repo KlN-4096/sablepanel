@@ -240,6 +240,49 @@ class JobServiceTest {
     // ---------- 工具 ----------
 
     /** /api/jobs 里的活动作业清单;前端的忙碌徽章读的就是这一段 */
+    /**
+     * 每 2 秒一次的作业轮询不能拖着整份日志页。
+     * <p>
+     * 满载历史是 200 条,每条最多 500 个 targets 加一条 trail,约 3.8~8.2 MiB;而轮询要它
+     * 只为给本页提交过的作业取一次终态弹 toast。{@code files} 更是一次 {@code Files.list()},
+     * 每 2 秒扫一遍磁盘目录,只有日志页的下拉框需要。
+     */
+    @Test
+    void pollViewDropsWhatOnlyTheLogPageNeeds() throws Exception {
+        try (JobService jobs = new JobService(null)) {
+            List<UUID> targets = new ArrayList<>();
+            for (int i = 0; i < 500; i++) targets.add(UUID.randomUUID());
+            jobs.submit("批量删除", targets, "测试体", () -> {
+                JobService.phase("定位磁盘条目");
+                JobService.phase("写回收站");
+                return okTotal(3, 3);
+            });
+            assertTrue(waitUntil(() -> running(jobs).isEmpty(), 20_000), "作业应当结束并进入历史");
+
+            JsonObject full = jobs.view();
+            JsonObject poll = jobs.view(true);
+            JsonObject fullEntry = full.getAsJsonArray("log").get(0).getAsJsonObject();
+            JsonObject pollEntry = poll.getAsJsonArray("log").get(0).getAsJsonObject();
+
+            assertEquals(500, fullEntry.getAsJsonArray("targets").size(), "日志页展开行要看 targets");
+            assertTrue(fullEntry.getAsJsonArray("trail").size() >= 2, "日志页展开行要看 trail");
+            assertFalse(pollEntry.has("targets"), "轮询不看 targets");
+            assertFalse(pollEntry.has("trail"), "轮询不看 trail");
+            assertFalse(poll.has("files"), "files 是一次 Files.list(),每 2 秒扫一遍磁盘目录");
+
+            // 终态回报(reapFinishedJobs)要用的字段一个都不能少
+            for (String key : List.of("seq", "op", "state", "outcome", "name", "message")) {
+                assertTrue(pollEntry.has(key), "轮询版缺了终态回报要用的字段 " + key);
+            }
+            assertTrue(bytes(poll) * 8 < bytes(full),
+                    "轮询版必须小一个量级,实际 " + bytes(poll) + " vs " + bytes(full));
+        }
+    }
+
+    private static int bytes(JsonObject view) {
+        return view.toString().getBytes(StandardCharsets.UTF_8).length;
+    }
+
     private static JsonArray running(JobService jobs) {
         return jobs.view().getAsJsonArray("running");
     }

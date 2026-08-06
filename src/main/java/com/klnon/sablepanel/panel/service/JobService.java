@@ -279,21 +279,43 @@ public final class JobService implements AutoCloseable {
 
     /** 日志页:内存里的当前一轮(正在跑的 + 最近完成的) */
     public JsonObject view() {
+        return view(false);
+    }
+
+    /**
+     * {@code poll=true} 是面板每 2 秒那一次作业状态轮询要的份额。
+     * <p>
+     * {@code running} 照旧给全:行徽章要按 targets 展开。历史去掉 targets 和 trail ——
+     * 轮询拿它只为给"本页提交过的作业"取一次终态弹 toast,那只用到 seq/op/name/message/outcome。
+     * 满载的 200 条历史带上 targets(每条最多 500 个 uuid)和 trail 约 3.8~8.2 MiB,
+     * 去掉之后是几十 KB。日志文件清单也不列:{@link #logFiles()} 是一次 {@code Files.list()},
+     * 每 2 秒扫一遍磁盘目录,只有日志页需要它。
+     */
+    public JsonObject view(boolean poll) {
         JsonObject out = new JsonObject();
         JsonArray running = new JsonArray();
         JsonArray log = new JsonArray();
         synchronized (this.lock) {
             for (Job job : this.active.values()) running.add(toJson(job));
-            for (Job job : this.history) log.add(toJson(job));
+            for (Job job : this.history) log.add(poll ? toPollJson(job) : toJson(job));
         }
         out.add("running", running);
         out.add("log", log);
         out.addProperty("workers", this.maxWorkers);
+        if (poll) return out;
         out.addProperty("file", this.logFile == null ? "" : this.logFile.getFileName().toString());
         JsonArray files = new JsonArray();
         for (String name : logFiles()) files.add(name);
         out.add("files", files);
         return out;
+    }
+
+    /** 轮询版的历史条目:去掉只有日志页展开行才看的两个大字段 */
+    private static JsonObject toPollJson(Job job) {
+        JsonObject o = toJson(job);
+        o.remove("targets");
+        o.remove("trail");
+        return o;
     }
 
     private static JsonObject toJson(Job job) {

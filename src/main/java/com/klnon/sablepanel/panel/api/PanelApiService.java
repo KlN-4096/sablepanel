@@ -93,8 +93,9 @@ public final class PanelApiService {
             }
             case "/api/jobs" -> {
                 String file = request.query().get("file");
-                return PanelResponse.json(200,
-                        file == null || file.isBlank() ? this.jobs.view() : JobService.readLog(file), true);
+                if (file != null && !file.isBlank()) return PanelResponse.json(200, JobService.readLog(file), true);
+                // poll=1 是面板每 2 秒那一次:只要 running 和精简过的历史,不列日志目录
+                return PanelResponse.json(200, this.jobs.view(request.query().containsKey("poll")), true);
             }
             case "/api/players" -> {
                 return PanelResponse.json(200, this.ops.listPlayers(), false);

@@ -71,7 +71,7 @@ async function loadBodies() {
 async function pollJobs(){
   const gen = srvGen();
   let result;
-  try { result = await api('/api/jobs'); } catch(e){ return; }
+  try { result = await api('/api/jobs?poll=1'); } catch(e){ return; }
   if (gen !== srvGen() || !authenticated) return;
   const had = ACTIVE_JOBS.length;
   applyJobs(result.running || []);
