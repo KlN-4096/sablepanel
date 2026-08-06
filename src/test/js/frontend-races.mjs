@@ -1023,6 +1023,39 @@ test('LOAD-01 成员表加载失败要保留上一次的结果', async () => {
     '切服器不能因为一次失败就整个消失 —— 用户会以为集群掉了');
 });
 
+test('UI-03 PEER 消失时,一致性"已读"要记在消失的那个服头上', async () => {
+  // consistencyDismissKey() 读的是 CURSRV。从前 applyServersResponse 先把 CURSRV 清空,
+  // 之后 switchServer 才关弹层 —— B 的"已读"被记到 self 头上,B 回来时报告不再弹,
+  // 而本机的报告反倒被永久忽略
+  let hasB = true;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/servers')) {
+      return jsonResponse({ self: 'A', servers: hasB
+        ? [{ id: 'A', self: true }, { id: 'B' }] : [{ id: 'A', self: true }] });
+    }
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; toast = () => {}");
+  await evalIn(sandbox, 'loadServers')();
+  // 正在看 B,B 的一致性报告开着
+  evalIn(sandbox, `
+    CURSRV = 'B';
+    CONSISTENCY = { scan_id: 'B_SCAN', ready: true, issue_count: 1 };
+    document.getElementById('consistencyBack').style.display = 'flex';
+  `);
+
+  hasB = false;
+  await evalIn(sandbox, 'loadServers')();
+  await tick();
+  assert.equal(evalIn(sandbox, "localStorage.getItem('spConsistencyDismissed:B')"), 'B_SCAN',
+    '"已读"必须记在消失的那个服头上');
+  assert.equal(evalIn(sandbox, "localStorage.getItem('spConsistencyDismissed:self')"), null,
+    '不能记到本机头上 —— 那会让本机的报告被永久忽略');
+});
+
 test('UI-03 正在看的服务器从成员表消失时要走完整切服,不能只把 CURSRV 清空', async () => {
   // 从前只有 CURSRV = ''。代次不推进 → B 的在途响应当成本机的落地;localStorage 不改 →
   // 刷新页面又回到那个死服;DATA 还是 B 的,而后续请求已经打向本机
