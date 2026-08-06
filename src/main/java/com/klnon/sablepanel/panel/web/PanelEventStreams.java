@@ -19,7 +19,8 @@ import java.util.concurrent.atomic.AtomicReference;
 final class PanelEventStreams implements AutoCloseable {
     private static final int MAX_STREAMS = 8;
     private static final int HEARTBEAT_SECONDS = 15;
-    private static final byte[] READY = "retry: 2000\nevent: ready\ndata: {}\n\n"
+    // 开流/重连信号与失效通知共用 bodies 事件名:前端对两者的处理本来就相同(都触发一次刷新)
+    private static final byte[] READY = "retry: 2000\nevent: bodies\ndata: {}\n\n"
             .getBytes(StandardCharsets.UTF_8);
     private static final byte[] HEARTBEAT = ": keepalive\n\n".getBytes(StandardCharsets.UTF_8);
 

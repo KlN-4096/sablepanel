@@ -46,8 +46,25 @@ import java.util.concurrent.Callable;
 public final class ConsistencyService {
     private static final int MAX_ISSUES = 10_000;
     private static final DateTimeFormatter BACKUP_TIME = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS");
-    private static final Field LOADED_CHUNKS = loadedChunksField();
-    private static final Field DATA_FOLDER = dataFolderField();
+
+    /**
+     * 反射句柄按需初始化(holder 惯用法):不点一致性扫描就不付 setAccessible 的代价,
+     * 目标字段改名时也只砸扫描调用,不砸 ConsistencyService 类加载连带整个面板启动。
+     */
+    private static final class Reflect {
+        static final Field LOADED_CHUNKS = field(SubLevelHoldingChunkMap.class, "loadedHoldingChunks");
+        static final Field DATA_FOLDER = field(DimensionDataStorage.class, "dataFolder");
+
+        private static Field field(Class<?> type, String name) {
+            try {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                return field;
+            } catch (Exception error) {
+                throw new ExceptionInInitializerError(error);
+            }
+        }
+    }
 
     private final MinecraftServer server;
     private volatile Report report = Report.pending();
@@ -314,7 +331,7 @@ public final class ConsistencyService {
             if (container == null) throw new IllegalStateException("修复维度不可用: " + key.dimension);
             SubLevelHoldingChunkMap map = container.getHoldingChunkMap();
             ChunkPos pos = new ChunkPos(key.x, key.z);
-            Map<Long, SubLevelHoldingChunk> loaded = (Map<Long, SubLevelHoldingChunk>) LOADED_CHUNKS.get(map);
+            Map<Long, SubLevelHoldingChunk> loaded = (Map<Long, SubLevelHoldingChunk>) Reflect.LOADED_CHUNKS.get(map);
             SubLevelHoldingChunk chunk = loaded.get(pos.toLong());
             if (chunk == null) chunk = map.getStorage().attemptLoadHoldingChunk(pos);
             if (chunk == null) throw new IllegalStateException("holding 元数据已变化: " + pos);
@@ -356,29 +373,9 @@ public final class ConsistencyService {
         return MainThread.on(this.server, 60, task);
     }
 
-    private static Field loadedChunksField() {
-        try {
-            Field field = SubLevelHoldingChunkMap.class.getDeclaredField("loadedHoldingChunks");
-            field.setAccessible(true);
-            return field;
-        } catch (Exception error) {
-            throw new ExceptionInInitializerError(error);
-        }
-    }
-
-    private static Field dataFolderField() {
-        try {
-            Field field = DimensionDataStorage.class.getDeclaredField("dataFolder");
-            field.setAccessible(true);
-            return field;
-        } catch (Exception error) {
-            throw new ExceptionInInitializerError(error);
-        }
-    }
-
     private static Path ticketFile(ServerLevel level) throws IOException {
         try {
-            java.io.File folder = (java.io.File) DATA_FOLDER.get(level.getChunkSource().getDataStorage());
+            java.io.File folder = (java.io.File) Reflect.DATA_FOLDER.get(level.getChunkSource().getDataStorage());
             return folder.toPath().resolve("sable_sub_level_force_load_tickets.dat");
         } catch (ReflectiveOperationException error) {
             throw new IOException("无法定位 Sable 常驻票文件", error);

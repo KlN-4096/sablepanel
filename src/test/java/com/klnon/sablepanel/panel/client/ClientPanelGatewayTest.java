@@ -88,7 +88,7 @@ class ClientPanelGatewayTest {
             assertEquals(200, eventResponse.statusCode());
             try (InputStream input = eventResponse.body();
                  BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
-                assertTrue(readEvent(reader, "ready").contains("event: ready"));
+                assertTrue(readEvent(reader, "bodies").contains("event: bodies"));
                 CompletableFuture<String> pushed = CompletableFuture.supplyAsync(() -> readEvent(reader, "bodies"));
                 api.publishEvent(new PanelEvent("host", 12));
                 String event = pushed.get(5, TimeUnit.SECONDS);
@@ -104,7 +104,7 @@ class ClientPanelGatewayTest {
                 assertEquals(200, nextResponse.statusCode());
                 try (InputStream nextInput = nextResponse.body();
                      BufferedReader nextReader = new BufferedReader(new InputStreamReader(nextInput, StandardCharsets.UTF_8))) {
-                    assertTrue(readEvent(nextReader, "ready").contains("event: ready"));
+                    assertTrue(readEvent(nextReader, "bodies").contains("event: bodies"));
                     assertNull(awaitClosed(reader));
                     CompletableFuture<String> nextPushed = CompletableFuture.supplyAsync(
                             () -> readEvent(nextReader, "bodies"));

@@ -70,7 +70,7 @@ async function readEventStream(stream, generation){
 function handleEventBlock(block){
   const eventLine = block.split('\n').find(line => line.startsWith('event:'));
   const event = eventLine ? eventLine.slice(6).trim() : '';
-  if (event === 'bodies' || event === 'ready') {
+  if (event === 'bodies') {
     scheduleEventRefresh();
   }
 }

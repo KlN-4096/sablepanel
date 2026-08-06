@@ -86,42 +86,50 @@ public final class PanelConfig {
         Path file = file();
         Gson gson = new GsonBuilder().setPrettyPrinting().create();
         try {
-            PanelConfig cfg = null;
-            if (Files.isRegularFile(file)) {
-                String raw = Files.readString(file);
-                var source = com.google.gson.JsonParser.parseString(raw).getAsJsonObject();
-                cfg = gson.fromJson(source, PanelConfig.class);
-                if (cfg != null) {
-                    if (cfg.token == null || cfg.token.isBlank()) cfg.token = DEFAULT_TOKEN;
-                    if (cfg.webBind == null || cfg.webBind.isBlank()) cfg.webBind = "0.0.0.0";
-                    if (cfg.apiBind == null || cfg.apiBind.isBlank()) cfg.apiBind = "0.0.0.0";
-                    if (cfg.webPort < 1 || cfg.webPort > 65535) cfg.webPort = 25580;
-                    if (cfg.apiPort < 1 || cfg.apiPort > 65535) cfg.apiPort = 25581;
-                    if (cfg.recycleMaxFiles < 1 || cfg.recycleMaxFiles > MAX_RECYCLE_FILES) {
-                        cfg.recycleMaxFiles = DEFAULT_RECYCLE_MAX_FILES;
-                    }
-                    // 上下阈值反了会让两个筛选同时命中所有体,直接退回默认
-                    if (cfg.voidBelowY >= cfg.skyAboveY) {
-                        cfg.voidBelowY = -64;
-                        cfg.skyAboveY = 1000;
-                    }
-                    // 旧版本的配置文件缺新字段(会取默认值),补写回去,服主才看得见能调什么
-                    String full = gson.toJson(cfg);
-                    if (!full.equals(raw)) Files.writeString(file, full);
-                }
-            }
-            if (cfg == null) {
-                cfg = new PanelConfig();
-                Files.createDirectories(file.getParent());
-                Files.writeString(file, gson.toJson(cfg));
-                SablePanel.LOGGER.info("sablepanel: generated panel config {}", file);
-            }
-            return cfg;
+            PanelConfig cfg = Files.isRegularFile(file) ? readExisting(file, gson) : null;
+            return cfg != null ? cfg : writeFresh(file, gson);
         } catch (Exception e) {
             SablePanel.LOGGER.error("sablepanel: failed to load panel config, panel disabled", e);
             PanelConfig cfg = new PanelConfig();
             cfg.enabled = false;
             return cfg;
+        }
+    }
+
+    private static PanelConfig readExisting(Path file, Gson gson) throws java.io.IOException {
+        String raw = Files.readString(file);
+        var source = com.google.gson.JsonParser.parseString(raw).getAsJsonObject();
+        PanelConfig cfg = gson.fromJson(source, PanelConfig.class);
+        if (cfg == null) return null;
+        cfg.clampInvalid();
+        // 旧版本的配置文件缺新字段(会取默认值),补写回去,服主才看得见能调什么
+        String full = gson.toJson(cfg);
+        if (!full.equals(raw)) Files.writeString(file, full);
+        return cfg;
+    }
+
+    private static PanelConfig writeFresh(Path file, Gson gson) throws java.io.IOException {
+        PanelConfig cfg = new PanelConfig();
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, gson.toJson(cfg));
+        SablePanel.LOGGER.info("sablepanel: generated panel config {}", file);
+        return cfg;
+    }
+
+    /** 非法值就地钳回默认:一个写坏的字段不该拖垮整个面板 */
+    private void clampInvalid() {
+        if (this.token == null || this.token.isBlank()) this.token = DEFAULT_TOKEN;
+        if (this.webBind == null || this.webBind.isBlank()) this.webBind = "0.0.0.0";
+        if (this.apiBind == null || this.apiBind.isBlank()) this.apiBind = "0.0.0.0";
+        if (this.webPort < 1 || this.webPort > 65535) this.webPort = 25580;
+        if (this.apiPort < 1 || this.apiPort > 65535) this.apiPort = 25581;
+        if (this.recycleMaxFiles < 1 || this.recycleMaxFiles > MAX_RECYCLE_FILES) {
+            this.recycleMaxFiles = DEFAULT_RECYCLE_MAX_FILES;
+        }
+        // 上下阈值反了会让两个筛选同时命中所有体,直接退回默认
+        if (this.voidBelowY >= this.skyAboveY) {
+            this.voidBelowY = -64;
+            this.skyAboveY = 1000;
         }
     }
 }
