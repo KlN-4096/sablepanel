@@ -41,6 +41,29 @@ function setView(v, opts){
   if (v === 'bodies' || v === 'recycle') setTimeout(resizeGL, 30);
   if (authenticated && (v === 'dash' || v === 'recycle') && RECYCLE === null) loadRecycle();
 }
+/* STATS 派生的全部区域,一处写完:顶栏两个数字、迷你图、统计弹层、图表控件。
+   这些从前只在 loadStats 成功时更新,切服清空 STATS 时没有任何人重画 —— 顶栏一直挂着
+   上一个服的数字,统计弹层里还是上一个服的体,新服的统计请求要是失败就永远挂着。
+   顶栏和弹层在所有视图共享,所以这里不看 VIEW。 */
+function renderStats(){
+  const status = statsErrorLabel();
+  staleMark(document.getElementById('loadPill'), status);
+  document.getElementById('pillCost').textContent =
+    STATS ? (STATS.body_cost_total ?? 0).toFixed(2) : '--';
+  document.getElementById('pillLoaded').textContent =
+    STATS ? Object.values(STATS.loaded || {}).reduce((a, b) => a + b, 0) : '--';
+  updateChartControls();
+  drawPhysChart(document.getElementById('pillSpark'), false);
+  renderStatPop();
+  // 悬浮提示只在鼠标移出时隐藏。切服清空 STATS 之后图是空的,上一个服的 tooltip
+  // 还能挂在上面 —— 没数据就没有可提示的东西
+  if (!STATS) {
+    const tip = document.getElementById('chartTip');
+    tip.style.display = 'none';
+    tip.innerHTML = '';
+    CHART.hoverIndex = -1;
+  }
+}
 /* 分发必须是全函数:每个视图都要能从 (数据|null, 错误|'') 画出东西。
    从前这里挡着一句 if (!DATA) return —— 首屏加载失败时默认的总览页就是一片空白,
    用户只看到一闪而过的 toast,唯一的反应是继续刷新,把同样的压力再造一遍 */

@@ -15,3 +15,5 @@ function renderManual(){
   document.getElementById('manualContent').innerHTML = `<h3>${t(page.label)}</h3>` +
     page.sections.map(section=>`<h4>${section.h}</h4>${section.body}`).join('');
 }
+/* 弹层遮罩点击收起:监听器归弹层所有者(自 preview.js 挪入) */
+document.getElementById('manualBack').addEventListener('mousedown',event=>{ if(event.target.id==='manualBack') closeManual(); });

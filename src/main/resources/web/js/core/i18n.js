@@ -1,5 +1,5 @@
 'use strict';
-/* 中文词典:I18N / MANUAL 文案、t()、applyI18n(fmt 为词条函数所依赖,随词典同文件) */
+/* 中文词典:I18N / MANUAL 文案、t()、applyI18n(只扫 data-i18n;fmt 为词条函数所依赖,随词典同文件) */
 /* ===================== i18n ===================== */
 const I18N = {
   zh: {
@@ -203,14 +203,9 @@ function fmtBytes(value){
   while(size>=1024&&unit<units.length-1){ size/=1024; unit++; }
   return `${size.toFixed(unit===0||size>=100?0:size>=10?1:2)} ${units[unit]}`;
 }
+/* 一次性启动文案:只扫两类 data-i18n。视图自己的文案由各 render* 产生,这里不再反向调视图 ——
+   从前挂在这儿的那串调用要么与启动序列重复(renderSortRows/图表控件),要么是关着的弹层空操作 */
 function applyI18n(){
   document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
-  document.getElementById('physChartTitle').textContent = t('physChartT');
-  renderChartPresets();
-  updateChartControls();
-  if (document.getElementById('manualBack').style.display === 'flex') renderManual();
-  if (COPY_SCAN && document.getElementById('copyBack').style.display === 'flex') renderDedupe(COPY_SCAN);
-  if (CONSISTENCY && document.getElementById('consistencyBack').style.display === 'flex') renderConsistency();
-  renderSortRows();
 }

@@ -178,3 +178,25 @@ function clearRecycleDetail(){
   document.getElementById('rOps').style.display='none';
   if (VIEW==='recycle') { disposeMesh(); MESH_DATA=MESH_UUID=MESH_SOURCE=null; document.getElementById('pvInfo').textContent=''; }
 }
+/* 每页的调色板是这一页自己的,索引也只对这一页有效 —— 追加时把新页的 blk 重映射到合并后的表 */
+function mergePalette(store, palette, appended){
+  const index = new Map(store.block_palette.map((item,i)=>[item.id,i]));
+  const remap = palette.map(item => {
+    if (!index.has(item.id)) { index.set(item.id, store.block_palette.length); store.block_palette.push(item); }
+    return index.get(item.id);
+  });
+  appended.forEach(group => (group.bodies||[]).forEach(body => {
+    body.blk = (body.blk || []).map(i => remap[i] ?? 0);
+  }));
+}
+/* 维度筛选按已加载的组重建,保留用户已经取消勾选的项 */
+function renderRecycleDims(){
+  const host = document.getElementById('rDims');
+  host.querySelectorAll('.rFDim').forEach(input => input.checked
+    ? R_DIM_DISABLED.delete(input.value) : R_DIM_DISABLED.add(input.value));
+  const dims = new Set();
+  // 摘要组的 bodies 是空的,不能直接 forEach
+  RECYCLE.groups.forEach(g=>(g.bodies||[]).forEach(b=>dims.add(b.dim || 'minecraft:overworld')));
+  host.innerHTML = [...dims].map(d=>
+    `<label><input type="checkbox" class="rFDim" value="${esc(d)}" ${R_DIM_DISABLED.has(d)?'':'checked'} onchange="renderRecycle()"> ${esc(d.replace('minecraft:',''))}</label>`).join('');
+}

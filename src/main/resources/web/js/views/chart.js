@@ -11,31 +11,8 @@ function renderChartPresets(){
   box.innerHTML = CHART_PRESETS.map(seconds=>
     `<button class="${CHART.span===seconds?'on':''}" onclick="setChartPreset(${seconds})">${chartPresetLabel(seconds)}</button>`).join('');
 }
-/* STATS 派生的全部区域,一处写完:顶栏两个数字、迷你图、统计弹层、图表控件。
-   这些从前只在 loadStats 成功时更新,切服清空 STATS 时没有任何人重画 —— 顶栏一直挂着
-   上一个服的数字,统计弹层里还是上一个服的体,新服的统计请求要是失败就永远挂着。
-   顶栏和弹层在所有视图共享,所以这里不看 VIEW。 */
 function statsErrorLabel(){
   return staleLabel(STATS_ERROR, !!STATS);
-}
-function renderStats(){
-  const status = statsErrorLabel();
-  staleMark(document.getElementById('loadPill'), status);
-  document.getElementById('pillCost').textContent =
-    STATS ? (STATS.body_cost_total ?? 0).toFixed(2) : '--';
-  document.getElementById('pillLoaded').textContent =
-    STATS ? Object.values(STATS.loaded || {}).reduce((a, b) => a + b, 0) : '--';
-  updateChartControls();
-  drawPhysChart(document.getElementById('pillSpark'), false);
-  renderStatPop();
-  // 悬浮提示只在鼠标移出时隐藏。切服清空 STATS 之后图是空的,上一个服的 tooltip
-  // 还能挂在上面 —— 没数据就没有可提示的东西
-  if (!STATS) {
-    const tip = document.getElementById('chartTip');
-    tip.style.display = 'none';
-    tip.innerHTML = '';
-    CHART.hoverIndex = -1;
-  }
 }
 function updateChartControls(){
   renderChartPresets();

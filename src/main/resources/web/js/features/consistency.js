@@ -104,3 +104,5 @@ async function waitForConsistencyChange(previous,open){
     } catch(e){ /* 同上:这是作业跑完之后等新报告,中途一次抖动不该让人白点一次扫描 */ }
   }
 }
+/* 弹层遮罩点击收起:监听器归弹层所有者(自 preview.js 挪入) */
+document.getElementById('consistencyBack').addEventListener('mousedown',event=>{ if(event.target.id==='consistencyBack') closeConsistency(); });

@@ -168,3 +168,5 @@ function toggleStatPop(){
   const pop = document.getElementById('statPop');
   pop.style.display = pop.style.display === 'block' ? 'none' : 'block';
 }
+/* 总览随窗口尺寸重排:监听器归视图所有者(自 preview.js 挪入) */
+window.addEventListener('resize', () => { if (VIEW==='dash') renderDash(); });

@@ -135,3 +135,5 @@ async function confirmDedupe(){
     {method:'POST',body:JSON.stringify({version:selected})},t('copyResolveOp'));
   if (accepted) closeDedupe();
 }
+/* 弹层遮罩点击收起:监听器归弹层所有者(自 preview.js 挪入) */
+document.getElementById('copyBack').addEventListener('mousedown',event=>{ if(event.target.id==='copyBack') closeDedupe(); });

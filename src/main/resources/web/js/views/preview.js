@@ -215,7 +215,4 @@ function closePreviewFs(){
 }
 document.getElementById('fsOpen').addEventListener('click', openPreviewFs);
 document.getElementById('fsClose').addEventListener('click', closePreviewFs);
-document.getElementById('manualBack').addEventListener('mousedown',event=>{ if(event.target.id==='manualBack') closeManual(); });
-document.getElementById('copyBack').addEventListener('mousedown',event=>{ if(event.target.id==='copyBack') closeDedupe(); });
-document.getElementById('consistencyBack').addEventListener('mousedown',event=>{ if(event.target.id==='consistencyBack') closeConsistency(); });
-window.addEventListener('resize', () => { resizeGL(); if (VIEW==='dash') renderDash(); });
+window.addEventListener('resize', resizeGL);
