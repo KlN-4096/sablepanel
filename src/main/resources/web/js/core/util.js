@@ -10,7 +10,12 @@ function toast(msg, cls) {
 }
 function esc(s){ return s ? String(s).replace(/[<>&"]/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])) : ''; }
 let modalCb = null;
+/* 确认框也属于服务器上下文。调用方普遍是"先把 uuid/组 id 攒进闭包,再 await 确认"
+   (doDeleteSelected、confirmRestore、confirmPurge、doDelete……),而 api() 是在确认之后
+   才按当时的 CURSRV 拼 server= 参数 —— 中途切了服,攒着的就是旧服的 uuid,发到新服上执行。
+   两服由同一份存档复制而来时(同机多服的常见做法)uuid 还会真的命中,那就是误删。 */
 function askModal(title, msg, needInput, expected){
+  const gen = srvGen(), auth = authSeq;
   return new Promise(res => {
     document.getElementById('modalTitle').textContent = title;
     document.getElementById('modalMsg').textContent = msg;
@@ -23,7 +28,10 @@ function askModal(title, msg, needInput, expected){
     document.getElementById('modalBack').style.display = 'flex';
     if (needInput) setTimeout(()=>inp.focus(), 50);
     modalCb = (ok) => {
+      // 用过就作废:不清的话,后面任何一次 modalCancel() 都会再打到这个已经结束的框上
+      modalCb = null;
       document.getElementById('modalBack').style.display = 'none';
+      if (gen !== srvGen() || auth !== authSeq) return res(false);
       if (!ok) return res(false);
       if (needInput && expected !== undefined && inp.value.trim() !== String(expected)) {
         toast(t('confirmMismatch'), 'bad');
@@ -46,6 +54,7 @@ function askDefaultTokenWarning(){
     document.getElementById('modalConfirmBtn').textContent = t('changeNow');
     document.getElementById('modalBack').style.display = 'flex';
     modalCb = (ok) => {
+      modalCb = null;
       document.getElementById('modalBack').style.display = 'none';
       if (check.checked) localStorage.setItem(DEFAULT_TOKEN_WARNING_KEY, '1');
       res(ok);

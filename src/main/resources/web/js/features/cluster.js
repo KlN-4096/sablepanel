@@ -18,13 +18,18 @@ function toggleSrvPop(){
   const p = document.getElementById('srvPop');
   p.style.display = p.style.display === 'block' ? 'none' : 'block';
 }
-/* 关掉属于当前服务器的弹层。必须在改 CURSRV 之前调:closeConsistency 会按
-   consistencyDismissKey() 记"已读",而那个键是按服务器隔离的 —— 改完再关就记到新服头上了 */
+/* 关掉属于当前服务器的弹层。它们显示的、以及攒在闭包里的,都是旧服的东西,
+   所以要在改 CURSRV 之前调 —— 弹层里的内容跟界面上的服务器名对不上是最轻的后果。 */
 function closeServerModals(){
-  // 只在真的开着时关。closeDedupe 会把预览恢复成 SEL 的 mesh —— 弹层没开时白调一次,
-  // 等于对着马上要作废的旧服再发一个 mesh 请求
+  // 通用确认框最要紧:doDeleteSelected / confirmRestore / confirmPurge 都是先把 uuid
+  // 攒进闭包再 await 确认,而 server= 参数是确认之后才按 CURSRV 拼的。不取消的话,
+  // 那个 Promise 会一直挂着,用户回头一点"确定",旧服的 uuid 就打到新服上了
+  modalCancel();
+  // 下面两个只在真的开着时关。closeDedupe 会把预览恢复成 SEL 的 mesh —— 弹层没开时
+  // 白调一次,等于对着马上要作废的旧服再发一个 mesh 请求
   if (document.getElementById('copyBack').style.display==='flex') closeDedupe(false);
-  if (document.getElementById('consistencyBack').style.display==='flex') closeConsistency();
+  // 自动关闭不是用户读过:记了"已读",这个服回来时同一份报告就再也不提醒了
+  if (document.getElementById('consistencyBack').style.display==='flex') closeConsistency(false);
 }
 /* 服务器上下文归零。切服和断开远端共用 —— 两个入口各自手写一份的话总有一份漏:
    断开远端从前只清 DATA/STATS/RECYCLE,而 authenticate 在 loadAll 之前就解锁,

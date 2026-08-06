@@ -36,9 +36,8 @@ function loadServers(){
     // 脏状态,紧接着的 loadAll 会正常加载本机 —— 在那里切一次只会白跑一遍还弹错提示
     const gone = CURSRV && !(r.servers || []).some(s => s.id === CURSRV);
     const lost = CURSRV;
-    // 关弹层必须早于任何人改 CURSRV。applyServersResponse 紧接着就会把它清空,
-    // 而 closeConsistency 按 consistencyDismissKey() 记"已读" —— 那个键读的就是 CURSRV,
-    // 晚一步就把 B 的"已读"记到本机头上了
+    // 关弹层必须早于任何人改 CURSRV:applyServersResponse 紧接着就会把它清空,而弹层
+    // 里攒着的是那个已经消失的服的 uuid,晚一步取消就等于把它们交给本机去执行
     if (gone) closeServerModals();
     applyServersResponse(r);
     maybeWarnDefaultToken(r);

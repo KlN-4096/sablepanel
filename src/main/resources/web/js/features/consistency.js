@@ -25,9 +25,12 @@ async function openConsistency(report){
   document.getElementById('consistencyBack').style.display='flex';
   renderConsistency();
 }
-function closeConsistency(){
+/* dismiss=false 是"替用户收起来",不是"用户读过了"。
+   记了"已读"的后果是永久的:scan_id 只在重新扫描时才变,所以那个服恢复回来之后,
+   同一份报告再也不会弹 —— 而用户从头到尾没看见过它。切服/断开走的就是这条路。 */
+function closeConsistency(dismiss = true){
   document.getElementById('consistencyBack').style.display='none';
-  if (CONSISTENCY&&CONSISTENCY.scan_id) localStorage.setItem(consistencyDismissKey(),CONSISTENCY.scan_id);
+  if (dismiss&&CONSISTENCY&&CONSISTENCY.scan_id) localStorage.setItem(consistencyDismissKey(),CONSISTENCY.scan_id);
 }
 function renderConsistency(){
   const report=CONSISTENCY||{};

@@ -97,6 +97,7 @@ function makeContext(state) {
   // 只桩掉真的需要 WebGL / canvas 2d 的入口,其余渲染代码照常跑(顺带当成冒烟测试)。
   // 确认框要等用户点按钮才 resolve,这里一律当成"已确认" —— 被测的是确认之后的行为。
   vm.runInContext(`
+    realAskModal = askModal;   // 确认框本身要被测(切服要作废它),留一个真身
     askModal = () => Promise.resolve(true);
     initGL = () => {}; resizeGL = () => {}; loop = () => {}; disposeMesh = () => {};
     drawPhysChart = () => {}; renderComposition = () => {};
@@ -286,6 +287,43 @@ test('UI-03 切服后旧服的 recycle/jobs 慢响应都不落地', async () => 
   const jobs = evalIn(sandbox, 'JOBS');
   assert.ok(!jobs || jobs.marker !== 'B', '旧服的作业日志不得留在新服标题下');
   assert.equal(evalIn(sandbox, 'CURSRV'), '');
+});
+
+test('UI-03 切服要作废旧服的确认框,晚点的"确定"不能打到新服上', async () => {
+  // 破坏性操作一律是"先把 uuid 攒进闭包,再 await 确认",而 server= 参数是确认之后
+  // 才按 CURSRV 拼的。B 消失自动退回本机、用户回头点"确定",发出的就是一条不带
+  // server=B、却带着 B 的 uuid 的 batch_delete —— 两个服从同一份存档复制出来时会真的删掉东西
+  const sent = [];
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    sent.push(url);
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ self: 'A', servers: [{ id: 'A', self: true }, { id: 'B' }], running: [], log: [] });
+  };
+  evalIn(sandbox, `
+    authenticated = true; toast = () => {}; askModal = realAskModal;
+    SERVERS = [{id:'A',self:true},{id:'B'}]; CURSRV = 'B';
+    SELECTED = new Set(['u-of-B']);
+    BODY_BY_UUID = new Map([['u-of-B', {b:{uuid:'u-of-B',blocks:1},
+      g:{gid:'g1',members:1,blocks:1,bodies:[{uuid:'u-of-B'}]}}]]);
+  `);
+  const pending = evalIn(sandbox, 'doDeleteSelected')();   // 确认框弹出来,一直挂着
+  await tick();
+  await evalIn(sandbox, 'switchServer')('A');
+  assert.equal(evalIn(sandbox, "document.getElementById('modalBack').style.display"), 'none',
+    '框本身要收掉:它问的是"确定删除 B 上的 1 个体吗",而界面已经是本机了');
+  evalIn(sandbox, 'modalConfirm()');                       // 用户回头点了"确定"
+  await pending;
+  await tick();
+  assert.ok(!sent.some(url => url.startsWith('/api/ops/batch_delete')),
+    '切服之后这个确认框只能作废,不能改成对新服执行');
+
+  // 第二层:将来新增的切服入口忘了关弹层时,askModal 自己也要认得代次
+  const late = evalIn(sandbox, 'realAskModal')('t', 'm', false);
+  evalIn(sandbox, 'SRVGEN++');
+  evalIn(sandbox, 'modalConfirm()');
+  assert.equal(await late, false, '代次变了就只能是"取消"');
 });
 
 test('UI-03 切服要收掉 3D 预览:关全屏、释放网格、不再请求旧服的 mesh', async () => {
@@ -1023,10 +1061,11 @@ test('LOAD-01 成员表加载失败要保留上一次的结果', async () => {
     '切服器不能因为一次失败就整个消失 —— 用户会以为集群掉了');
 });
 
-test('UI-03 PEER 消失时,一致性"已读"要记在消失的那个服头上', async () => {
-  // consistencyDismissKey() 读的是 CURSRV。从前 applyServersResponse 先把 CURSRV 清空,
-  // 之后 switchServer 才关弹层 —— B 的"已读"被记到 self 头上,B 回来时报告不再弹,
-  // 而本机的报告反倒被永久忽略
+test('UI-03 PEER 消失时替用户收起的一致性报告,不算用户读过', async () => {
+  // "已读"是永久的:scan_id 只在重新扫描时才变。B 停了服自动收起来也记一笔的话,
+  // B 回来之后同一份报告再也不会弹 —— 而用户从头到尾没看见过它。
+  // 更早的一版还把这一笔记到了 self 头上(applyServersResponse 先清了 CURSRV),
+  // 那等于连本机的报告一起永久忽略,所以两个键都要判
   let hasB = true;
   const { sandbox, state } = setup();
   state.fetch = async (url) => {
@@ -1050,10 +1089,19 @@ test('UI-03 PEER 消失时,一致性"已读"要记在消失的那个服头上', 
   hasB = false;
   await evalIn(sandbox, 'loadServers')();
   await tick();
-  assert.equal(evalIn(sandbox, "localStorage.getItem('spConsistencyDismissed:B')"), 'B_SCAN',
-    '"已读"必须记在消失的那个服头上');
+  assert.equal(evalIn(sandbox, "document.getElementById('consistencyBack').style.display"), 'none',
+    '弹层还是要收起来:它显示的是一个已经不在的服务器');
+  assert.equal(evalIn(sandbox, "localStorage.getItem('spConsistencyDismissed:B')"), null,
+    '替用户收起来不等于用户读过 —— 记了这一笔,B 回来时同一份报告就再也不提醒了');
   assert.equal(evalIn(sandbox, "localStorage.getItem('spConsistencyDismissed:self')"), null,
-    '不能记到本机头上 —— 那会让本机的报告被永久忽略');
+    '更不能记到本机头上 —— 那会让本机的报告被永久忽略');
+
+  // 用户自己点关闭才算读过
+  evalIn(sandbox, `
+    CURSRV = ''; CONSISTENCY = { scan_id: 'SELF_SCAN', ready: true, issue_count: 1 };
+    closeConsistency();
+  `);
+  assert.equal(evalIn(sandbox, "localStorage.getItem('spConsistencyDismissed:self')"), 'SELF_SCAN');
 });
 
 test('UI-03 正在看的服务器从成员表消失时要走完整切服,不能只把 CURSRV 清空', async () => {
