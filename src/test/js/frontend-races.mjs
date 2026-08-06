@@ -471,6 +471,26 @@ test('PERF-04 轮询失败一次不能让 2 秒轮询就此停摆', async () => 
   assert.equal(evalIn(sandbox, 'ACTIVE_JOBS').length, 1, '恢复之后要能看到作业已经在跑');
 });
 
+test('PERF-04 作业在首轮轮询之前就结束时也要刷新一次 bodies', async () => {
+  // 快作业赶在第一轮 /api/jobs 之前跑完:ACTIVE_JOBS 从来没有过它,had 是 0。
+  // 从前只看"从有到无",于是完成 toast 弹了、列表却停在旧值,只能等 60 秒兜底
+  let bodies = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/jobs')) {
+      return jsonResponse({ running: [], log: [
+        { seq: 7, op: '删除', state: 'done', outcome: 'ok', queued_at: 0, message: '1/1' }] });
+    }
+    if (url.startsWith('/api/bodies')) { bodies++; return bodiesResponse(); }
+    return jsonResponse({});
+  };
+  evalIn(sandbox, "authenticated = true; JOB_WATCH.set(7, '删除'); __toasts = []; toast = m => __toasts.push(m)");
+  await evalIn(sandbox, 'pollJobs')();
+  await tick();
+  assert.equal(evalIn(sandbox, '__toasts').length, 1, '完成 toast 本来就弹得出来');
+  assert.equal(bodies, 1, '终态既然消费掉了,列表也必须跟着刷一次');
+});
+
 test('PERF-03 慢响应期间不重叠请求,期间的请求合并成完事后再跑一次', async () => {
   const slow = deferred();
   let calls = 0, live = 0, maxLive = 0;
@@ -545,7 +565,9 @@ test('PERF-03/UI-01 作业跑完时完成 toast 不会被轮询自己清掉', as
   await evalIn(sandbox, 'pollJobs')();
   await tick();
   toasts.push(...evalIn(sandbox, '__toasts'));
-  assert.equal(bodiesCalls, 0, '作业已经跑完但本来就没在跑,不该白拉一次快照');
+  // 这条从前断言的是 0("本来就没在跑就别刷") —— 那正是 bug:作业真的跑完了,
+  // 列表还停在提交前的状态。PERF-04 要省的是每 2 秒一次的全量快照,不是完成时的那一次
+  assert.equal(bodiesCalls, 1, '终态被消费掉了,列表要跟着刷一次');
   assert.equal(toasts.length, 1, '作业结束必须弹一次终态 toast');
   assert.match(toasts[0][0], /批量删除/);
   assert.match(toasts[0][0], /失败/);

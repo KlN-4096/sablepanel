@@ -97,9 +97,11 @@ function pollJobs(){
   return load('jobs', () => api('/api/jobs?poll=1'), result => {
     const had = ACTIVE_JOBS.length;
     applyJobs(result.running || []);
-    reapFinishedJobs(result.log || []);
-    // 作业刚跑完:这时候的列表才是服务端真值(乐观更新过的字段要纠正回来)
-    if (had && !ACTIVE_JOBS.length) loadBodies();
+    const reaped = reapFinishedJobs(result.log || []);
+    // 作业刚跑完:这时候的列表才是服务端真值(乐观更新过的字段要纠正回来)。
+    // 消费掉终态也算:快作业可能在第一轮轮询之前就结束了,那时 had 还是 0 ——
+    // 完成 toast 照弹,列表却停在旧值,只能等 SSE 或 60 秒兜底
+    if (reaped || (had && !ACTIVE_JOBS.length)) loadBodies();
     syncBusyPolling();
   }, () => {
     // 失败什么都不改,但一定要续期:定时器回调进来时已经把 busyTimer 清空了,
@@ -162,11 +164,12 @@ function renderJobPill(){
 /* 作业结束回报:本页提交过的作业一旦从活动列表消失,从同一次 /api/jobs 的日志里取终态弹一次
    toast。日志由调用方传进来 —— 它和 running[] 本来就是同一个响应,再单独请求一次是白跑一趟,
    还多一个"切服后旧服结果弹在新服界面上"的时间窗 */
+/* 返回值 = 这一轮有没有 watched 作业到达终态,调用方据此决定要不要刷新列表 */
 function reapFinishedJobs(log){
-  if (!JOB_WATCH.size) return;
+  if (!JOB_WATCH.size) return false;
   const running = new Set(ACTIVE_JOBS.map(job => job.seq));
   const finished = [...JOB_WATCH.keys()].filter(seq => !running.has(seq));
-  if (!finished.length) return;
+  if (!finished.length) return false;
   let refreshRecycle = false;
   for (const seq of finished) {
     JOB_WATCH.delete(seq);
@@ -183,6 +186,7 @@ function reapFinishedJobs(log){
     if (job.op === '回收站恢复' || job.op === '回收站彻底删除') refreshRecycle = true;
   }
   if (refreshRecycle) loadRecycle();
+  return true;
 }
 function reselect(uuid){
   for (const g of DATA.groups) for (const b of g.bodies) if (b.uuid === uuid) {
