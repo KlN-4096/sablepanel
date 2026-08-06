@@ -96,6 +96,16 @@ final class PanelWire {
         return PanelResponse.error(500, "响应 " + size + " 字节超过服务器内部上限,详见服务端日志");
     }
 
+    /** 响应出口的唯一收口:null 兜底 500;响应帧自己编不出去时只剩断连一条路 */
+    static void sendResponse(io.netty.channel.ChannelHandlerContext context, long id, PanelResponse response) {
+        try {
+            context.writeAndFlush(response(id,
+                    response != null ? response : PanelResponse.error(500, "请求处理未返回响应")));
+        } catch (Exception error) {
+            context.close();
+        }
+    }
+
     static PanelResponse response(PanelFrame frame) throws IOException {
         JsonObject meta = frame.meta();
         byte[] body = frame.body();

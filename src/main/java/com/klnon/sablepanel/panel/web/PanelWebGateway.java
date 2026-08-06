@@ -10,6 +10,7 @@ import com.klnon.sablepanel.panel.client.ClientPanelConfig;
 import com.klnon.sablepanel.panel.transport.CertificatePinException;
 import com.klnon.sablepanel.panel.transport.PanelEndpoint;
 import com.klnon.sablepanel.panel.transport.PanelEvent;
+import com.klnon.sablepanel.panel.transport.PanelNet;
 import com.klnon.sablepanel.panel.transport.PanelTcpClient;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -19,28 +20,19 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public final class PanelWebGateway implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(PanelWebGateway.class);
-    private static final int HTTP_THREADS = 4;
-    private static final int HTTP_QUEUE_CAPACITY = 64;
-    private static final int FORWARD_THREADS = 4;
-    private static final int FORWARD_QUEUE_CAPACITY = 32;
     private static final int RECONNECT_SECONDS = 2;
-    private static final int SHUTDOWN_TIMEOUT_SECONDS = 2;
     private static final long RECONNECT_LOG_INTERVAL_MS = 60_000L;
-    private static final AtomicLong HTTP_THREAD_IDS = new AtomicLong();
     private final boolean clientMode;
     private final String bind;
     private final int port;
@@ -87,23 +79,9 @@ public final class PanelWebGateway implements AutoCloseable {
             this.reconnectPending.set(false);
             // 满了拒绝而不是 CallerRuns:后者把 HttpServer 的 dispatcher 线程拖进业务,
             // 公网上 68 个慢请求就能让整个端口停止接客
-            this.httpPool = new ThreadPoolExecutor(
-                    HTTP_THREADS, HTTP_THREADS, 0L, TimeUnit.MILLISECONDS,
-                    new ArrayBlockingQueue<>(HTTP_QUEUE_CAPACITY), runnable -> {
-                        Thread thread = new Thread(runnable,
-                                "sablepanel-web-" + HTTP_THREAD_IDS.incrementAndGet());
-                        thread.setDaemon(true);
-                        return thread;
-                    }, new ThreadPoolExecutor.AbortPolicy());
-            // 跨服转发单独一个池;满了直接 503,不用 CallerRunsPolicy —— 那等于又把 HTTP 线程还回去阻塞
-            this.forwardPool = new ThreadPoolExecutor(
-                    FORWARD_THREADS, FORWARD_THREADS, 0L, TimeUnit.MILLISECONDS,
-                    new ArrayBlockingQueue<>(FORWARD_QUEUE_CAPACITY), runnable -> {
-                        Thread thread = new Thread(runnable,
-                                "sablepanel-web-forward-" + HTTP_THREAD_IDS.incrementAndGet());
-                        thread.setDaemon(true);
-                        return thread;
-                    }, new ThreadPoolExecutor.AbortPolicy());
+            this.httpPool = PanelNet.boundedPool("sablepanel-web", 4, 64);
+            // 跨服转发单独一个池(bulkhead):一个卡住的远端不能占用本机自己的 HTTP 线程
+            this.forwardPool = PanelNet.boundedPool("sablepanel-web-forward", 4, 32);
             this.eventStreams = new PanelEventStreams();
         }
         try {
@@ -169,10 +147,10 @@ public final class PanelWebGateway implements AutoCloseable {
                 closeExchange = !offloadApi(exchange);
                 return;
             }
-            HttpIo.send(exchange, 404, "application/json", "{\"error\":\"not found\"}".getBytes(StandardCharsets.UTF_8), false);
+            sendError(exchange, 404, "not found");
         } catch (Exception error) {
             LOGGER.warn("sablepanel: web gateway error {}", exchange.getRequestURI(), error);
-            HttpIo.send(exchange, 500, "application/json", errorJson(messageOf(error)), false);
+            sendError(exchange, 500, messageOf(error));
         } finally {
             if (closeExchange) exchange.close();
         }
@@ -180,13 +158,13 @@ public final class PanelWebGateway implements AutoCloseable {
 
     private boolean openEventStream(HttpExchange exchange) throws Exception {
         if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
-            HttpIo.send(exchange, 405, "application/json", errorJson("需要 GET"), false);
+            sendError(exchange, 405, "需要 GET");
             return false;
         }
         PanelTcpClient client = this.upstream;
         if (client == null || !client.isActive()) {
             requestReconnect();
-            HttpIo.send(exchange, 503, "application/json", errorJson("尚未连接服务器"), false);
+            sendError(exchange, 503, "尚未连接服务器");
             return false;
         }
         // 订阅等待不许拿实例锁:一个慢上游能把 connect/disconnect/close 全堵 10 秒
@@ -198,11 +176,11 @@ public final class PanelWebGateway implements AutoCloseable {
         }
         PanelEventStreams streams = adoptEventToken(client, token);
         if (streams == null) {
-            HttpIo.send(exchange, 503, "application/json", errorJson("服务器连接已变化"), false);
+            sendError(exchange, 503, "服务器连接已变化");
             return false;
         }
         if (!streams.open(exchange)) {
-            HttpIo.send(exchange, 503, "application/json", errorJson("事件连接数已满"), false);
+            sendError(exchange, 503, "事件连接数已满");
             return false;
         }
         return true;
@@ -226,20 +204,21 @@ public final class PanelWebGateway implements AutoCloseable {
      * 自己的接口和网页请求一起排队 —— 快请求必须有自己的线程,不能和转发抢同一批。
      */
     private boolean offloadApi(HttpExchange exchange) throws Exception {
-        String target = HttpIo.query(exchange.getRequestURI()).getOrDefault("server", "");
+        Map<String, String> query = new java.util.HashMap<>(HttpIo.query(exchange.getRequestURI()));
+        String target = query.remove("server");
         ExecutorService pool = this.forwardPool;
-        if (target.isEmpty() || pool == null) {
-            proxyApi(exchange);
+        if (target == null || target.isEmpty() || pool == null) {
+            proxyApi(exchange, query, target);
             return false;
         }
         try {
             pool.execute(() -> {
                 try {
-                    proxyApi(exchange);
+                    proxyApi(exchange, query, target);
                 } catch (Exception error) {
                     LOGGER.warn("sablepanel: cross-server proxy failed {}", exchange.getRequestURI(), error);
                     try {
-                        HttpIo.send(exchange, 502, "application/json", errorJson(messageOf(error)), false);
+                        sendError(exchange, 502, messageOf(error));
                     } catch (IOException ignored) {
                     }
                 } finally {
@@ -248,30 +227,28 @@ public final class PanelWebGateway implements AutoCloseable {
             });
             return true;
         } catch (RejectedExecutionException rejected) {
-            HttpIo.send(exchange, 503, "application/json", errorJson("跨服请求排队已满,请稍后重试"), false);
+            sendError(exchange, 503, "跨服请求排队已满,请稍后重试");
             return false;
         }
     }
 
-    private void proxyApi(HttpExchange exchange) throws Exception {
+    private void proxyApi(HttpExchange exchange, Map<String, String> query, String target) throws Exception {
         // 公网口最小前置:连 token 都不带的请求不读体、不占上游,直接 401(上游对空 token 同样 401)
         String token = exchange.getRequestHeaders().getFirst("X-Token");
         if (token == null || token.isBlank()) {
-            HttpIo.send(exchange, 401, "application/json", errorJson("token 无效"), false);
+            sendError(exchange, 401, "token 无效");
             return;
         }
         PanelTcpClient client = this.upstream;
         if (client == null || !client.isActive()) {
             requestReconnect();
-            HttpIo.send(exchange, 503, "application/json", errorJson("尚未连接服务器"), false);
+            sendError(exchange, 503, "尚未连接服务器");
             return;
         }
-        Map<String, String> query = new java.util.HashMap<>(HttpIo.query(exchange.getRequestURI()));
-        String target = query.remove("server");
         byte[] body = "GET".equalsIgnoreCase(exchange.getRequestMethod()) ? new byte[0] : HttpIo.readBody(exchange);
         PanelRequest request = new PanelRequest(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
-                query, body, token, target);
-        PanelResponse response = client.request(request).get(30, TimeUnit.SECONDS);
+                query, body, token, target == null ? "" : target);
+        PanelResponse response = client.request(request).get(PanelNet.REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         HttpIo.send(exchange, response.status(), response.contentType(), response.body(),
                 response.contentType().startsWith("application/json"));
     }
@@ -290,13 +267,13 @@ public final class PanelWebGateway implements AutoCloseable {
 
     private synchronized void connectClient(HttpExchange exchange) throws Exception {
         if (!this.clientMode) {
-            HttpIo.send(exchange, 409, "application/json", errorJson("服务端网关目标固定"), false);
+            sendError(exchange, 409, "服务端网关目标固定");
             return;
         }
         JsonObject body = HttpIo.readJsonBody(exchange);
         PanelEndpoint requested = PanelEndpoint.parse(body.has("address") ? body.get("address").getAsString() : "", 25581);
         if (this.upstream != null && this.upstream.isActive() && !requested.equals(this.endpoint)) {
-            HttpIo.send(exchange, 409, "application/json", errorJson("请先断开当前集群"), false);
+            sendError(exchange, 409, "请先断开当前集群");
             return;
         }
         closeUpstream();
@@ -306,7 +283,7 @@ public final class PanelWebGateway implements AutoCloseable {
             if (!requested.equals(this.pendingEndpoint)
                     || this.pendingFingerprint == null
                     || !accepted.equalsIgnoreCase(this.pendingFingerprint)) {
-                HttpIo.send(exchange, 409, "application/json", errorJson("指纹确认已失效,请重新连接"), false);
+                sendError(exchange, 409, "指纹确认已失效,请重新连接");
                 return;
             }
         }
@@ -330,7 +307,7 @@ public final class PanelWebGateway implements AutoCloseable {
 
     private synchronized void disconnectClient(HttpExchange exchange) throws IOException {
         if (!this.clientMode) {
-            HttpIo.send(exchange, 409, "application/json", errorJson("服务端网关不能断开本机 API"), false);
+            sendError(exchange, 409, "服务端网关不能断开本机 API");
             return;
         }
         closeUpstream();
@@ -395,10 +372,10 @@ public final class PanelWebGateway implements AutoCloseable {
         }
         if (currentHttp != null) currentHttp.stop(0);
         if (currentStreams != null) currentStreams.close();
-        shutdownExecutor(currentReconnect);
+        PanelNet.shutdown(currentReconnect);
         if (currentUpstream != null) currentUpstream.close();
-        shutdownExecutor(currentForwardPool);
-        shutdownExecutor(currentHttpPool);
+        PanelNet.shutdown(currentForwardPool);
+        PanelNet.shutdown(currentHttpPool);
     }
 
     private void closeUpstream() {
@@ -415,11 +392,8 @@ public final class PanelWebGateway implements AutoCloseable {
     }
 
     private void startReconnectLoop() {
-        ScheduledExecutorService reconnect = Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "sablepanel-web-reconnect");
-            thread.setDaemon(true);
-            return thread;
-        });
+        ScheduledExecutorService reconnect = Executors.newSingleThreadScheduledExecutor(
+                PanelNet.daemonThreads("sablepanel-web-reconnect"));
         synchronized (this) {
             if (this.closed) {
                 reconnect.shutdownNow();
@@ -510,21 +484,11 @@ public final class PanelWebGateway implements AutoCloseable {
         LOGGER.warn("sablepanel: server web gateway upstream unavailable: {}", messageOf(error));
     }
 
-    private static void shutdownExecutor(ExecutorService executor) {
-        if (executor == null) return;
-        executor.shutdownNow();
-        try {
-            executor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
     private boolean allowLocalControlRequest(HttpExchange exchange) throws IOException {
         if (!this.clientMode) return true;
         String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
         if (contentType == null || !contentType.split(";", 2)[0].trim().equalsIgnoreCase("application/json")) {
-            HttpIo.send(exchange, 403, "application/json", errorJson("网关控制请求来源无效"), false);
+            sendError(exchange, 403, "网关控制请求来源无效");
             return false;
         }
         String origin = exchange.getRequestHeaders().getFirst("Origin");
@@ -532,14 +496,14 @@ public final class PanelWebGateway implements AutoCloseable {
         try {
             value = URI.create(origin == null ? "" : origin);
         } catch (IllegalArgumentException error) {
-            HttpIo.send(exchange, 403, "application/json", errorJson("网关控制请求来源无效"), false);
+            sendError(exchange, 403, "网关控制请求来源无效");
             return false;
         }
         String host = value.getHost();
         int originPort = value.getPort() < 0 ? 80 : value.getPort();
         boolean localHost = "127.0.0.1".equals(host) || "localhost".equalsIgnoreCase(host);
         if (!"http".equalsIgnoreCase(value.getScheme()) || !localHost || originPort != this.port) {
-            HttpIo.send(exchange, 403, "application/json", errorJson("网关控制请求来源无效"), false);
+            sendError(exchange, 403, "网关控制请求来源无效");
             return false;
         }
         return true;
@@ -556,10 +520,10 @@ public final class PanelWebGateway implements AutoCloseable {
         return bind;
     }
 
-    private static byte[] errorJson(String message) {
-        JsonObject error = new JsonObject();
-        error.addProperty("error", message);
-        return error.toString().getBytes(StandardCharsets.UTF_8);
+    /** 错误响应统一走 PanelResponse.error 的 JSON 形状,和 TLS 侧同一张脸 */
+    private static void sendError(HttpExchange exchange, int status, String message) throws IOException {
+        PanelResponse error = PanelResponse.error(status, message);
+        HttpIo.send(exchange, error.status(), error.contentType(), error.body(), false);
     }
 
 }

@@ -48,7 +48,7 @@ public final class PanelClusterNode implements AutoCloseable {
         boolean peerActive;
         synchronized (this.lifecycleLock) {
             if (this.closed) return false;
-            if (this.host != null && this.host.isActive()) return false;
+            if (activeHost() != null) return false;
             staleHost = this.host;
             this.host = null;
             peerActive = this.peer != null && this.peer.isActive();
@@ -74,13 +74,13 @@ public final class PanelClusterNode implements AutoCloseable {
             if (request.path().equals("/api/cluster/token")) return changeToken(request);
             String target = request.targetServer();
             if (!target.isEmpty() && !target.equals(this.api.selfId())) {
-                PanelTcpServer currentHost = this.host;
-                if (currentHost == null || !currentHost.isActive()) {
+                PanelTcpServer currentHost = activeHost();
+                if (currentHost == null) {
                     return PanelResponse.error(409, "当前节点不是 HOST");
                 }
                 PanelRequest forwarded = new PanelRequest(request.method(), request.path(), request.query(),
                         request.body(), this.api.token(), "");
-                return currentHost.requestPeer(target, forwarded).get(30, TimeUnit.SECONDS);
+                return currentHost.requestPeer(target, forwarded).get(PanelNet.PEER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             }
             return this.api.dispatch(request);
         } catch (Exception error) {
@@ -90,8 +90,7 @@ public final class PanelClusterNode implements AutoCloseable {
     }
 
     public boolean isHost() {
-        PanelTcpServer current = this.host;
-        return !this.closed && current != null && current.isActive();
+        return !this.closed && activeHost() != null;
     }
 
     public boolean isActive() {
@@ -102,8 +101,8 @@ public final class PanelClusterNode implements AutoCloseable {
         if (this.closed) return;
         long latestRevision = this.bodiesRevision.accumulateAndGet(revision, Math::max);
         PanelEvent event = new PanelEvent(this.api.selfId(), latestRevision);
-        PanelTcpServer currentHost = this.host;
-        if (currentHost != null && currentHost.isActive()) {
+        PanelTcpServer currentHost = activeHost();
+        if (currentHost != null) {
             currentHost.publishEvent(event);
             return;
         }
@@ -178,10 +177,9 @@ public final class PanelClusterNode implements AutoCloseable {
     }
 
     private void forwardPeerEvent(String peerId, PanelEvent event) {
-        PanelTcpServer currentHost = this.host;
-        if (currentHost != null && currentHost.isActive()) {
-            currentHost.publishEvent(event.fromServer(peerId));
-        }
+        // 权威 serverId 已在 TcpServer.receivePeerEvent 盖过章,这里原样转发
+        PanelTcpServer currentHost = activeHost();
+        if (currentHost != null) currentHost.publishEvent(event);
     }
 
     private PanelResponse changeToken(PanelRequest request) throws Exception {
@@ -194,8 +192,8 @@ public final class PanelClusterNode implements AutoCloseable {
         synchronized (this.tokenLock) {
             JsonObject result = this.api.setToken(next);
             JsonArray failed = new JsonArray();
-            PanelTcpServer currentHost = this.host;
-            if (currentHost != null && currentHost.isActive()) {
+            PanelTcpServer currentHost = activeHost();
+            if (currentHost != null) {
                 currentHost.revokeEventSubscriptions();
                 for (String id : currentHost.peerIds()) {
                     try {
@@ -233,8 +231,8 @@ public final class PanelClusterNode implements AutoCloseable {
         self.addProperty("self", true);
         self.addProperty("host", true);
         servers.add(self);
-        PanelTcpServer currentHost = this.host;
-        if (currentHost != null && currentHost.isActive()) {
+        PanelTcpServer currentHost = activeHost();
+        if (currentHost != null) {
             for (String id : currentHost.peerIds()) {
                 JsonObject peer = new JsonObject();
                 peer.addProperty("id", id);
@@ -251,7 +249,13 @@ public final class PanelClusterNode implements AutoCloseable {
     }
 
     private boolean isHostLocked() {
-        return this.host != null && this.host.isActive();
+        return activeHost() != null;
+    }
+
+    /** 全类唯一的"活着的 HOST"判定:拿到即活,拿不到即无 */
+    private PanelTcpServer activeHost() {
+        PanelTcpServer current = this.host;
+        return current != null && current.isActive() ? current : null;
     }
 
     private void ensureOpen() {

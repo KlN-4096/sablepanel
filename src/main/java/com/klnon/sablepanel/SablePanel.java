@@ -1,8 +1,9 @@
 package com.klnon.sablepanel;
 
 import com.google.gson.JsonObject;
-import com.klnon.sablepanel.panel.client.ClientPanelBootstrap;
 import com.klnon.sablepanel.panel.PanelRuntime;
+import com.klnon.sablepanel.panel.client.ClientPanelConfig;
+import com.klnon.sablepanel.panel.web.PanelWebGateway;
 import com.mojang.logging.LogUtils;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.neoforge.event.ForgeSablePostPhysicsTickEvent;
@@ -29,7 +30,7 @@ public class SablePanel {
     public SablePanel() {
         // 票种注册必须早于世界读档,否则存档里的常驻票 byName 查不到会被静默丢弃
         com.klnon.sablepanel.panel.service.ForceLoadService.init();
-        if (FMLEnvironment.dist == Dist.CLIENT) ClientPanelBootstrap.start();
+        if (FMLEnvironment.dist == Dist.CLIENT) startClientGateway();
         NeoForge.EVENT_BUS.addListener(this::onContainerReady);
         NeoForge.EVENT_BUS.addListener(this::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(this::onPostPhysics);
@@ -38,6 +39,18 @@ public class SablePanel {
         NeoForge.EVENT_BUS.addListener(this::onServerStarted);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         LOGGER.info("SablePanel instrumentation loaded");
+    }
+
+    /** 客户端模式的空白面板网关。mod 构造器一次性调用,shutdown hook 持引用,不需要静态守卫 */
+    private static void startClientGateway() {
+        PanelWebGateway gateway = PanelWebGateway.client(ClientPanelConfig.load());
+        try {
+            gateway.start();
+            Runtime.getRuntime().addShutdownHook(new Thread(gateway::close, "sablepanel-client-stop"));
+        } catch (Exception error) {
+            gateway.close();
+            LOGGER.warn("sablepanel: client web gateway startup failed", error);
+        }
     }
 
     private void onServerTickPre(ServerTickEvent.Pre event) {
