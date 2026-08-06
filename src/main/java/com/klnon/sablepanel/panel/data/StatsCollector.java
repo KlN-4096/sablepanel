@@ -5,53 +5,76 @@ import com.google.gson.JsonObject;
 
 import java.util.ArrayDeque;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAccumulator;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * TPS/MSPT/物理耗时采集:tick 与物理事件喂入,按秒聚合进环形缓冲(保留 15 分钟)。
- * 所有写入路径都可能来自不同线程,统一 synchronized(单点低频,无竞争压力)。
+ * <p>
+ * 写路径无锁:主线程 tick 与各物理线程写同一个每秒累加槽(LongAdder),互不阻塞;
+ * 跨秒换槽只发生在主线程 tick 里。ring 只由主线程追加,HTTP 读取时短锁拷贝引用、
+ * 在锁外构建 JSON —— 请求线程不再有机会把主线程挡在统计锁外。
+ * 换槽瞬间物理线程可能还写着旧槽,秒边界最多丢一两个物理步采样,对图表不可见。
  */
 public final class StatsCollector {
     public static final StatsCollector INSTANCE = new StatsCollector();
     private static final int WINDOW_SECONDS = 900;
 
-    private record Sec(long t, int ticks, long sumNs, long maxNs, Map<String, long[]> phys,
+    private record Sec(long t, long ticks, long sumNs, long maxNs, Map<String, long[]> phys,
                        double bodyCostMs) {
     }
 
+    /** 每维度的物理耗时累加对。LongAdder 自带跨线程可见性,主线程冻结时不会读到撕裂的 long */
+    private static final class DimAdder {
+        final LongAdder sumNs = new LongAdder();
+        final LongAdder steps = new LongAdder();
+    }
+
+    /** 一秒的累加槽。dim 槽按需建,LongAdder 保证并发累加不丢数 */
+    private static final class Slot {
+        final long sec;
+        final LongAdder ticks = new LongAdder();
+        final LongAdder sumNs = new LongAdder();
+        final LongAccumulator maxNs = new LongAccumulator(Math::max, 0);
+        final ConcurrentHashMap<String, DimAdder> phys = new ConcurrentHashMap<>();
+
+        Slot(long sec) {
+            this.sec = sec;
+        }
+    }
+
+    private volatile Slot current = new Slot(0);
+    /** 只由主线程追加、start() 清空;读取方短锁拷贝 */
     private final ArrayDeque<Sec> ring = new ArrayDeque<>();
-    private long curSec;
-    private int ticks;
-    private long sumNs, maxNs;
-    /** dim -> [sumNs, steps] */
-    private Map<String, long[]> phys = new HashMap<>();
     /** 主线程周期采样:dim -> 加载体数 */
     private volatile Map<String, Integer> loadedPerDim = Map.of();
     /** 主线程周期采样:逐体耗时 Top 列表与合计(ms/tick) */
     private volatile JsonArray topCost = new JsonArray();
     private volatile double bodyCostTotal;
 
-    public synchronized void start() {
-        this.ring.clear();
-        this.curSec = 0;
-        this.ticks = 0;
-        this.sumNs = 0;
-        this.maxNs = 0;
-        this.phys = new HashMap<>();
+    public void start() {
+        synchronized (this.ring) {
+            this.ring.clear();
+        }
+        this.current = new Slot(System.currentTimeMillis() / 1000);
     }
 
-    public synchronized void tick(long durationNs) {
-        roll();
-        this.ticks++;
-        this.sumNs += durationNs;
-        if (durationNs > this.maxNs) this.maxNs = durationNs;
+    /** 仅主线程调用;跨秒换槽也只发生在这里 */
+    public void tick(long durationNs) {
+        Slot slot = rollIfNeeded();
+        slot.ticks.increment();
+        slot.sumNs.add(durationNs);
+        slot.maxNs.accumulate(durationNs);
     }
 
-    public synchronized void physics(String dim, long durationNs) {
-        roll();
-        long[] acc = this.phys.computeIfAbsent(dim, k -> new long[2]);
-        acc[0] += durationNs;
-        acc[1]++;
+    /** 物理线程调用:只写当前槽,不参与换槽 */
+    public void physics(String dim, long durationNs) {
+        DimAdder acc = this.current.phys.computeIfAbsent(dim, ignored -> new DimAdder());
+        acc.sumNs.add(durationNs);
+        acc.steps.increment();
     }
 
     public void setLoadedPerDim(Map<String, Integer> counts) {
@@ -63,47 +86,46 @@ public final class StatsCollector {
         this.bodyCostTotal = total;
     }
 
-    private void roll() {
+    private Slot rollIfNeeded() {
+        Slot slot = this.current;
         long sec = System.currentTimeMillis() / 1000;
-        if (sec == this.curSec) return;
-        if (this.curSec != 0 && this.ticks > 0) {
-            this.ring.addLast(new Sec(this.curSec, this.ticks, this.sumNs, this.maxNs, this.phys,
-                    this.bodyCostTotal));
-            while (this.ring.size() > WINDOW_SECONDS) this.ring.removeFirst();
+        if (sec == slot.sec) return slot;
+        Slot fresh = new Slot(sec);
+        this.current = fresh;   // 先换槽再冻结,把秒边界的采样丢失窗口压到最小
+        long ticks = slot.ticks.sum();
+        if (slot.sec != 0 && ticks > 0) {
+            Map<String, long[]> phys = new HashMap<>();
+            slot.phys.forEach((dim, acc) -> phys.put(dim, new long[]{acc.sumNs.sum(), acc.steps.sum()}));
+            Sec completed = new Sec(slot.sec, ticks, slot.sumNs.sum(), slot.maxNs.get(), phys,
+                    this.bodyCostTotal);
+            synchronized (this.ring) {
+                this.ring.addLast(completed);
+                while (this.ring.size() > WINDOW_SECONDS) this.ring.removeFirst();
+            }
         }
-        this.curSec = sec;
-        this.ticks = 0;
-        this.sumNs = 0;
-        this.maxNs = 0;
-        this.phys = new HashMap<>();
+        return fresh;
     }
 
     /** 完整内存窗口的序列 + 汇总(mspt/tps 为 60s 均值);展示区间由前端裁剪 */
-    public synchronized JsonObject toJson() {
-        roll();
-        return inMemoryJson(WINDOW_SECONDS);
-    }
-
-    private JsonObject inMemoryJson(int lastN) {
+    public JsonObject toJson() {
+        List<Sec> secs;
+        synchronized (this.ring) {
+            secs = List.copyOf(this.ring);
+        }
         JsonArray t = new JsonArray(), mspt = new JsonArray(), msptMax = new JsonArray();
         JsonArray bodyLogic = new JsonArray();
         Map<String, JsonArray> physArr = new HashMap<>();
-        int skip = Math.max(0, this.ring.size() - lastN);
-        int i = 0;
         // 先收集本窗口出现过的所有维度,保证每条序列等长
         java.util.Set<String> dims = new java.util.TreeSet<>();
-        int j = 0;
-        for (Sec s : this.ring) {
-            if (j++ < skip) continue;
-            dims.addAll(s.phys().keySet());
-        }
+        for (Sec s : secs) dims.addAll(s.phys().keySet());
         for (String d : dims) physArr.put(d, new JsonArray());
         long sum60 = 0;
-        int ticks60 = 0;
+        long ticks60 = 0;
         Map<String, long[]> phys60 = new HashMap<>();
-        int n60Start = Math.max(0, this.ring.size() - 60);
-        for (Sec s : this.ring) {
-            if (i >= n60Start) {
+        int n60Start = Math.max(0, secs.size() - 60);
+        int i = 0;
+        for (Sec s : secs) {
+            if (i++ >= n60Start) {
                 sum60 += s.sumNs();
                 ticks60 += s.ticks();
                 for (var e : s.phys().entrySet()) {
@@ -112,7 +134,6 @@ public final class StatsCollector {
                     acc[1] += e.getValue()[1];
                 }
             }
-            if (i++ < skip) continue;
             t.add(s.t());
             mspt.add(round2(s.sumNs() / 1e6 / s.ticks()));
             msptMax.add(round2(s.maxNs() / 1e6));
