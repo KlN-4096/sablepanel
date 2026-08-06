@@ -4,6 +4,7 @@ import com.klnon.sablepanel.panel.PanelConfig;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.klnon.sablepanel.SablePanel;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.locale.Language;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.Block;
@@ -49,17 +50,23 @@ public final class BlockNames {
         return names;
     }
 
-    /** 注册表里查不到就返回 null */
+    /**
+     * 注册表里查不到就返回 null。
+     * <p>
+     * 必须用 {@code getOptional}:{@code BuiltInRegistries.BLOCK} 是 DefaultedMappedRegistry,
+     * 它的 {@code get()} 查不到时返回默认值 {@code minecraft:air} 而不是 null
+     * (21.1.233 的 {@code DefaultedMappedRegistry:57})。所以"返回值不是 AIR、或者 path 就是 air"
+     * 这种判法漏掉一整类:{@code 任意命名空间:air} 全都会被当成已注册进缓存,而命名空间同样
+     * 来自 NBT,照样无界。同一个类把 {@code getOptional} 重写成直接读真实映射(同文件 62 行),
+     * 用它就不需要 AIR 特判了。
+     */
     private static String descriptionId(String blockId) {
         try {
-            ResourceLocation rl = ResourceLocation.parse(blockId);
-            Block b = net.minecraft.core.registries.BuiltInRegistries.BLOCK.get(rl);
-            if (b != net.minecraft.world.level.block.Blocks.AIR || rl.getPath().equals("air")) {
-                return b.getDescriptionId();
-            }
+            return BuiltInRegistries.BLOCK.getOptional(ResourceLocation.parse(blockId))
+                    .map(Block::getDescriptionId).orElse(null);
         } catch (Throwable ignored) {
+            return null;
         }
-        return null;
     }
 
     /** 缓存条目数,只给测试判"未注册的 id 不进缓存" */
