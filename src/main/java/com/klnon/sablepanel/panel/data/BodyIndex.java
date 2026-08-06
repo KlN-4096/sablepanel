@@ -285,12 +285,39 @@ public final class BodyIndex {
         return best;
     }
 
-    /** 全量视图 JSON:组聚合 + 体明细 + 方块调色板 */
+    /** 全量视图 JSON:组聚合 + 体明细 + 方块调色板。五段流水,段间以只读 record 传递 */
     public JsonObject view() {
         List<DiskScanner.DiskEntry> disk = this.diskSnapshot;
         Map<UUID, JsonObject> rt = this.runtime;
         Set<UUID> held = this.holding;
 
+        DiskAggregate agg = aggregate(disk);
+        CloneSets clones = cloneSets(agg.byUuid());
+        List<Map.Entry<UUID, List<UUID>>> ordered = orderedGroups(agg.byUuid());
+        FreshGroups fresh = freshGroups(rt, agg.byUuid());
+        Emission emission = emitGroups(agg, clones, fresh, ordered, rt, held);
+        return summarize(disk, agg, clones, fresh, emission, ordered.size());
+    }
+
+    /** 磁盘条目按 uuid 聚合的结果:最优条目、冗余计数、条目 id 采样、可达性 */
+    private record DiskAggregate(Map<UUID, DiskScanner.DiskEntry> byUuid, Map<UUID, Integer> copies,
+                                 Map<UUID, List<String>> entryIds, Map<UUID, Boolean> anyReachable) {
+    }
+
+    /** 疑似克隆集合:uuid → 集合 id、发出去的集合数组、已花掉的字节(并进总账) */
+    private record CloneSets(Map<UUID, Integer> setByUuid, JsonArray sets, long bytes) {
+    }
+
+    /** 纯运行时组:发出去的组、进组的 uuid、真实总数(可能大于显示数)、已花字节 */
+    private record FreshGroups(JsonArray groups, List<UUID> uuids, int total, long bytes) {
+    }
+
+    /** 预算发射的产物:组数组、调色板、真正输出出去的体、两类截断标记 */
+    private record Emission(JsonArray groups, JsonArray palette, Set<UUID> bodies,
+                            int omittedMembers, boolean paletteFull) {
+    }
+
+    private static DiskAggregate aggregate(List<DiskScanner.DiskEntry> disk) {
         // uuid -> 最优条目(可达优先,blocks 大优先);同 uuid 冗余条目单独计数
         Map<UUID, DiskScanner.DiskEntry> byUuid = new HashMap<>();
         Map<UUID, Integer> copies = new HashMap<>();
@@ -314,6 +341,10 @@ public final class BodyIndex {
             if (e.uuid() != null) anyReachable.merge(e.uuid(), e.reachable(), Boolean::logicalOr);
         }
 
+        return new DiskAggregate(byUuid, copies, entryIds, anyReachable);
+    }
+
+    private static CloneSets cloneSets(Map<UUID, DiskScanner.DiskEntry> byUuid) {
         // 疑似克隆:不同 uuid、同(名称|方块数|包围盒),未命名的要求 ≥50 块
         Map<String, Set<UUID>> cloneKeys = new HashMap<>();
         for (var en : byUuid.entrySet()) {
@@ -355,11 +386,10 @@ public final class BodyIndex {
             cloneSetArr.add(set);
         }
 
-        // 方块调色板(全局去重,body 引用索引)。只收真正输出出去的成员用到的方块 ——
-        // 从前是先按全部磁盘条目建一张完整表,截断之后表里全是没人引用的条目,白占字节
-        Map<String, Integer> paletteIdx = new LinkedHashMap<>();
-        JsonArray paletteArr = new JsonArray();
+        return new CloneSets(cloneSetByUuid, cloneSetArr, cloneBudget.spent());
+    }
 
+    private static List<Map.Entry<UUID, List<UUID>>> orderedGroups(Map<UUID, DiskScanner.DiskEntry> byUuid) {
         // 并查集分组(按 deps,双向)
         UnionFind linked = new UnionFind();
         for (UUID u : byUuid.keySet()) linked.add(u);
@@ -373,6 +403,23 @@ public final class BodyIndex {
             groups.computeIfAbsent(linked.find(u), k -> new ArrayList<>()).add(u);
         }
 
+        // 单页硬上限。从前是无条件全量构建:响应大小只随存档增长,32 MiB 的协议上限拦不住
+        // "先把整个对象建到堆里"。只按组数截断还不够 —— 3000 个巨型组照样能撑爆,所以组数之外
+        // 再算一份字节预算(按各字段上界估),两条中先到的那条生效。
+        // 排序按总方块数降序:真被砍掉的是最小的那些组,total_bodies 仍是真值,前端显式提示已截断。
+        List<Map.Entry<UUID, List<UUID>>> ordered = new ArrayList<>(groups.entrySet());
+        Map<UUID, Long> weight = new HashMap<>();
+        for (Map.Entry<UUID, List<UUID>> g : ordered) {
+            long sum = 0;
+            for (UUID u : g.getValue()) sum += byUuid.get(u).blocks();
+            weight.put(g.getKey(), sum);
+        }
+        ordered.sort(Comparator.comparingLong((Map.Entry<UUID, List<UUID>> g) -> weight.get(g.getKey())).reversed());
+
+        return ordered;
+    }
+
+    private static FreshGroups freshGroups(Map<UUID, JsonObject> rt, Map<UUID, DiskScanner.DiskEntry> byUuid) {
         // 运行时存在但磁盘还没有条目的体(刚生成/未保存):单独成组显示,可传送不可预览
         JsonArray freshArr = new JsonArray();
         List<UUID> freshUuids = new ArrayList<>();
@@ -422,26 +469,31 @@ public final class BodyIndex {
             freshArr.add(go);
         }
 
-        // 单页硬上限。从前是无条件全量构建:响应大小只随存档增长,32 MiB 的协议上限拦不住
-        // "先把整个对象建到堆里"。只按组数截断还不够 —— 3000 个巨型组照样能撑爆,所以组数之外
-        // 再算一份字节预算(按各字段上界估),两条中先到的那条生效。
-        // 排序按总方块数降序:真被砍掉的是最小的那些组,total_bodies 仍是真值,前端显式提示已截断。
-        List<Map.Entry<UUID, List<UUID>>> ordered = new ArrayList<>(groups.entrySet());
-        Map<UUID, Long> weight = new HashMap<>();
-        for (Map.Entry<UUID, List<UUID>> g : ordered) {
-            long sum = 0;
-            for (UUID u : g.getValue()) sum += byUuid.get(u).blocks();
-            weight.put(g.getKey(), sum);
-        }
-        ordered.sort(Comparator.comparingLong((Map.Entry<UUID, List<UUID>> g) -> weight.get(g.getKey())).reversed());
+        return new FreshGroups(freshArr, freshUuids, freshTotal, freshBudget.spent());
+    }
+
+    private Emission emitGroups(DiskAggregate agg, CloneSets clones, FreshGroups fresh,
+                                List<Map.Entry<UUID, List<UUID>>> ordered,
+                                Map<UUID, JsonObject> rt, Set<UUID> held) {
+        Map<UUID, DiskScanner.DiskEntry> byUuid = agg.byUuid();
+        Map<UUID, Integer> copies = agg.copies();
+        Map<UUID, List<String>> entryIds = agg.entryIds();
+        Map<UUID, Boolean> anyReachable = agg.anyReachable();
+        Map<UUID, Integer> cloneSetByUuid = clones.setByUuid();
+        JsonArray freshArr = fresh.groups();
+        List<UUID> freshUuids = fresh.uuids();
+        // 方块调色板(全局去重,body 引用索引)。只收真正输出出去的成员用到的方块 ——
+        // 从前是先按全部磁盘条目建一张完整表,截断之后表里全是没人引用的条目,白占字节
+        Map<String, Integer> paletteIdx = new LinkedHashMap<>();
+        JsonArray paletteArr = new JsonArray();
 
         JsonArray groupArr = new JsonArray();
         groupArr.addAll(freshArr);
         // 预算是一份运行总账,记的全是量出来的真实字节:已发出去的 fresh 组、clone_sets
         // 先记进去,组列表用剩下的额度,调色板边建边记
         ByteBudget budget = new ByteBudget(VIEW_BYTE_BUDGET);
-        budget.charge(freshBudget.spent());
-        budget.charge(cloneBudget.spent());
+        budget.charge(fresh.bytes());
+        budget.charge(clones.bytes());
         // 组数上限管的是"发出去多少组",fresh 组也占名额,分开计数就会一起超过 MAX_VIEW_GROUPS
         int shownGroups = freshArr.size();
         int omittedMembers = 0;
@@ -584,12 +636,25 @@ public final class BodyIndex {
             groupArr.add(go);
         }
 
+        return new Emission(groupArr, paletteArr, emitted, omittedMembers, paletteFull);
+    }
+
+    private JsonObject summarize(List<DiskScanner.DiskEntry> disk, DiskAggregate agg, CloneSets clones,
+                                 FreshGroups fresh, Emission emission, int groupCount) {
+        Map<UUID, DiskScanner.DiskEntry> byUuid = agg.byUuid();
+        int freshTotal = fresh.total();
+        JsonArray groupArr = emission.groups();
+        int omittedMembers = emission.omittedMembers();
+        boolean paletteFull = emission.paletteFull();
+        Set<UUID> emitted = emission.bodies();
+        JsonArray paletteArr = emission.palette();
+        JsonArray cloneSetArr = clones.sets();
         JsonObject out = new JsonObject();
         out.addProperty("scan_time", this.diskScanTime);
         // freshArr 是被截断过的显示量,总数必须用真值,否则截断时连"少了多少"都看不出来
         out.addProperty("total_bodies", byUuid.size() + freshTotal);
         out.addProperty("total_entries", disk.size());
-        int totalGroups = groups.size() + freshTotal;
+        int totalGroups = groupCount + freshTotal;
         out.addProperty("total_groups", totalGroups);
         out.addProperty("shown_groups", groupArr.size());
         out.addProperty("group_limit", MAX_VIEW_GROUPS);
