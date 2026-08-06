@@ -15,7 +15,7 @@ async function scheduleStartupConsistency(){
         if ((report.issue_count||0)>0 && !report.error && dismissed!==report.scan_id) openConsistency(report);
         return;
       }
-    } catch(e){ return; }
+    } catch(e){ /* 抖一次就重试:循环本来就有 45 次上限,放弃等于报告永远不出现 */ }
     await new Promise(resolve=>setTimeout(resolve,1000));
   }
 }
@@ -91,6 +91,6 @@ async function waitForConsistencyChange(previous,open){
         if (open) openConsistency(report);
         return;
       }
-    } catch(e){ return; }
+    } catch(e){ /* 同上:这是作业跑完之后等新报告,中途一次抖动不该让人白点一次扫描 */ }
   }
 }

@@ -890,6 +890,23 @@ test('日志页和作业轮询各用各的请求序号,不能互相作废', asyn
   assert.equal(evalIn(sandbox, 'JOBS').log.length, 1, '日志页的结果不能被轮询作废');
 });
 
+test('LOAD-01 一致性报告的等待循环失败一次不能整个放弃', async () => {
+  // 两个等待循环都是 catch { return; }:抖一次网络,报告就永远不出现,
+  // 用户点了"一致性扫描"却什么都没等到 —— 循环本来就有次数上限,重试是安全的
+  let calls = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (!url.startsWith('/api/consistency')) return jsonResponse({});
+    return ++calls === 1 ? errorResponse(500)
+      : jsonResponse({ ready: true, scan_id: 's2', issue_count: 0 });
+  };
+  evalIn(sandbox, "authenticated = true; CONSISTENCY = null; toast = () => {}");
+  evalIn(sandbox, 'setTimeout = fn => { fn(); return 0; }');   // 跳过 1 秒退避
+  await evalIn(sandbox, 'scheduleStartupConsistency')();
+  assert.ok(calls > 1, '失败之后必须继续等,实际只请求了 ' + calls + ' 次');
+  assert.equal(evalIn(sandbox, 'CONSISTENCY.scan_id'), 's2', '恢复之后要拿到报告');
+});
+
 // UI-04:预览旧失败
 test('UI-04 旧预览请求的失败不得改写新选择的提示', async () => {
   const slowFail = deferred();
