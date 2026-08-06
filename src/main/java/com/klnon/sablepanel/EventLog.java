@@ -13,10 +13,16 @@ import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 追加式 JSONL 事件日志,落在 <gamedir>/logs/sablepanel/events-<启动时间>.jsonl。
- * 事件量级低(生命周期 + 每分钟 stats),同步写 + 即时 flush 足够。
+ * <p>
+ * 事件来自主线程(体 add/remove、孤儿告警)与作业线程。写盘与 flush 全部在专用后台线程:
+ * 碎片风暴时每个新体一条事件,主线程只做一次有界入队,不再直接做磁盘 IO。
+ * 队列满时丢弃最新事件并计数——风暴时黑匣子保尽力而为,绝不反压主线程。
  */
 public final class EventLog {
     private static final Gson GSON = new Gson();
@@ -25,13 +31,57 @@ public final class EventLog {
     private static final int KEEP_FILES = 20;
     /** 单个日志文件的字节上限,超过就换新文件(否则一个长跑的服务端就是一个无限增长的文件) */
     public static final long MAX_LOG_BYTES = 16L << 20;
+    private static final int QUEUE_CAPACITY = 512;
+
+    private static final LinkedBlockingQueue<JsonObject> QUEUE = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
+    private static final AtomicLong DROPPED = new AtomicLong();
+    private static volatile boolean running;
+    private static Thread writerThread;   // 与 running 一起由类锁保护
+    /* 以下仅写线程自己触碰 */
     private static PrintWriter out;
     private static long bytes;
 
     private EventLog() {
     }
 
-    public static synchronized void write(JsonObject o) {
+    /** 任意线程可调:打事件时间戳后入队,不做任何 IO */
+    public static void write(JsonObject o) {
+        o.addProperty("ts", System.currentTimeMillis());
+        if (!running) ensureWriter();
+        if (!QUEUE.offer(o)) {
+            long dropped = DROPPED.incrementAndGet();
+            if (dropped == 1 || dropped % 1000 == 0) {
+                SablePanel.LOGGER.warn("sablepanel: event log queue full, {} events dropped so far", dropped);
+            }
+        }
+    }
+
+    private static synchronized void ensureWriter() {
+        if (running) return;
+        running = true;
+        writerThread = new Thread(EventLog::drainLoop, "sablepanel-eventlog");
+        writerThread.setDaemon(true);
+        writerThread.start();
+    }
+
+    private static void drainLoop() {
+        while (running || !QUEUE.isEmpty()) {
+            JsonObject o;
+            try {
+                o = QUEUE.poll(500, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException interrupted) {
+                continue;   // close() 用中断催醒,退出条件只看 running + 队列排空
+            }
+            if (o != null) writeLine(o);
+        }
+        if (out != null) {
+            out.close();
+            out = null;
+        }
+    }
+
+    /** 写线程私有:懒开文件、逐行 flush、按字节上限轮转(与旧同步实现语义一致) */
+    private static void writeLine(JsonObject o) {
         try {
             if (out == null) {
                 Path dir = logDir();
@@ -43,7 +93,6 @@ public final class EventLog {
                 prune("events-", KEEP_FILES);
                 SablePanel.LOGGER.info("sablepanel: event log -> {}", file);
             }
-            o.addProperty("ts", System.currentTimeMillis());
             String line = GSON.toJson(o);
             out.println(line);
             out.flush();
@@ -57,10 +106,22 @@ public final class EventLog {
         }
     }
 
-    public static synchronized void close() {
-        if (out != null) {
-            out.close();
-            out = null;
+    /** 停服收尾:排空队列后关闭文件。sable 在停服晚期逐体 UNLOADED,这些事件都已在队列里 */
+    public static void close() {
+        Thread thread;
+        synchronized (EventLog.class) {
+            if (!running) return;
+            running = false;
+            thread = writerThread;
+            writerThread = null;
+        }
+        if (thread != null) {
+            thread.interrupt();
+            try {
+                thread.join(TimeUnit.SECONDS.toMillis(3));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
