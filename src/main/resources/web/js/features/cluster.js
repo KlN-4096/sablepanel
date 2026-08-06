@@ -61,7 +61,11 @@ function resetServerContext(){
   SELECTED = new Set(); BODY_BY_UUID = new Map();
   R_SELECTED = new Set(); RECYCLE_BY_ID = new Map();
   RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
-  EXPAND_STATE.clear(); tpFilledFor = null; loadFav();
+  // 维度筛选是按维度 id 记的,两个服的 minecraft:overworld 是同一个字符串:不清的话,
+  // 在 A 服取消勾选主世界,切到 B 之后 B 的主世界组会整批消失,而勾选框看着是正常的。
+  // 光清集合不够 —— renderRecycleDims 会先从 #rDims 里的 .rFDim 反向重建它,
+  // 那批 DOM 由下面 renderAll() 的回收站空态清掉,顺序不能反
+  EXPAND_STATE.clear(); R_DIM_DISABLED.clear(); tpFilledFor = null; loadFav();
   PLAYERS = []; playersFetchedAt = 0; PAUSED = new Set(); FORCED = new Set();
   document.getElementById('dbody').innerHTML =
     `<div id="detailEmpty"><span class="big">⬢</span><span>${t('pickBody')}</span></div>`;

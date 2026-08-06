@@ -35,6 +35,11 @@ function setView(v, opts){
    用户只看到一闪而过的 toast,唯一的反应是继续刷新,把同样的压力再造一遍 */
 function renderAll(){
   renderStats();   // 顶栏和统计弹层在所有视图共享,不属于任何一个视图分支
+  // 空态跟当前在哪个视图无关:scanMeta 就在顶栏里,回收站上限输入框一按保存就写到新服上。
+  // 只在没数据时调 —— 有数据那半边归 loadBodies/loadRecycle,挂在这里的话,作业期间
+  // 每 2 秒一次的 renderAll 会把 .fDim/.rFDim 重画一遍,用户的点击在事件中途就没了
+  if (!DATA) renderBodiesMeta();
+  if (!RECYCLE) clearRecycleMeta();
   if (VIEW === 'recycle') { renderRecycle(); return; }
   if (VIEW === 'jobs') { renderJobs(); return; }
   if (VIEW === 'dash') { renderDash(); return; }

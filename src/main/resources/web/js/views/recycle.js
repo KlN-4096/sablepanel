@@ -23,6 +23,17 @@ function recycleStateTag(state){
   if (state==='incomplete') return `<span class="tag bad">${t('recycleIncomplete')}</span>`;
   return `<span class="tag acc">${t('recycleDeleted')}</span>`;
 }
+/* 回收站里属于"服务器配置"的三块:上限输入框、磁盘用量、维度筛选。
+   它们只有 loadRecycle 成功那条路写,所以没数据时必须有人负责清 —— 上限输入框尤其危险,
+   切服后它还是上一个服的数字,用户一按保存就把旧服的配置写到新服上。清空即等于禁用:
+   saveRecycleLimit 挡住了非整数。
+   由 renderAll 在 RECYCLE 为空时调,不挂在 renderRecycle 上 —— 那个只在回收站页跑。
+   清 #rDims 还有个连带作用:renderRecycleDims 会从那批 .rFDim 反向重建 R_DIM_DISABLED */
+function clearRecycleMeta(){
+  document.getElementById('rLimit').value = '';
+  document.getElementById('rUsage').textContent = '';
+  document.getElementById('rDims').innerHTML = '';
+}
 function renderRecycle(){
   renderRecycleTabs();
   const list = document.getElementById('rList');
@@ -31,12 +42,7 @@ function renderRecycle(){
       ? `<div class="listEmpty"><span class="big">⚠</span>${t('loadFail')}${esc(RECYCLE_ERROR)}</div>`
       : `<div class="listEmpty">${t('loading')}</div>`;
     renderRecycleToolbar(0, 0);
-    // 这三块只有 loadRecycle 成功那条路写。切服后上限输入框里还是上一个服的数字,
-    // 用户一按保存就把旧服的配置写到新服上;磁盘用量和维度筛选同理。
-    // 清空即等于禁用:saveRecycleLimit 挡住了非整数
-    document.getElementById('rLimit').value = '';
-    document.getElementById('rUsage').textContent = '';
-    document.getElementById('rDims').innerHTML = '';
+    clearRecycleMeta();
     return;
   }
   const needle = document.getElementById('rSearch').value.trim().toLowerCase();

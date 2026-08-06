@@ -101,16 +101,20 @@ const TABS = [
   {k:'sky',    label:'tabSky',     test:g=>g.bodies.some(isSky)},
 ];
 function tabTest(k){ return (TABS.find(x=>x.k===k)||TABS[0]).test; }
-/* 快照派生的三块:维度筛选、方块清单、扫描信息。
-   只在"快照换了"(loadBodies)和"快照没了"(render 的空态)时重建 —— 不能挂到 render() 上
+/* 快照派生的几块:维度筛选、方块清单、扫描信息、方块徽标。
+   只在"快照换了"(loadBodies)和"快照没了"(renderAll)时重建 —— 不能挂到 render() 上
    每次都跑:那批 .fDim input 自己带着 onchange="render()",重画会在事件中途把触发它的元素
-   销毁掉,搜索框的焦点也会被吃。从前只有成功那条路写,切服之后这三块全留着上一个服的内容,
-   用户还能按旧服的维度去筛新服。 */
+   销毁掉,搜索框的焦点也会被吃。从前只有成功那条路写,切服之后这几块全留着上一个服的内容,
+   用户还能按旧服的维度去筛新服;而清理挂在 render() 上又只在物理体页生效 ——
+   scanMeta 就在顶栏里,在总览页切服它会一直显示旧服的"4 体 / 4 存档条目"。 */
 function renderBodiesMeta(){
   if (!DATA) {
     document.getElementById('fDims').innerHTML = '';
     document.getElementById('blockList').innerHTML = '';
     document.getElementById('scanMeta').innerHTML = '';
+    // 方块徽标显示的是上一份调色板里的条目,而下标只对那一份有效
+    blockFilterIdx = -1;
+    document.getElementById('blockChip').style.display = 'none';
     return;
   }
   const dims = new Set();
@@ -172,10 +176,11 @@ function render() {
       ? `<div id="listEmpty"><span class="big">⚠</span>${t('loadFail')}${esc(BODIES_ERROR)}</div>`
       : `<div id="listEmpty">${t('loading')}</div>`;
     // 这两块也归本视图:renderTabs 没数据就直接返回,工具条只在下面那条路写 ——
-    // 切服后它们会一直挂着上一个服的页签计数和多选状态
+    // 切服后它们会一直挂着上一个服的页签计数和多选状态。
+    // 顶栏那几块(scanMeta/fDims/blockList)不在这儿清:它们在所有视图都看得见,
+    // 归 renderAll 的空态管,写两遍就会出现"改了一处另一处还留着"
     document.getElementById('tabs').innerHTML = '';
     document.getElementById('toolbar').innerHTML = '';
-    renderBodiesMeta();
     return;
   }
   const states = checked('fState'), sizes = checked('fSize'), dims = checked('fDim');

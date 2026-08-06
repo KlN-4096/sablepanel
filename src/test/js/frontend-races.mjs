@@ -393,18 +393,28 @@ test('UI-03 切服后列表元数据和回收站配置不得留着上一个服�
   assert.match(evalIn(sandbox, "document.getElementById('fDims').innerHTML"), /old_dim/);
   assert.match(evalIn(sandbox, "document.getElementById('scanMeta').innerHTML"), /4/);
   assert.equal(evalIn(sandbox, "document.getElementById('rLimit').value"), 777);
+  // A 服里取消勾选过一个维度,而两个服的维度 id 是同一批字符串
+  evalIn(sandbox, "R_DIM_DISABLED.add('minecraft:overworld'); blockFilterIdx = 0;");
 
+  // 在总览页切服。清理挂在 render()/renderRecycle() 上时,这一步什么都不会发生 ——
+  // 而 scanMeta 就在顶栏里,当场就能看见旧服的数字
+  evalIn(sandbox, "VIEW = 'dash'");
   const switching = evalIn(sandbox, 'switchServer')('B');   // B 的数据还在路上
   assert.equal(evalIn(sandbox, "document.getElementById('rLimit').value"), '',
     '上限输入框不能还是 A 的 777 —— 按一下保存就写到 B 上了');
   assert.equal(evalIn(sandbox, "document.getElementById('rUsage').textContent"), '');
   assert.equal(evalIn(sandbox, "document.getElementById('rDims').innerHTML"), '');
-
-  evalIn(sandbox, "VIEW = 'bodies'; renderAll()");
+  assert.equal(evalIn(sandbox, "document.getElementById('scanMeta').innerHTML"), '',
+    'scanMeta 在顶栏,清不清不能取决于当前在哪个视图');
   assert.equal(evalIn(sandbox, "document.getElementById('fDims').innerHTML"), '',
     '维度筛选不能还是 A 的,否则是拿 A 的维度筛 B');
-  assert.equal(evalIn(sandbox, "document.getElementById('scanMeta').innerHTML"), '');
   assert.equal(evalIn(sandbox, "document.getElementById('blockList').innerHTML"), '');
+  assert.equal(evalIn(sandbox, "blockFilterIdx"), -1, '方块下标只对上一份调色板有效');
+  assert.equal(evalIn(sandbox, "document.getElementById('blockChip').style.display"), 'none');
+  assert.equal(evalIn(sandbox, 'R_DIM_DISABLED.size'), 0,
+    '取消勾选是按维度 id 记的,留着就会把 B 的同名维度整批藏掉');
+
+  evalIn(sandbox, "VIEW = 'bodies'; renderAll()");
   assert.equal(evalIn(sandbox, "document.getElementById('tabs').innerHTML"), '');
   assert.equal(evalIn(sandbox, "document.getElementById('toolbar').innerHTML"), '');
   slowB.resolve(bodiesResponse());
