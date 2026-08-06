@@ -12,7 +12,6 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.neoforge.common.NeoForge;
-import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
@@ -36,7 +35,6 @@ public class SablePanel {
         NeoForge.EVENT_BUS.addListener(this::onPostPhysics);
         NeoForge.EVENT_BUS.addListener(this::onServerTickPre);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
-        NeoForge.EVENT_BUS.addListener(this::onRegisterCommands);
         NeoForge.EVENT_BUS.addListener(this::onServerStarted);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         LOGGER.info("SablePanel instrumentation loaded");
@@ -88,10 +86,6 @@ public class SablePanel {
                 ? System.nanoTime() - this.tickStartNanos : 0;
         this.tickStartNanos = 0;
         this.panelRuntime.onServerTick(event.getServer(), durationNanos);
-    }
-
-    private void onRegisterCommands(RegisterCommandsEvent event) {
-        PanelCommand.register(event.getDispatcher());
     }
 
     // ServerStopped(而非 Stopping):sable 在停服晚期才逐体 UNLOADED,writer 必须活到那之后
