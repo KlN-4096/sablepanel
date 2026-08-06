@@ -1237,6 +1237,60 @@ test('LOAD-01 一致性报告的等待循环失败一次不能整个放弃', asy
 });
 
 // UI-04:预览旧失败
+test('UI-04 同一个体连点两次时,先发的 mesh 响应不得盖掉后发的', async () => {
+  // isCurrent() 只看 SEL.uuid,认不出是哪一次请求:X→Y→X 之后 X 的第一次响应照样满足它,
+  // 于是往场景里再加一套网格、覆盖全局 mesh —— 后加的那套从此没人能释放
+  const firstX = deferred();
+  let xCalls = 0;
+  const { sandbox, state } = setup();
+  const emptyMesh = marker => jsonResponse({ shell: 0, total: 0, voxels: [], palette: [], marker });
+  state.fetch = async (url) => {
+    if (url.includes('/u-x/mesh')) return ++xCalls === 1 ? firstX.promise : emptyMesh('x2');
+    if (url.includes('/u-y/mesh')) return emptyMesh('y');
+    return jsonResponse({});
+  };
+  evalIn(sandbox, "authenticated = true; SEL = {uuid:'u-x'}");
+  const pendingFirst = evalIn(sandbox, 'loadMesh')('u-x');
+  evalIn(sandbox, "SEL = {uuid:'u-y'}");
+  await evalIn(sandbox, 'loadMesh')('u-y');
+  evalIn(sandbox, "SEL = {uuid:'u-x'}");
+  await evalIn(sandbox, 'loadMesh')('u-x');
+  assert.equal(evalIn(sandbox, 'MESH_DATA && MESH_DATA.marker'), 'x2');
+
+  firstX.resolve(emptyMesh('x1'));
+  await pendingFirst;
+  await tick();
+  assert.equal(evalIn(sandbox, 'MESH_DATA && MESH_DATA.marker'), 'x2',
+    '先发的那次回来时,界面上早就是后发的那次了');
+});
+
+test('UI-03 跨服撞上同一个 uuid 时,旧服的 mesh 响应不得落到新服的预览上', async () => {
+  // 同机多服常见做法就是把存档目录复制一份,uuid 会真的一模一样 —— isCurrent() 认不出服务器
+  const slowA = deferred();
+  const { sandbox, state } = setup();
+  const emptyMesh = marker => jsonResponse({ shell: 0, total: 0, voxels: [], palette: [], marker });
+  state.fetch = async (url) => {
+    if (url.includes('/mesh')) return url.includes('server=B') ? emptyMesh('B') : slowA.promise;
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    if (url.startsWith('/api/recycle')) return jsonResponse({ groups: [], block_palette: [], next_cursor: '' });
+    return jsonResponse({ self: 'A', servers: [{ id: 'A', self: true }, { id: 'B' }], running: [], log: [] });
+  };
+  evalIn(sandbox, `
+    authenticated = true; VIEW = 'bodies'; toast = () => {};
+    SERVERS = [{id:'A',self:true},{id:'B'}]; SEL = {uuid:'same'};
+  `);
+  const pendingA = evalIn(sandbox, 'loadMesh')('same');
+  await evalIn(sandbox, 'switchServer')('B');
+  evalIn(sandbox, "SEL = {uuid:'same'}");        // 在 B 上选中同一个 uuid
+  await evalIn(sandbox, 'loadMesh')('same');
+  assert.equal(evalIn(sandbox, 'MESH_DATA && MESH_DATA.marker'), 'B');
+
+  slowA.resolve(emptyMesh('A'));
+  await pendingA;
+  await tick();
+  assert.equal(evalIn(sandbox, 'MESH_DATA && MESH_DATA.marker'), 'B', 'A 的响应属于上一个服务器');
+});
+
 test('UI-04 旧预览请求的失败不得改写新选择的提示', async () => {
   const slowFail = deferred();
   const { sandbox, state } = setup();

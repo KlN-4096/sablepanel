@@ -113,14 +113,18 @@ async function loadCopyVersionMesh(uuid,versionId) {
   return loadMeshAt(`/api/body/${uuid}/copy/${versionId}/mesh`,uuid,`copy:${versionId}`,
     ()=>COPY_UUID===uuid&&COPY_VERSION===versionId&&document.getElementById('copyBack').style.display==='flex');
 }
+/* 走统一的 load():请求序号 + 服务器代次 + 会话代次一次拿齐。
+   isCurrent() 只看"选中的还是不是这个 uuid",那不足以认出是哪一次请求 —— 同一个体
+   连点两次(X→Y→X)时,X 的第一次晚回来照样满足它,于是往场景里加第二套网格并覆盖全局
+   mesh,先加的那套再也释放不掉;两个服由同一份存档复制而来时,跨服也会撞上同一个 uuid。
+   isCurrent 仍然要留:切服本身不发新的 mesh 请求,序号不会动,得靠它认出"没人选了"。 */
 async function loadMeshAt(endpoint, uuid, source, isCurrent) {
   const info = document.getElementById('pvInfo');
   info.textContent = t('pvLoad');
   disposeMesh();
   MESH_DATA = null; MESH_UUID = MESH_SOURCE = null;
   renderComposition();
-  try {
-    const d = await api(endpoint);
+  return load('mesh', () => api(endpoint), d => {
     if (!isCurrent()) return;
     MESH_DATA = d; MESH_UUID = uuid; MESH_SOURCE = source;
     const n = d.shell;
@@ -167,12 +171,12 @@ async function loadMeshAt(endpoint, uuid, source, isCurrent) {
     hoverEnabled = n <= 80000;
     info.textContent = t('pvStat')(d.shell, d.total) + (d.truncated?t('pvTrunc'):'') + (hoverEnabled?'':' · '+t('pvHoverOff'));
     renderComposition();
-  } catch(e) {
+  }, message => {
     // 成功、空数据、失败三条出口都要过同一道 current 检查:少了这句,从 A 快切到 B 之后
     // A 的延迟失败会把已经渲染好的 B 的提示文本改成 A 的报错
     if (!isCurrent()) return;
-    info.textContent = t('pvFail') + e.message;
-  }
+    info.textContent = t('pvFail') + message;
+  });
 }
 /* 注意:函数名不能叫 enterFullscreen/exitFullscreen —— inline on* 处理器的作用域链是
    元素 → document → window,document.exitFullscreen 是原生 API,会把调用吃掉。
