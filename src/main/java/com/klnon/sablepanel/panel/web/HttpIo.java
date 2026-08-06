@@ -55,19 +55,62 @@ final class HttpIo {
         return map;
     }
 
+    /** cacheable 资源(three.min.js 669KB)的字节缓存:原始与 gzip 各一份,不再每请求读盘+实时压缩 */
+    private static final java.util.concurrent.ConcurrentHashMap<String, byte[][]> CACHED =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     static void sendResource(HttpExchange ex, String res, String type, boolean cacheable) throws IOException {
+        if (cacheable) {
+            byte[][] entry = CACHED.get(res);
+            if (entry == null) {
+                try (InputStream in = HttpIo.class.getResourceAsStream(res)) {
+                    if (in == null) {
+                        send(ex, 404, "text/plain", "resource missing".getBytes(StandardCharsets.UTF_8), false);
+                        return;
+                    }
+                    byte[] raw = in.readAllBytes();
+                    entry = new byte[][]{raw, gzip(raw)};
+                    CACHED.putIfAbsent(res, entry);
+                }
+            }
+            ex.getResponseHeaders().set("Cache-Control", "public, max-age=86400");
+            sendPrebuilt(ex, type, entry[0], entry[1]);
+            return;
+        }
         try (InputStream in = HttpIo.class.getResourceAsStream(res)) {
             if (in == null) {
                 send(ex, 404, "text/plain", "resource missing".getBytes(StandardCharsets.UTF_8), false);
                 return;
             }
-            if (cacheable) {
-                ex.getResponseHeaders().set("Cache-Control", "public, max-age=86400");
-            } else {
-                // 面板自身页面与 js/css:禁止启发式缓存,否则 mod 更新后浏览器可能继续用旧前端
-                ex.getResponseHeaders().set("Cache-Control", "no-cache");
-            }
+            // 面板自身页面与 js/css:禁止启发式缓存,否则 mod 更新后浏览器可能继续用旧前端
+            ex.getResponseHeaders().set("Cache-Control", "no-cache");
             send(ex, 200, type, in.readAllBytes(), true);
+        }
+    }
+
+    private static byte[] gzip(byte[] raw) throws IOException {
+        var buffer = new java.io.ByteArrayOutputStream(Math.max(64, raw.length / 3));
+        try (GZIPOutputStream gz = new GZIPOutputStream(buffer)) {
+            gz.write(raw);
+        }
+        return buffer.toByteArray();
+    }
+
+    private static void sendPrebuilt(HttpExchange ex, String type, byte[] raw, byte[] gz) throws IOException {
+        ex.getResponseHeaders().set("Content-Type", type);
+        String ae = ex.getRequestHeaders().getFirst("Accept-Encoding");
+        if (ae != null && ae.contains("gzip")) {
+            ex.getResponseHeaders().set("Content-Encoding", "gzip");
+            ex.getResponseHeaders().set("Vary", "Accept-Encoding");
+            ex.sendResponseHeaders(200, gz.length);
+            try (OutputStream os = ex.getResponseBody()) {
+                os.write(gz);
+            }
+            return;
+        }
+        ex.sendResponseHeaders(200, raw.length);
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(raw);
         }
     }
 

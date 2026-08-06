@@ -92,6 +92,7 @@ public class SablePanel {
     private void onServerStopped(ServerStoppedEvent event) {
         this.panelRuntime.close();
         this.tickStartNanos = 0;
+        PhysicsTimer.reset();
         EventLog.close();
     }
 }

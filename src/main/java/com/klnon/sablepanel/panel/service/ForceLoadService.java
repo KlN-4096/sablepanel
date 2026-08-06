@@ -148,7 +148,15 @@ public final class ForceLoadService {
                 List<Reload> pending = new ArrayList<>();
                 for (Map.Entry<UUID, SubLevelTicketInfo> en : c.getAllTickets().entrySet()) {
                     SubLevelTicketInfo info = en.getValue();
-                    if (info.tickets().stream().noneMatch(ForceLoadService::isPanelTicket)) continue;
+                    // 常态守护路径,每票一个 Stream 分配不值得
+                    boolean panelTicket = false;
+                    for (SubLevelLoadingTicket<?> ticket : info.tickets()) {
+                        if (isPanelTicket(ticket)) {
+                            panelTicket = true;
+                            break;
+                        }
+                    }
+                    if (!panelTicket) continue;
                     UUID uuid = en.getKey();
                     forced.add(uuid);
                     if (loaded(c, uuid) != null) {

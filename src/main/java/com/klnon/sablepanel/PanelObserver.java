@@ -9,7 +9,6 @@ import dev.ryanhcode.sable.sublevel.SubLevel;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
 import org.joml.Vector3dc;
 
-import java.util.ArrayDeque;
 import java.util.UUID;
 
 /**
@@ -23,7 +22,9 @@ public final class PanelObserver implements SubLevelObserver {
 
     private final String dim;
     private final Runnable bodyChanged;
-    private final ArrayDeque<Long> splitTimes = new ArrayDeque<>();
+    /** 最近 split 时间的环形窗口:风暴时旧写法的 ArrayDeque<Long> 会装箱堆积数千个元素 */
+    private final long[] splitTimes = new long[120];
+    private int splitStart, splitCount;
     private long lastStormAlert;
 
     public PanelObserver(String dim, Runnable bodyChanged) {
@@ -55,19 +56,25 @@ public final class PanelObserver implements SubLevelObserver {
 
     private void checkFragmentStorm(UUID splitFrom) {
         long now = System.currentTimeMillis();
-        this.splitTimes.addLast(now);
-        while (!this.splitTimes.isEmpty() && now - this.splitTimes.peekFirst() > STORM_WINDOW_MS) {
-            this.splitTimes.pollFirst();
+        while (this.splitCount > 0 && now - this.splitTimes[this.splitStart] > STORM_WINDOW_MS) {
+            this.splitStart = (this.splitStart + 1) % this.splitTimes.length;
+            this.splitCount--;
         }
-        if (this.splitTimes.size() >= STORM_THRESHOLD && now - this.lastStormAlert > STORM_WINDOW_MS) {
+        if (this.splitCount == this.splitTimes.length) {   // 环满:挤掉最老的,计数封顶
+            this.splitStart = (this.splitStart + 1) % this.splitTimes.length;
+            this.splitCount--;
+        }
+        this.splitTimes[(this.splitStart + this.splitCount) % this.splitTimes.length] = now;
+        this.splitCount++;
+        if (this.splitCount >= STORM_THRESHOLD && now - this.lastStormAlert > STORM_WINDOW_MS) {
             this.lastStormAlert = now;
             SablePanel.LOGGER.warn("sablepanel: FRAGMENT STORM in {} - {} split-bodies within 1min (last from {})",
-                    this.dim, this.splitTimes.size(), splitFrom);
+                    this.dim, this.splitCount, splitFrom);
             JsonObject alert = new JsonObject();
             alert.addProperty("ev", "alert");
             alert.addProperty("kind", "fragment_storm");
             alert.addProperty("dim", this.dim);
-            alert.addProperty("splits_1min", this.splitTimes.size());
+            alert.addProperty("splits_1min", this.splitCount);
             alert.addProperty("last_split_from", splitFrom.toString());
             EventLog.write(alert);
         }

@@ -11,6 +11,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class PhysicsTimer {
     private static final ConcurrentHashMap<SubLevelPhysicsSystem, Long> BEGIN = new ConcurrentHashMap<>();
+    /** 维度 id 每物理步拼一次字符串太浪费,按物理系统缓存(系统与维度一一对应且不改名) */
+    private static final ConcurrentHashMap<SubLevelPhysicsSystem, String> DIM_NAME = new ConcurrentHashMap<>();
 
     private PhysicsTimer() {
     }
@@ -30,10 +32,18 @@ public final class PhysicsTimer {
             }
             long dur = System.nanoTime() - t0;
             try {
-                StatsCollector.INSTANCE.physics(system.getLevel().dimension().location().toString(), dur);
+                String dim = DIM_NAME.computeIfAbsent(system,
+                        s -> s.getLevel().dimension().location().toString());
+                StatsCollector.INSTANCE.physics(dim, dur);
             } catch (Throwable ignored) {
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    /** 停服清引用:两张表都以物理系统为键,跨启动残留会钉住旧世界对象 */
+    public static void reset() {
+        BEGIN.clear();
+        DIM_NAME.clear();
     }
 }
