@@ -205,7 +205,7 @@ public final class JobService implements AutoCloseable {
         job.startedAt = System.currentTimeMillis();
         try {
             JsonObject result = work.call();
-            // state 是别的线程(busyView / /api/jobs 轮询)用来判"结束了没"的那个标志,
+            // state 是别的线程(/api/jobs 轮询)用来判"结束了没"的那个标志,
             // 所以派生字段必须先写完再翻 state,否则会被看到"已完成但没有终态"
             job.outcome = outcomeOf(result);
             job.message = summarize(result);
@@ -276,33 +276,6 @@ public final class JobService implements AutoCloseable {
     }
 
     // ---------- 读取 ----------
-
-    /**
-     * 给 /api/bodies 用:正在排队/执行的作业,<b>每个作业一条</b>,受影响的体放在 targets 里。
-     * <p>
-     * 早先是按体展开的,于是"回收站恢复""重扫磁盘"这类没有目标体的作业一条都不输出 ——
-     * 界面上既看不到进度、也判不出它结束了(前端靠"从 busy 消失"认完成,它压根没进去过)。
-     * 体已经被删掉时本来就没有行可以挂徽章,指示器不能依赖体行存在。
-     */
-    public JsonArray busyView() {
-        JsonArray arr = new JsonArray();
-        synchronized (this.lock) {
-            for (Job job : this.active.values()) {
-                JsonObject o = new JsonObject();
-                o.addProperty("seq", job.seq);
-                o.addProperty("op", clip(job.op));
-                o.addProperty("state", job.state.name().toLowerCase());
-                o.addProperty("phase", clip(job.display()));
-                o.addProperty("since", job.startedAt > 0 ? job.startedAt : job.queuedAt);
-                if (!job.targetName.isEmpty()) o.addProperty("name", clip(job.targetName));
-                JsonArray targets = new JsonArray();
-                for (UUID target : job.targets) targets.add(target.toString());
-                o.add("targets", targets);
-                arr.add(o);
-            }
-        }
-        return arr;
-    }
 
     /** 日志页:内存里的当前一轮(正在跑的 + 最近完成的) */
     public JsonObject view() {
@@ -407,14 +380,14 @@ public final class JobService implements AutoCloseable {
         }
     }
 
-    /** 历史日志文件名,新的在前 */
+    /** 历史日志文件名,新的在前。日志目录是可选的:它出问题不该让整个作业页打不开 */
     public static List<String> logFiles() {
         List<String> names = new ArrayList<>();
         try (var stream = Files.list(EventLog.logDir())) {
             stream.map(path -> path.getFileName().toString())
                     .filter(name -> LOG_FILE.matcher(name).matches())
                     .forEach(names::add);
-        } catch (IOException ignored) {
+        } catch (Exception ignored) {
             return List.of();
         }
         names.sort(Collections.reverseOrder());

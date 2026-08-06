@@ -112,16 +112,16 @@ class ResponseLimitAdversarialTest {
     // ---------- 组装之后才追加的字段 ----------
 
     /**
-     * {@code /api/bodies} 的 busy 是在 {@link BodyIndex#view()} 返回之后才追加的,所以
-     * 无论 view 里怎么记账都管不到它。作业名直接来自 NBT 的显示名,没有长度限制;
-     * Gson 默认把 {@code <} 转义成 {@code <},一个字符占 6 字节 ——
-     * 满容量的队列配上合法的 65,000 字符名称,单是 busy 就能自己越过协议上限。
+     * 活动作业清单从前叫 busy,追加在 {@link BodyIndex#view()} 返回之后 —— view 里怎么记账
+     * 都管不到它。作业名直接来自 NBT 的显示名,没有长度限制;Gson 默认把 {@code <} 转义成
+     * 6 字节的 {@code \u003c}:满容量的队列配上合法的 65,000 字符名称,实测 30,310,624 字节,
+     * 单这一段就越过协议上限。现在它归 {@code /api/jobs},约束也归 JobService 自己。
      * <p>
-     * 断言放在 busy 自己身上而不是最终响应上:worker 数随机器核心数变化,
+     * 断言放在这个端点自己身上而不是最终响应上:worker 数随机器核心数变化,
      * 拿最终字节数做门槛会变成一个在小机器上永远绿的测试。
      */
     @Test
-    void hostileJobNamesCannotBlowTheBusyField() throws Exception {
+    void hostileJobNamesCannotBlowTheActiveJobList() throws Exception {
         String hostileName = "<".repeat(65_000);
         CountDownLatch release = new CountDownLatch(1);
         try (JobService jobs = new JobService(null)) {
@@ -137,9 +137,9 @@ class ResponseLimitAdversarialTest {
                     break;
                 }
             }
-            long size = JsonSize.of(jobs.busyView());
+            long size = JsonSize.of(jobs.view());
             assertTrue(size < BUSY_BUDGET,
-                    "满容量的 busy 必须落在 2 MiB 内(资源上限归资源所有者),实际 " + size);
+                    "满容量的 /api/jobs 必须落在 2 MiB 内(资源上限归资源所有者),实际 " + size);
         } finally {
             release.countDown();
         }

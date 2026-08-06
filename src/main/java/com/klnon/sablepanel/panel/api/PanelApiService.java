@@ -83,8 +83,8 @@ public final class PanelApiService {
         switch (path) {
             case "/api/bodies" -> {
                 JsonObject view = this.index.view();
-                // 正在排队/执行的作业:前端据此显示转圈并禁用按钮
-                view.add("busy", this.jobs.busyView());
+                // 作业状态不在这儿:它每两秒变一次,而这份快照最大 12 MiB。前端改从
+                // /api/jobs 的 running[] 取,那里字段是全的,顺带省掉一次日志请求
                 // "虚空中/极高空"的高度阈值(服主可在配置里调),前端据此筛选
                 JsonObject reach = new JsonObject();
                 reach.addProperty("void_below", this.config.voidBelowY);
