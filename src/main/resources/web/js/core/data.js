@@ -73,15 +73,7 @@ async function loadBodies() {
       REACH = DATA.reach || REACH;
       DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));
       SELECTED = new Set([...SELECTED].filter(u => BODY_BY_UUID.has(u)));
-      const dims = new Set();
-      DATA.groups.forEach(g => g.bodies.forEach(b => dims.add(b.dim)));
-      const prevChecked = new Set([...document.querySelectorAll('.fDim:checked')].map(x=>x.value));
-      const hadAny = document.querySelectorAll('.fDim').length > 0;
-      document.getElementById('fDims').innerHTML = [...dims].map(d =>
-        `<label><input type="checkbox" class="fDim" value="${esc(d)}" ${(!hadAny || prevChecked.has(d))?'checked':''} onchange="render()"> ${esc(d.replace('minecraft:',''))}</label>`).join('');
-      document.getElementById('scanMeta').innerHTML =
-        `${fmt(DATA.total_bodies)} ${t('bodies')} · ${fmt(DATA.total_entries)} ${t('entries')}<br>${t('scanAt')} ${new Date(DATA.scan_time).toLocaleTimeString()}`;
-      refreshBlockList();
+      renderBodiesMeta();
       renderAll();
       refreshTimer = 60;
       if (keepUuid) reselect(keepUuid);

@@ -288,6 +288,55 @@ test('UI-03 切服后旧服的 recycle/jobs 慢响应都不落地', async () => 
   assert.equal(evalIn(sandbox, 'CURSRV'), '');
 });
 
+test('UI-03 切服后列表元数据和回收站配置不得留着上一个服的', async () => {
+  // 这些区域从前只有加载成功那条路写:维度筛选、方块清单、扫描信息、页签、工具条,
+  // 以及回收站的上限输入框/磁盘用量/维度。切服后全都留着 A 的内容 ——
+  // 上限输入框尤其危险:用户一按保存就把 A 的配置写到 B 上
+  const slowB = deferred();
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.includes('server=B')) return slowB.promise;
+    if (url.startsWith('/api/bodies')) {
+      return bodiesResponse({
+        total_bodies: 4, total_entries: 4, scan_time: 0,
+        block_palette: [{ id: 'sp:old_block', en: 'OLD_BLOCK', zh: 'OLD_BLOCK' }],
+        groups: [{ gid: 'g1', name: 'g1', members: 1, blocks: 1, bodies: [
+          { uuid: 'u1', name: 'b1', dim: 'sp:old_dim', state: 'stored', blocks: 1,
+            pos: [0, 0, 0], size: [1, 1, 1], blk: [] }] }],
+      });
+    }
+    if (url.startsWith('/api/recycle')) {
+      return jsonResponse({ groups: [], block_palette: [], next_cursor: '',
+        limit: 777, file_count: 3, disk_bytes: 4096 });
+    }
+    return jsonResponse({ self: 'A', servers: [{ id: 'A', self: true }, { id: 'B' }], running: [], log: [] });
+  };
+  evalIn(sandbox, "authenticated = true; VIEW = 'bodies'; SERVERS = [{id:'A',self:true},{id:'B'}]; toast = () => {}");
+  await evalIn(sandbox, 'loadBodies')();
+  evalIn(sandbox, "VIEW = 'recycle'");
+  await evalIn(sandbox, 'loadRecycle')();
+  await tick();
+  assert.match(evalIn(sandbox, "document.getElementById('fDims').innerHTML"), /old_dim/);
+  assert.match(evalIn(sandbox, "document.getElementById('scanMeta').innerHTML"), /4/);
+  assert.equal(evalIn(sandbox, "document.getElementById('rLimit').value"), 777);
+
+  const switching = evalIn(sandbox, 'switchServer')('B');   // B 的数据还在路上
+  assert.equal(evalIn(sandbox, "document.getElementById('rLimit').value"), '',
+    '上限输入框不能还是 A 的 777 —— 按一下保存就写到 B 上了');
+  assert.equal(evalIn(sandbox, "document.getElementById('rUsage').textContent"), '');
+  assert.equal(evalIn(sandbox, "document.getElementById('rDims').innerHTML"), '');
+
+  evalIn(sandbox, "VIEW = 'bodies'; renderAll()");
+  assert.equal(evalIn(sandbox, "document.getElementById('fDims').innerHTML"), '',
+    '维度筛选不能还是 A 的,否则是拿 A 的维度筛 B');
+  assert.equal(evalIn(sandbox, "document.getElementById('scanMeta').innerHTML"), '');
+  assert.equal(evalIn(sandbox, "document.getElementById('blockList').innerHTML"), '');
+  assert.equal(evalIn(sandbox, "document.getElementById('tabs').innerHTML"), '');
+  assert.equal(evalIn(sandbox, "document.getElementById('toolbar').innerHTML"), '');
+  slowB.resolve(bodiesResponse());
+  await switching;
+});
+
 test('UI-03 切服后总览不得留着上一个服的图表和"最吃性能"', async () => {
   // 从前 switchServer 清完 DATA/STATS 只画横幅,总览的 physLegend / dashTopCost / toolCard
   // 都还是 A 的 HTML —— 在"最吃性能"里点一下 A 的体,focusBody 撞上 DATA===null 抛异常

@@ -31,6 +31,12 @@ function renderRecycle(){
       ? `<div class="listEmpty"><span class="big">⚠</span>${t('loadFail')}${esc(RECYCLE_ERROR)}</div>`
       : `<div class="listEmpty">${t('loading')}</div>`;
     renderRecycleToolbar(0, 0);
+    // 这三块只有 loadRecycle 成功那条路写。切服后上限输入框里还是上一个服的数字,
+    // 用户一按保存就把旧服的配置写到新服上;磁盘用量和维度筛选同理。
+    // 清空即等于禁用:saveRecycleLimit 挡住了非整数
+    document.getElementById('rLimit').value = '';
+    document.getElementById('rUsage').textContent = '';
+    document.getElementById('rDims').innerHTML = '';
     return;
   }
   const needle = document.getElementById('rSearch').value.trim().toLowerCase();
