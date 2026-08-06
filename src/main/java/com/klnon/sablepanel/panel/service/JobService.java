@@ -29,7 +29,6 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
 
 /**
  * 面板操作作业化。
@@ -49,8 +48,6 @@ import java.util.regex.Pattern;
  * </ul>
  */
 public final class JobService implements AutoCloseable {
-    /** 日志文件名白名单:客户端可指定读哪个文件,必须防路径穿越。尾部 -N 是同秒内写满时的分片号 */
-    public static final Pattern LOG_FILE = Pattern.compile("jobs-\\d{8}-\\d{6}(-\\d+)?\\.jsonl");
     private static final Gson GSON = new Gson();
     private static final int HISTORY_MAX = 200;
     /** 终态作业在内存里多留一会儿,够前端轮询看到并弹一次 toast */
@@ -418,7 +415,7 @@ public final class JobService implements AutoCloseable {
         List<String> names = new ArrayList<>();
         try (var stream = Files.list(EventLog.logDir())) {
             stream.map(path -> path.getFileName().toString())
-                    .filter(name -> LOG_FILE.matcher(name).matches())
+                    .filter(name -> name.startsWith("jobs-") && name.endsWith(".jsonl"))
                     .forEach(names::add);
         } catch (Exception ignored) {
             return List.of();
@@ -427,13 +424,13 @@ public final class JobService implements AutoCloseable {
         return names;
     }
 
-    /** 读取指定历史日志文件(文件名必须过白名单,防路径穿越) */
+    /** 读取指定历史日志文件;文件名归一化到日志目录内,合法值以 logFiles() 列表为准 */
     public static JsonObject readLog(String name) throws IOException {
-        if (name == null || !LOG_FILE.matcher(name).matches()) {
+        if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("日志文件名非法");
         }
         JsonArray log = new JsonArray();
-        Path file = EventLog.logDir().resolve(name);
+        Path file = EventLog.logDir().resolve(Path.of(name).getFileName().toString());
         if (Files.exists(file)) {
             List<String> lines = tailLines(file);
             for (int i = lines.size() - 1; i >= 0 && log.size() < HISTORY_MAX * 5; i--) {
