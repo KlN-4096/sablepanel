@@ -2,6 +2,8 @@ package com.klnon.sablepanel.panel.data;
 
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.panel.PanelConfig;
+import com.klnon.sablepanel.panel.api.PanelResponse;
+import com.klnon.sablepanel.panel.service.JobService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -11,8 +13,12 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -21,14 +27,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 前面几轮每次都是"某个具体字段忘了记账"被逐个找出来:clone_sets 的名称、组名、
  * 摘要里没截断的 dims、单个成员的调色板……逐条补测试只能证明那一条被修了。
  * 这里换个角度:把能塞进 NBT / 清单的每一类字符串都撑到极限,只断言一件事 ——
- * 序列化之后小于 32 MiB。字段名是什么无所谓,漏了哪个都会在这里响。
+ * 序列化之后小于最终上限。字段名是什么无所谓,漏了哪个都会在这里响。
  * <p>
- * 32 MiB 的出处是 {@code PanelWire.MAX_FRAME_BYTES}:越过它传输层直接拒发,
+ * 上限的出处是 {@code PanelWire.MAX_FRAME_BYTES}(32 MiB):越过它传输层直接拒发,
  * 面板表现为列表永远打不开,而且每次刷新都重新制造一次同样的压力。
+ * {@code PanelResponse.MAX_BODY_BYTES} 取 30 MiB,给帧头和 meta 留一档余量。
  */
 class ResponseLimitAdversarialTest {
 
-    private static final int WIRE_LIMIT = 32 * 1024 * 1024;
+    /** 与 {@code PanelResponse.MAX_BODY_BYTES} 同源:最终出口的硬上限 */
+    private static final int WIRE_LIMIT = 30 << 20;
+    /** 满容量的活动作业清单该有的量级:80 个作业 × 500 个 UUID ≈ 1.6 MiB */
+    private static final long BUSY_BUDGET = 2L << 20;
     /** NBT 字符串的上限就是 65535 字节 */
     private static final String HOSTILE = "N".repeat(65_000);
 
@@ -41,11 +51,9 @@ class ResponseLimitAdversarialTest {
 
     private static void assertUnderWireLimit(String what, JsonObject view) {
         long size = bytes(view);
-        assertTrue(size < WIRE_LIMIT, what + " 必须落在 32 MiB 协议上限内,实际 " + size);
-        // ResponseGuard 是最后一道闸,不是达标的手段:它响就说明构建阶段有字段没记账。
-        // 少了这条断言,任何漏记的字段都会被兜底悄悄抹平,这个测试也就废了
-        assertFalse(view.has("over_limit"),
-                what + " 必须靠构建阶段的预算就落在上限内,而不是靠兜底降级");
+        // 判的是构建阶段自己就达标,不是靠最终出口兜底:出口只会把这份响应换成 500,
+        // 那时面板已经打不开了。这里超了就是构建阶段有字段没记进预算
+        assertTrue(size < WIRE_LIMIT, what + " 必须靠构建阶段的预算就落在上限内,实际 " + size);
     }
 
     // ---------- /api/bodies ----------
@@ -99,6 +107,59 @@ class ResponseLimitAdversarialTest {
             entries.add(entry(UUID.randomUUID(), i, "n", List.of("sp:" + HOSTILE + i)));
         }
         assertUnderWireLimit("分散在多个体上的超长方块 id", bodies(entries));
+    }
+
+    // ---------- 组装之后才追加的字段 ----------
+
+    /**
+     * {@code /api/bodies} 的 busy 是在 {@link BodyIndex#view()} 返回之后才追加的,所以
+     * 无论 view 里怎么记账都管不到它。作业名直接来自 NBT 的显示名,没有长度限制;
+     * Gson 默认把 {@code <} 转义成 {@code <},一个字符占 6 字节 ——
+     * 满容量的队列配上合法的 65,000 字符名称,单是 busy 就能自己越过协议上限。
+     * <p>
+     * 断言放在 busy 自己身上而不是最终响应上:worker 数随机器核心数变化,
+     * 拿最终字节数做门槛会变成一个在小机器上永远绿的测试。
+     */
+    @Test
+    void hostileJobNamesCannotBlowTheBusyField() throws Exception {
+        String hostileName = "<".repeat(65_000);
+        CountDownLatch release = new CountDownLatch(1);
+        try (JobService jobs = new JobService(null)) {
+            for (int i = 0; i < 500; i++) {
+                List<UUID> targets = new ArrayList<>();
+                for (int t = 0; t < 500; t++) targets.add(UUID.randomUUID());
+                try {
+                    jobs.submit("批量删除", targets, hostileName, () -> {
+                        release.await(20, TimeUnit.SECONDS);
+                        return new JsonObject();
+                    });
+                } catch (RejectedExecutionException full) {
+                    break;
+                }
+            }
+            long size = JsonSize.of(jobs.busyView());
+            assertTrue(size < BUSY_BUDGET,
+                    "满容量的 busy 必须落在 2 MiB 内(资源上限归资源所有者),实际 " + size);
+        } finally {
+            release.countDown();
+        }
+    }
+
+    /**
+     * 最终出口的兜底:构建阶段再怎么记账,也拦不住"守卫跑完之后又追加字段"这一类
+     * 结构性问题。所以真正不可绕过的上限只有一个 —— 按已序列化的 body 字节数判,
+     * 超了就返回小体积的 500,而不是发一个缺字段的 200 空壳。
+     */
+    @Test
+    void oversizedResponseBecomesASmallErrorNotATruncatedSuccess() {
+        JsonObject huge = new JsonObject();
+        huge.addProperty("payload", "x".repeat(31 << 20));
+        PanelResponse capped = PanelResponse.capped("/api/bodies", PanelResponse.json(200, huge, true));
+        assertEquals(500, capped.status(), "超过最终上限必须是错误,不能是成功");
+        assertTrue(capped.body().length < 4096, "错误响应本身必须是小的,实际 " + capped.body().length);
+
+        PanelResponse fine = PanelResponse.json(200, new JsonObject(), true);
+        assertSame(fine, PanelResponse.capped("/api/bodies", fine), "没超限的响应必须原样放行");
     }
 
     // ---------- /api/recycle ----------

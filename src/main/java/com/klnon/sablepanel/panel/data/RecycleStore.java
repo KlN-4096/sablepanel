@@ -449,8 +449,8 @@ public final class RecycleStore {
             out.addProperty("next_cursor", "");
         }
         out.add("groups", groups);
-        // 和 /api/bodies 同一道闸:哪天又有字段漏了记账,页面还打得开,日志里有 error 指路
-        return ResponseGuard.enforce("/api/recycle", out, "groups", "block_palette");
+        // 同 BodyIndex.view():PAGE_BYTE_BUDGET 是内容目标,最终上限在 PanelResponse.capped()
+        return out;
     }
 
     public synchronized JsonObject purgeGroups(List<String> groupIds) {
