@@ -120,7 +120,7 @@ let lastVisibleGroups = [];
 /* 目的坐标输入框已预填过的体:同一个体的周期刷新不再覆盖用户输入 */
 let tpFilledFor = null;
 
-/* 处理中徽章:以 /api/bodies 的 busy 为单一事实源,显示阶段和已耗时。
+/* 处理中徽章:以 /api/jobs?poll=1 的 running[] 为单一事实源,显示阶段和已耗时。
    巨型体的操作可能跑几分钟,这个徽章就是"看得见在动"的全部意义所在 */
 function busyTag(uuid){
   const job = BUSY.get(uuid);
