@@ -475,6 +475,51 @@ test('回收站作业结束后自动刷新版本统计', async () => {
   assert.match(evalIn(sandbox, '__toasts[0][0]'), /missing-group: 回收组不存在/);
 });
 
+test('副本当前版本未知或混用时禁止处理并显示完整影响范围', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    COPY_UUID = '00000000-0000-0000-0000-000000000001';
+    COPY_VERSION = 'v1';
+    COPY_SCAN = {
+      current_state:'unknown', members:178, active_members:1, incomplete:[],
+      versions:[{id:'v1',complete:true,current:false,members:64,blocks:100,
+        active_members:1,locations:[],missing_dependencies:[],copies:[]}]
+    };
+    renderDedupe(COPY_SCAN);
+  `);
+  assert.equal(evalIn(sandbox, "document.getElementById('dedupeConfirm').disabled"), true);
+  assert.match(evalIn(sandbox, "document.getElementById('copyPanelBody').innerHTML"), /114/);
+  assert.match(evalIn(sandbox, "document.getElementById('copyPanelStatus').textContent"), /禁止处理/);
+  evalIn(sandbox, "__submitted=0; submitJob=async()=>{ __submitted++; return true; }");
+  await evalIn(sandbox, 'confirmDedupe')();
+  assert.equal(evalIn(sandbox, '__submitted'), 0, '直接调用确认函数也不能绕过未知基准闸门');
+
+  evalIn(sandbox, "COPY_SCAN.current_state='mixed'; renderDedupe(COPY_SCAN)");
+  assert.equal(evalIn(sandbox, "document.getElementById('dedupeConfirm').disabled"), true);
+  assert.match(evalIn(sandbox, "document.getElementById('copyPanelStatus').textContent"), /横跨多个版本/);
+
+  evalIn(sandbox, "COPY_SCAN.current_state='known'; COPY_SCAN.current_version='v1'; renderDedupe(COPY_SCAN)");
+  assert.equal(evalIn(sandbox, "document.getElementById('dedupeConfirm').disabled"), false);
+});
+
+test('副本面板即使已知当前版本也必须由用户显式选择', async () => {
+  const { sandbox, state } = setup();
+  state.fetch = async url => url.includes('/copy/')
+    ? jsonResponse({shell:0,total:0,voxels:[],palette:[]})
+    : jsonResponse({
+        uuid:'00000000-0000-0000-0000-000000000001', current_state:'known', current_version:'v1',
+        members:1, active_members:1, incomplete:[],
+        versions:[{id:'v1',complete:true,current:true,members:1,blocks:1,
+          active_members:1,locations:[],missing_dependencies:[],copies:[]}],
+      });
+  evalIn(sandbox, `authenticated=true; SEL={uuid:'00000000-0000-0000-0000-000000000001',name:'测试体'}`);
+
+  await evalIn(sandbox, 'openDedupe')();
+
+  assert.equal(evalIn(sandbox, 'COPY_VERSION'), null);
+  assert.equal(evalIn(sandbox, "document.getElementById('dedupeConfirm').disabled"), true);
+});
+
 // UI-04:预览旧失败
 test('UI-04 旧预览请求的失败不得改写新选择的提示', async () => {
   const slowFail = deferred();

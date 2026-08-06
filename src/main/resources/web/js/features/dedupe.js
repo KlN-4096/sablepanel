@@ -7,21 +7,22 @@ async function openDedupe(){
   document.getElementById('copyBack').style.display = 'flex';
   document.getElementById('copyPanelBody').innerHTML = `<div class="empty">${t('dedupeScanning')}</div>`;
   document.getElementById('copyPanelStatus').textContent = '';
+  document.getElementById('copyComp').innerHTML = '';
   document.getElementById('dedupeConfirm').disabled = true;
   const preview = document.getElementById('previewWrap');
   document.getElementById('copyPreviewHost').appendChild(preview);
+  document.getElementById('copyPreviewNote').textContent = t('copyPreviewPending');
   if (renderer && renderer.domElement.parentElement !== preview) preview.insertBefore(renderer.domElement, preview.firstChild);
+  disposeMesh(); MESH_DATA = MESH_UUID = MESH_SOURCE = null;
+  document.getElementById('pvInfo').textContent = t('copyPreviewPending');
+  renderComposition();
   resizeGL();
   try {
     const result = await api(`/api/body/${uuid}/copies`);
     if (COPY_UUID !== uuid || result.uuid !== uuid) return;
     COPY_SCAN = result;
-    const versions = result.versions || [];
-    const initial = versions.find(version=>version.id===result.current_version)
-      || versions.find(version=>version.complete) || versions[0];
-    COPY_VERSION = initial ? initial.id : null;
+    COPY_VERSION = null;
     renderDedupe(result);
-    if (initial) loadCopyVersionMesh(uuid, initial.id);
   } catch(e) {
     if (COPY_UUID !== uuid) return;
     document.getElementById('copyPanelBody').innerHTML = `<div class="empty" style="color:var(--bad)">${esc(e.message)}</div>`;
@@ -30,6 +31,7 @@ async function openDedupe(){
 }
 function renderDedupe(scan){
   const versions = scan.versions || [];
+  const currentState = scan.current_state || 'unknown';
   const current = versions.find(version=>version.id===scan.current_version);
   const currentBlocks = current ? current.blocks||0 : null;
   const incomplete = scan.incomplete || [];
@@ -46,7 +48,7 @@ function renderDedupe(scan){
           <span class="tag ${version.complete?'ok':'bad'}">${version.complete?t('copyComplete'):t('copyIncomplete')}</span>
           ${version.redundant?`<span class="tag warn">${t('copyRedundant')(version.redundant)}</span>`:''}
         </span>
-        <span class="copyVersionMeta">${t('copyVersionMeta')(version.members||0,version.blocks||0,delta)}<br>${esc(locations||t('copyUnreachable'))}
+        <span class="copyVersionMeta">${t('copyVersionMeta')(version.members||0,version.blocks||0,delta)} · ${t('copyActiveEvidence')(version.active_members||0,version.members||0)}<br>${esc(locations||t('copyUnreachable'))}
           ${missing.length?`<br>${t('copyMissing')}: ${missing.map(esc).join(', ')}`:''}</span>
       </span></button>`;
   }).join('');
@@ -54,15 +56,34 @@ function renderDedupe(scan){
     ? `<div class="copyWarning">${t('copyQuarantineWarn')(incomplete.length)}</div>` : '';
   const raw = !versions.length && incomplete.length ? `<table class="copyTable"><tbody>${incomplete.map(copy=>
     `<tr><td class="entry">${esc(copy.entry)}</td><td>${fmt(copy.blocks||0)}</td><td>${esc(copy.dim)}</td></tr>`).join('')}</tbody></table>` : '';
-  document.getElementById('copyPanelBody').innerHTML = `<div class="copySummary">${t('copyGroupSummary')(scan.members||0,versions.length)}</div>${warning}${rows||raw||`<div class="empty">${t('dedupeSingle')}</div>`}`;
   const selected = versions.find(version=>version.id===COPY_VERSION);
+  const baseline = currentState==='mixed' ? `<div class="copyWarning">${t('copyCurrentMixed')}</div>`
+    : currentState==='unknown' ? `<div class="copyWarning">${t('copyCurrentUnknown')}</div>` : '';
+  document.getElementById('copyPanelBody').innerHTML = `<div class="copySummary">${t('copyGroupSummary')(scan.members||0,versions.length)}</div>${baseline}${warning}${rows||raw||`<div class="empty">${t('dedupeSingle')}</div>`}${copySelectionDetails(scan,selected)}`;
   const complete = versions.filter(version=>version.complete);
   const quarantineOnly = !complete.length && incomplete.length;
   const confirm = document.getElementById('dedupeConfirm');
-  confirm.disabled = !quarantineOnly && (!selected || !selected.complete);
+  confirm.disabled = !quarantineOnly && (currentState!=='known' || !selected || !selected.complete);
   confirm.textContent = quarantineOnly ? t('copyQuarantineAll') : t('dedupeConfirm');
-  document.getElementById('copyPanelStatus').textContent = quarantineOnly ? t('copyOnlyIncomplete') : selected
-    ? (selected.complete?t('copyReady')+(scan.current_version?'':` · ${t('copyCurrentUnknown')}`):t('copyCannotSelect')) : t('copyNoVersion');
+  let status = versions.length ? t('copyChooseVersion') : t('copyNoVersion');
+  if (selected) status = selected.complete ? t('copyReady') : t('copyCannotSelect');
+  if (currentState==='unknown') status = t('copyCurrentUnknown');
+  if (currentState==='mixed') status = t('copyCurrentMixed');
+  if (quarantineOnly) status = t('copyOnlyIncomplete');
+  document.getElementById('copyPanelStatus').textContent = status;
+}
+function copySelectionDetails(scan,selected){
+  if (!selected) return '';
+  const kept=selected.members||0, removed=Math.max(0,(scan.members||0)-kept);
+  const impact=selected.complete?`<div class="copyImpact">
+    <span><b>${fmt(scan.members||0)}</b>${t('copyImpactTotal')}</span>
+    <span><b>${fmt(kept)}</b>${t('copyImpactKeep')}</span>
+    <span class="${removed?'warn':''}"><b>${fmt(removed)}</b>${t('copyImpactRemove')}</span></div>`:'';
+  const rows=(selected.copies||[]).filter(copy=>!copy.redundant).map(copy=>{
+    const pos=Array.isArray(copy.pos)?copy.pos.map(value=>fmt(Math.round(value))).join(', '):copy.dim;
+    return `<div class="copyMemberRow"><span><b>${esc(copy.name||copy.uuid.slice(0,8))}</b><br><small>${esc(copy.uuid)}</small></span><span>${fmt(copy.blocks||0)}<br><small>${esc(pos)}</small></span></div>`;
+  }).join('');
+  return `${impact}<details class="copyMembers"><summary>${t('copyMemberList')(kept)}</summary>${rows}</details>`;
 }
 function selectCopyVersion(versionId){
   if (!COPY_SCAN || !COPY_UUID) return;
@@ -70,6 +91,9 @@ function selectCopyVersion(versionId){
   if (!version) return;
   COPY_VERSION = versionId;
   renderDedupe(COPY_SCAN);
+  const target = (version.copies||[]).find(copy=>copy.uuid===COPY_UUID);
+  document.getElementById('copyPreviewNote').textContent = t('copyPreviewSingle')(
+    target?.name || SEL?.name || COPY_UUID.slice(0,8));
   loadCopyVersionMesh(COPY_UUID, versionId);
 }
 function closeDedupe(){
@@ -79,6 +103,7 @@ function closeDedupe(){
   if (preview.parentElement!==host) host.appendChild(preview);
   if (renderer && renderer.domElement.parentElement!==preview) preview.insertBefore(renderer.domElement, preview.firstChild);
   COPY_SCAN = null; COPY_UUID = null; COPY_VERSION = null;
+  document.getElementById('copyPreviewNote').textContent = '';
   document.getElementById('copyComp').innerHTML = '';
   resizeGL();
   if (SEL) loadMesh(SEL.uuid);
@@ -94,12 +119,16 @@ async function confirmDedupe(){
     return;
   }
   if (!COPY_VERSION) return;
+  if (COPY_SCAN.current_state!=='known' || !COPY_SCAN.current_version) {
+    toast(COPY_SCAN.current_state==='mixed'?t('copyCurrentMixed'):t('copyCurrentUnknown'),'bad');
+    return;
+  }
   const version = (COPY_SCAN.versions||[]).find(candidate=>candidate.id===COPY_VERSION);
   if (!version || !version.complete) return;
   const archived = Math.max(0,(COPY_SCAN.versions||[]).filter(candidate=>candidate.complete).length-1);
   const quarantined = (COPY_SCAN.incomplete||[]).length;
-  const message=t('copyResolveAsk')(archived,quarantined)
-    +(COPY_SCAN.current_version?'':`\n${t('copyCurrentUnknownWarn')}`);
+  const kept=version.members||0, removed=Math.max(0,(COPY_SCAN.members||0)-kept);
+  const message=t('copyResolveAsk')({total:COPY_SCAN.members||0,keep:kept,removed,old:archived,incomplete:quarantined});
   if (!await askModal(t('dedupeTitle'),message,false)) return;
   const uuid = COPY_UUID, selected = COPY_VERSION;
   const accepted = await submitJob(`/api/body/${uuid}/resolve_copies`,
