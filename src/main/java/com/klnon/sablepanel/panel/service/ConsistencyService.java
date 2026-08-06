@@ -251,11 +251,18 @@ public final class ConsistencyService {
                                                        Set<DiskScanner.EntryKey> payloads,
                                                        List<String> warnings) throws IOException {
         Map<String, MutablePointerIssue> grouped = new LinkedHashMap<>();
-        for (DiskScanner.PointerReference reference : DiskScanner.scanPointersStrict(dimensions, warnings)) {
-            if (payloads.contains(reference.key())) continue;
+        DiskScanner.forEachPointerStrict(dimensions, warnings, reference -> {
+            if (payloads.contains(reference.key())) return;
             String key = reference.key().id() + "@" + reference.chunkX() + "," + reference.chunkZ();
-            grouped.computeIfAbsent(key, ignored -> new MutablePointerIssue(reference)).count++;
-        }
+            MutablePointerIssue issue = grouped.get(key);
+            if (issue != null) {
+                issue.count++;
+            } else if (grouped.size() <= MAX_ISSUES) {
+                issue = new MutablePointerIssue(reference);
+                issue.count = 1;
+                grouped.put(key, issue);
+            }
+        });
         return grouped.values().stream().map(MutablePointerIssue::freeze)
                 .sorted(Comparator.comparing(PointerIssue::id)).toList();
     }

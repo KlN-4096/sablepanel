@@ -8,13 +8,10 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.klnon.sablepanel.SablePanel;
 import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
 import net.neoforged.fml.loading.FMLPaths;
 
-import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
-import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -137,6 +134,9 @@ public final class RecycleStore {
 
     RecycleStore(PanelConfig config, Path root) {
         this.config = config;
+        if (config.recycleMaxFiles < 1 || config.recycleMaxFiles > PanelConfig.MAX_RECYCLE_FILES) {
+            config.recycleMaxFiles = PanelConfig.DEFAULT_RECYCLE_MAX_FILES;
+        }
         this.root = root.toAbsolutePath().normalize();
         this.pendingRoot = this.root.resolve(".pending");
         recoverVersionTransactions();
@@ -560,7 +560,9 @@ public final class RecycleStore {
     }
 
     public synchronized int setLimit(int limit) throws IOException {
-        if (limit < 1 || limit > 1_000_000) throw new IllegalArgumentException("回收站上限必须在 1 到 1000000 之间");
+        if (limit < 1 || limit > PanelConfig.MAX_RECYCLE_FILES) {
+            throw new IllegalArgumentException("回收站上限必须在 1 到 1000000 之间");
+        }
         int previous = this.config.recycleMaxFiles;
         this.config.recycleMaxFiles = limit;
         try {
@@ -649,6 +651,8 @@ public final class RecycleStore {
             try (OutputStream output = new BufferedOutputStream(Files.newOutputStream(file))) {
                 NbtIo.writeCompressed(source.tag, output);
             }
+            // 删除尚未发生;超限备份必须在事务阶段失败,不能写得出却恢复时读不回来。
+            BoundedNbtIo.requireCompressedSize(file);
             files.get(source.uuid).add(name);
         }
     }
@@ -1090,9 +1094,7 @@ public final class RecycleStore {
     }
 
     private static CompoundTag readTag(Path file) throws IOException {
-        try (var input = new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) {
-            return NbtIo.readCompressed(input, NbtAccounter.unlimitedHeap());
-        }
+        return BoundedNbtIo.readCompressed(file);
     }
 
     private static void writeJsonAtomic(Path file, JsonObject value) throws IOException {

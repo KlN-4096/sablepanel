@@ -8,9 +8,12 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -71,6 +74,16 @@ class DiskScannerCorruptionTest {
             out.position(sectorStarts.get(i) * sectorSize);
             out.put(records.get(i));
         }
+        Files.write(file, out.array());
+    }
+
+    private static void writeExternalStub(Path file, int sectorSize, int index) throws IOException {
+        int startSector = 4096 / sectorSize;
+        ByteBuffer out = ByteBuffer.allocate(4096 + sectorSize);
+        out.putInt(index * 4, (startSector << 8) | 1);
+        out.position(startSector * sectorSize);
+        out.putInt(1);
+        out.put((byte) 0x10);
         Files.write(file, out.array());
     }
 
@@ -233,6 +246,41 @@ class DiskScannerCorruptionTest {
         assertEquals(3, references.size());
         assertEquals(2, references.stream().filter(reference -> reference.key().equals(dangling)).count());
         assertTrue(references.stream().allMatch(reference -> reference.chunkX() == 7 && reference.chunkZ() == 0));
+    }
+
+    @Test
+    void truncatedFileWarningsHaveHardInMemoryLimits() throws Exception {
+        Path dir = dimDir();
+        for (int i = 0; i < 150; i++) Files.createFile(dir.resolve("r." + i + ".0.0.slvls"));
+
+        List<String> warnings = new ArrayList<>();
+        DiskScanner.scanEntryMetaStrict(Map.of(DIM, dir), warnings);
+        assertEquals(101, warnings.size(), "严格扫描只保留 100 条明细和一条截断说明");
+        assertTrue(warnings.getLast().contains("其余"));
+
+        DiskScanner.scan(Map.of(DIM, dir));
+        Field warned = DiskScanner.class.getDeclaredField("WARNED_TRUNCATED");
+        warned.setAccessible(true);
+        assertTrue(((Set<?>) warned.get(null)).size() <= 128,
+                "后台每路径一次的日志去重集合也必须有硬上限");
+    }
+
+    @Test
+    void oversizedExternalEntryIsRejectedBeforeItIsReadIntoHeap() throws Exception {
+        Path dir = dimDir();
+        writeExternalStub(dir.resolve("r.0.0.0.slvls"), 4096, 0);
+        Path externalDir = Files.createDirectories(dir.resolve("r.0.0.r"));
+        Path external = externalDir.resolve("0.slvl");
+        try (FileChannel channel = FileChannel.open(external,
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+            channel.position(BoundedNbtIo.MAX_COMPRESSED_BYTES + 1);
+            channel.write(ByteBuffer.wrap(new byte[]{0}));
+        }
+
+        IOException error = assertThrows(IOException.class,
+                () -> DiskScanner.scanEntryMetaStrict(Map.of(DIM, dir), new ArrayList<>()));
+        assertTrue(error.getMessage().contains("压缩 NBT 文件超过"),
+                "必须先按文件大小拒绝,不能先 readAllBytes 再尝试解析: " + error.getMessage());
     }
 
     // ---- readEntryTag 改成按头部偏移直读单槽后的回归:必须仍然只取到目标那一条 ----

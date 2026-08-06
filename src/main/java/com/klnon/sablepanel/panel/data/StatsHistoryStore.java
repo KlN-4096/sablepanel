@@ -73,7 +73,9 @@ public final class StatsHistoryStore implements AutoCloseable {
     StatsHistoryStore(Path root, int retentionDays, ZoneId zone) throws IOException {
         this.rawDirectory = root.resolve("raw");
         this.minuteDirectory = root.resolve("minute");
-        this.retentionDays = Math.max(1, retentionDays);
+        // 配置文件不是 API:即使绕过 PanelConfig.load,日期遍历也必须有硬上限。
+        this.retentionDays = Math.max(1,
+                Math.min(PanelConfig.MAX_STATS_RETENTION_DAYS, retentionDays));
         this.zone = zone;
         Files.createDirectories(this.rawDirectory);
         Files.createDirectories(this.minuteDirectory);

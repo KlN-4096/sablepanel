@@ -4,8 +4,6 @@ import com.klnon.sablepanel.panel.PanelConfig;
 import com.klnon.sablepanel.SablePanel;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
-import net.minecraft.nbt.NbtAccounter;
-import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtUtils;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
@@ -13,8 +11,6 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.storage.LevelResource;
 
-import java.io.ByteArrayInputStream;
-import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -24,6 +20,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -43,6 +40,8 @@ import java.util.regex.Pattern;
 public final class DiskScanner {
     private static final Pattern SLVLS = Pattern.compile("r\\.(-?\\d+)\\.(-?\\d+)\\.(\\d+)\\.slvls");
     private static final Pattern SLVLR = Pattern.compile("r\\.(-?\\d+)\\.(-?\\d+)\\.slvlr");
+    private static final int STRICT_WARNING_LIMIT = 100;
+    private static final int BACKGROUND_WARNING_PATH_LIMIT = 128;
 
     public record EntryKey(String dim, int rx, int rz, int storage, int index) {
         public String id() {
@@ -311,12 +310,12 @@ public final class DiskScanner {
                                                                           List<String> warnings)
             throws IOException {
         Map<EntryKey, List<LiveLocation>> located = new HashMap<>();
-        for (PointerReference reference : scanPointersStrict(dims, warnings)) {
+        forEachPointerStrict(dims, warnings, reference -> {
             if (targets.contains(reference.key())) {
                 located.computeIfAbsent(reference.key(), ignored -> new ArrayList<>())
                         .add(new LiveLocation(reference.key(), reference.chunkX(), reference.chunkZ()));
             }
-        }
+        });
         return located;
     }
 
@@ -327,13 +326,23 @@ public final class DiskScanner {
     public static List<PointerReference> scanPointersStrict(Map<String, Path> dims,
                                                              List<String> warnings) throws IOException {
         List<PointerReference> references = new ArrayList<>();
-        for (Map.Entry<String, Path> dimension : dims.entrySet()) {
+        forEachPointerStrict(dims, warnings, references::add);
+        return List.copyOf(references);
+    }
+
+    /** 流式严格遍历 holding 指针；目标定位和有上限的检查不必先物化全服指针表。 */
+    public static void forEachPointerStrict(Map<String, Path> dims, List<String> warnings,
+                                            PointerConsumer consumer) throws IOException {
+        List<Map.Entry<String, Path>> dimensions = new ArrayList<>(dims.entrySet());
+        dimensions.sort(Map.Entry.comparingByKey());
+        for (Map.Entry<String, Path> dimension : dimensions) {
             String dim = dimension.getKey();
             Path dir = dimension.getValue();
             if (!Files.isDirectory(dir)) throw new IOException("sublevels 目录不存在: " + dir);
             List<Path> files;
             try (var stream = Files.list(dir)) {
-                files = stream.filter(path -> SLVLR.matcher(path.getFileName().toString()).matches()).toList();
+                files = stream.filter(path -> SLVLR.matcher(path.getFileName().toString()).matches())
+                        .sorted(Comparator.comparing(path -> path.getFileName().toString())).toList();
             }
             for (Path file : files) {
                 Matcher matcher = SLVLR.matcher(file.getFileName().toString());
@@ -346,12 +355,16 @@ public final class DiskScanner {
                     for (int packed : tag.getIntArray("pointers")) {
                         EntryKey key = new EntryKey(dim, rx, rz,
                                 (packed >> 16) & 0xFFFF, packed & 0xFFFF);
-                        references.add(new PointerReference(key, chunkX, chunkZ));
+                        consumer.accept(new PointerReference(key, chunkX, chunkZ));
                     }
                 });
             }
         }
-        return List.copyOf(references);
+    }
+
+    @FunctionalInterface
+    public interface PointerConsumer {
+        void accept(PointerReference reference);
     }
 
     /**
@@ -368,7 +381,7 @@ public final class DiskScanner {
             long fileSize = channel.size();
             ByteBuffer header = ByteBuffer.allocate(4096);
             if (fileSize < 4096) {
-                warnings.add("存储头截断(" + fileSize + " 字节): " + file.getFileName()
+                addStrictWarning(warnings, "存储头截断(" + fileSize + " 字节): " + file.getFileName()
                         + ",已按可读前缀处理;建议停服备份后删除该文件");
             }
             int available = (int) Math.min(fileSize, 4096);
@@ -404,25 +417,28 @@ public final class DiskScanner {
         byte type = metadata.get();
         if (size <= 0) throw new IOException("存储槽位长度无效: " + file.getFileName() + "#" + index);
 
-        byte[] payload;
         if ((type & 0x10) != 0) {
             Path external = dir.resolve("r." + rx + "." + rz + ".r").resolve(index + ".slvl");
             if (!Files.isRegularFile(external)) throw new IOException("外部条目缺失: " + external);
-            payload = Files.readAllBytes(external);
-        } else {
-            long recordSize = 4L + size;
-            if (recordSize > capacity || offset + recordSize > fileSize) {
-                throw new IOException("存储槽位内容不完整: " + file.getFileName() + "#" + index);
+            try {
+                return BoundedNbtIo.readCompressed(external);
+            } catch (Exception error) {
+                throw new IOException("NBT 条目无法解析: " + file.getFileName() + "#" + index
+                        + ": " + error.getMessage(), error);
             }
-            payload = new byte[size - 1];
-            readFully(channel, ByteBuffer.wrap(payload), offset + 5, file);
         }
+        long recordSize = 4L + size;
+        if (recordSize > capacity || offset + recordSize > fileSize) {
+            throw new IOException("存储槽位内容不完整: " + file.getFileName() + "#" + index);
+        }
+        byte[] payload = new byte[size - 1];
+        readFully(channel, ByteBuffer.wrap(payload), offset + 5, file);
 
         try {
-            return NbtIo.readCompressed(
-                    new DataInputStream(new ByteArrayInputStream(payload)), NbtAccounter.unlimitedHeap());
+            return BoundedNbtIo.readCompressed(payload);
         } catch (Exception error) {
-            throw new IOException("NBT 条目无法解析: " + file.getFileName() + "#" + index, error);
+            throw new IOException("NBT 条目无法解析: " + file.getFileName() + "#" + index
+                    + ": " + error.getMessage(), error);
         }
     }
 
@@ -450,12 +466,12 @@ public final class DiskScanner {
     }
 
     /** 后台扫描发现的截断文件,每个路径只告警一次,避免每轮扫描刷屏 */
-    private static final Set<String> WARNED_TRUNCATED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> WARNED_TRUNCATED = new HashSet<>();
 
     private static void forEachEntry(Path file, Path dir, int rx, int rz, int sectorSize, EntryConsumer consumer) {
         try (FileChannel ch = FileChannel.open(file, StandardOpenOption.READ)) {
             long fileSize = ch.size();
-            if (fileSize < 4096 && WARNED_TRUNCATED.add(file.toAbsolutePath().toString())) {
+            if (fileSize < 4096 && rememberTruncatedPath(file.toAbsolutePath().toString())) {
                 SablePanel.LOGGER.warn("sablepanel: 存储头截断({} 字节),与 sable 相同仅可读前缀有效,"
                         + "建议停服备份后删除该文件: {}", fileSize, file);
             }
@@ -470,6 +486,23 @@ public final class DiskScanner {
             }
         } catch (Exception e) {
             SablePanel.LOGGER.debug("sablepanel: cannot read {}", file, e);
+        }
+    }
+
+    private static void addStrictWarning(List<String> warnings, String warning) {
+        if (warnings.size() < STRICT_WARNING_LIMIT) {
+            warnings.add(warning);
+        } else if (warnings.size() == STRICT_WARNING_LIMIT) {
+            warnings.add("其余截断文件警告已省略");
+        }
+    }
+
+    private static boolean rememberTruncatedPath(String path) {
+        synchronized (WARNED_TRUNCATED) {
+            if (WARNED_TRUNCATED.contains(path) || WARNED_TRUNCATED.size() >= BACKGROUND_WARNING_PATH_LIMIT) {
+                return false;
+            }
+            return WARNED_TRUNCATED.add(path);
         }
     }
 
@@ -492,18 +525,15 @@ public final class DiskScanner {
             buf.flip();
             int size = buf.getInt();
             byte dtype = buf.get();
-            byte[] payload;
             if ((dtype & 0x10) != 0) {
                 Path ext = dir.resolve("r." + rx + "." + rz + ".r").resolve(idx + ".slvl");
                 if (!Files.isRegularFile(ext)) return null;
-                payload = Files.readAllBytes(ext);
-            } else {
-                if (size <= 0 || size - 1 > buf.remaining()) return null;
-                payload = new byte[size - 1];
-                buf.get(payload);
+                return BoundedNbtIo.readCompressed(ext);
             }
-            return NbtIo.readCompressed(
-                    new DataInputStream(new ByteArrayInputStream(payload)), NbtAccounter.unlimitedHeap());
+            if (size <= 0 || size - 1 > buf.remaining()) return null;
+            byte[] payload = new byte[size - 1];
+            buf.get(payload);
+            return BoundedNbtIo.readCompressed(payload);
         } catch (Exception ignored) {
             return null; // 写入中的瞬态条目,跳过
         }
