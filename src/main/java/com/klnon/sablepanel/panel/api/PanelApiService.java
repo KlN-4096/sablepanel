@@ -38,7 +38,7 @@ public final class PanelApiService {
     private static final Pattern COPY_MESH = Pattern.compile(
             "/api/body/([0-9a-fA-F-]{36})/copy/([0-9a-f]{16})/mesh");
     private static final Pattern BODY_OP = Pattern.compile(
-            "/api/body/([0-9a-fA-F-]{36})/(mesh|copies|teleport_player|teleport|delete|adopt|deduplicate|resolve_copies|quarantine_copies)");
+            "/api/body/([0-9a-fA-F-]{36})/([a-z_]{1,32})");
 
     private final PanelConfig config;
     private final MinecraftServer server;
@@ -47,6 +47,9 @@ public final class PanelApiService {
     private final JobService jobs;
     private final String selfId;
     private final Object tokenLock = new Object();
+    /** 精确路径与单体操作的路由表;构造时按所属服务分组注册 */
+    private final Map<String, Route> routes = new LinkedHashMap<>();
+    private final Map<String, BodyRoute> bodyRoutes = new LinkedHashMap<>();
     private final LinkedHashMap<String, byte[]> meshCache = new LinkedHashMap<>(16, 0.75f, true);
     private long meshCacheBytes;
     private volatile long lastActivityMs = System.currentTimeMillis();
@@ -59,6 +62,11 @@ public final class PanelApiService {
         this.ops = ops;
         this.jobs = jobs;
         this.selfId = config.serverId();
+        registerListRoutes();
+        registerRecycleRoutes();
+        registerConsistencyRoutes();
+        registerBatchRoutes();
+        registerBodyRoutes();
     }
 
     /**
@@ -81,183 +89,209 @@ public final class PanelApiService {
 
     private PanelResponse dispatchAuthorized(PanelRequest request) throws Exception {
         String path = request.path();
-        switch (path) {
-            case "/api/bodies" -> {
-                JsonObject view = this.index.view();
-                // 作业状态不在这儿:它每两秒变一次,而这份快照最大 12 MiB。前端改从
-                // /api/jobs 的 running[] 取,那里字段是全的,顺带省掉一次日志请求
-                // "虚空中/极高空"的高度阈值(服主可在配置里调),前端据此筛选
-                JsonObject reach = new JsonObject();
-                reach.addProperty("void_below", this.config.voidBelowY);
-                reach.addProperty("sky_above", this.config.skyAboveY);
-                view.add("reach", reach);
-                return PanelResponse.json(200, view, true);
-            }
-            case "/api/jobs" -> {
-                String file = request.query().get("file");
-                if (file != null && !file.isBlank()) return PanelResponse.json(200, JobService.readLog(file), true);
-                // poll=1 是面板每 2 秒那一次:只要 running 和精简过的历史,不列日志目录
-                return PanelResponse.json(200, this.jobs.view(request.query().containsKey("poll")), true);
-            }
-            case "/api/players" -> {
-                return PanelResponse.json(200, this.ops.teleport().listPlayers(), false);
-            }
-            case "/api/stats" -> {
-                return PanelResponse.json(200, StatsCollector.INSTANCE.toJson(), true);
-            }
-            case "/api/recycle" -> {
-                // 游标分页:cursor 是上一页最后一个组的 id,服务端只读这一页的 manifest
-                String version = request.query().getOrDefault("version", "latest");
-                if (!"latest".equals(version) && !"old".equals(version)) {
-                    throw new IllegalArgumentException("version 必须是 latest 或 old");
-                }
-                String cursor = request.query().getOrDefault("cursor", "");
-                int limit = request.query().containsKey("limit")
-                        ? Integer.parseInt(request.query().get("limit")) : 0;
-                return PanelResponse.json(200, this.ops.recycle().view(version, cursor, limit), true);
-            }
-            case "/api/recycle/config" -> {
-                requirePost(request);
-                JsonObject body = request.jsonBody();
-                if (!body.has("max_files")) throw new IllegalArgumentException("max_files 缺失");
-                JsonObject out = new JsonObject();
-                out.addProperty("limit", this.ops.recycle().setLimit(body.get("max_files").getAsInt()));
-                out.addProperty("ok", true);
-                return PanelResponse.json(200, out, false);
-            }
-            case "/api/recycle/restore" -> {
-                requirePost(request);
-                List<String> groupIds = readRecycleIds(request);
-                return enqueue("回收站恢复", List.of(), groupIds.size() + " 个依赖组",
-                        () -> this.ops.restore().restoreRecycleGroups(groupIds));
-            }
-            case "/api/recycle/purge" -> {
-                requirePost(request);
-                List<String> groupIds = readRecycleIds(request);
-                return enqueue("回收站彻底删除", List.of(), groupIds.size() + " 个依赖组",
-                        () -> this.ops.restore().purgeRecycleGroups(groupIds));
-            }
-            case "/api/rescan" -> {
-                requirePost(request);
-                return enqueue("重扫磁盘", List.of(), "", () -> {
-                    this.ops.kit().rescanNow();
-                    JsonObject out = new JsonObject();
-                    out.addProperty("ok", true);
-                    return out;
-                });
-            }
-            case "/api/consistency" -> {
-                return PanelResponse.json(200, this.ops.consistency().view(), true);
-            }
-            case "/api/consistency/scan" -> {
-                requirePost(request);
-                return enqueue("一致性检查", List.of(), "", () -> this.ops.consistency().scan(false));
-            }
-            case "/api/consistency/repair" -> {
-                requirePost(request);
-                JsonObject body = request.jsonBody();
-                String scanId = body.has("scan_id") ? body.get("scan_id").getAsString() : "";
-                if (!scanId.matches("[0-9a-z]+-[0-9a-f]{8}")) throw new IllegalArgumentException("scan_id 无效");
-                Set<String> pointers = readStrings(body, "pointers", "[0-9a-f]{16}");
-                Set<UUID> forced = readUuidSet(body, "forced");
-                Set<UUID> paused = readUuidSet(body, "paused");
-                int total = pointers.size() + forced.size() + paused.size();
-                if (total == 0 || total > 10_000) throw new IllegalArgumentException("修复项数量无效");
-                return enqueue("一致性修复", List.of(), total + " 项",
-                        () -> this.ops.consistency().repair(scanId, pointers, forced, paused));
-            }
-            case "/api/ops/batch_delete" -> {
-                requirePost(request);
-                List<UUID> uuids = readUuids(request);
-                return enqueue("批量删除", uuids, targetLabel(uuids), () -> this.ops.delete().deleteBatch(uuids));
-            }
-            case "/api/ops/batch_adopt" -> {
-                requirePost(request);
-                List<UUID> uuids = readUuids(request);
-                return enqueue("批量收养", uuids, targetLabel(uuids), () -> this.ops.adopt().adoptBatch(uuids));
-            }
-            case "/api/ops/pause" -> {
-                requirePost(request);
-                JsonObject body = request.jsonBody();
-                List<UUID> uuids = readUuids(body);
-                boolean paused = body.has("paused") && body.get("paused").getAsBoolean();
-                return enqueue(paused ? "暂停" : "恢复", uuids, targetLabel(uuids),
-                        () -> this.ops.teleport().setPaused(uuids, paused));
-            }
-            case "/api/ops/force_load" -> {
-                requirePost(request);
-                JsonObject body = request.jsonBody();
-                List<UUID> uuids = readUuids(body);
-                boolean forced = body.has("forced") && body.get("forced").getAsBoolean();
-                return enqueue(forced ? "常驻加载" : "取消常驻", uuids, targetLabel(uuids),
-                        () -> this.ops.teleport().setForced(uuids, forced));
-            }
-        }
+        Route route = this.routes.get(path);
+        if (route != null) return route.handle(request);
 
         var recycleMesh = RECYCLE_MESH.matcher(path);
         if (recycleMesh.matches()) {
             JsonObject mesh = this.ops.recycle().mesh(recycleMesh.group(1), UUID.fromString(recycleMesh.group(2)));
             return PanelResponse.json(200, mesh, true);
         }
-
         var copyMesh = COPY_MESH.matcher(path);
         if (copyMesh.matches()) {
-            JsonObject mesh = this.ops.copies().copyVersionMesh(
-                    UUID.fromString(copyMesh.group(1)), copyMesh.group(2));
-            return PanelResponse.json(200, mesh, true);
+            return PanelResponse.json(200, this.ops.copies().copyVersionMesh(
+                    UUID.fromString(copyMesh.group(1)), copyMesh.group(2)), true);
         }
-
         var bodyOp = BODY_OP.matcher(path);
         if (!bodyOp.matches()) return PanelResponse.error(404, "not found");
-        UUID uuid = UUID.fromString(bodyOp.group(1));
-        return switch (bodyOp.group(2)) {
-            case "mesh" -> mesh(uuid);
-            case "copies" -> PanelResponse.json(200, this.ops.copies().inspectCopies(uuid), true);
-            case "teleport" -> {
-                requirePost(request);
-                // 参数在入队前解析:格式错误要当场 400,而不是过几秒变成一条失败作业
-                double x = Double.parseDouble(request.query().get("x"));
-                double y = Double.parseDouble(request.query().get("y"));
-                double z = Double.parseDouble(request.query().get("z"));
-                yield enqueue("传送", List.of(uuid), targetLabel(List.of(uuid)),
-                        () -> this.ops.teleport().teleport(uuid, x, y, z));
+        BodyRoute op = this.bodyRoutes.get(bodyOp.group(2));
+        if (op == null) return PanelResponse.error(404, "not found");
+        return op.handle(request, UUID.fromString(bodyOp.group(1)));
+    }
+
+    @FunctionalInterface
+    private interface Route {
+        PanelResponse handle(PanelRequest request) throws Exception;
+    }
+
+    @FunctionalInterface
+    private interface BodyRoute {
+        PanelResponse handle(PanelRequest request, UUID uuid) throws Exception;
+    }
+
+    /** 只读视图与重扫:列表/作业/玩家/统计 */
+    private void registerListRoutes() {
+        this.routes.put("/api/bodies", request -> {
+            JsonObject view = this.index.view();
+            // 作业状态不在这儿:它每两秒变一次,而这份快照最大 12 MiB。前端改从
+            // /api/jobs 的 running[] 取,那里字段是全的,顺带省掉一次日志请求
+            // "虚空中/极高空"的高度阈值(服主可在配置里调),前端据此筛选
+            JsonObject reach = new JsonObject();
+            reach.addProperty("void_below", this.config.voidBelowY);
+            reach.addProperty("sky_above", this.config.skyAboveY);
+            view.add("reach", reach);
+            return PanelResponse.json(200, view, true);
+        });
+        this.routes.put("/api/jobs", request -> {
+            String file = request.query().get("file");
+            if (file != null && !file.isBlank()) return PanelResponse.json(200, JobService.readLog(file), true);
+            // poll=1 是面板每 2 秒那一次:只要 running 和精简过的历史,不列日志目录
+            return PanelResponse.json(200, this.jobs.view(request.query().containsKey("poll")), true);
+        });
+        this.routes.put("/api/players", request ->
+                PanelResponse.json(200, this.ops.teleport().listPlayers(), false));
+        this.routes.put("/api/stats", request ->
+                PanelResponse.json(200, StatsCollector.INSTANCE.toJson(), true));
+        this.routes.put("/api/rescan", request -> {
+            requirePost(request);
+            return enqueue("重扫磁盘", List.of(), "", () -> {
+                this.ops.kit().rescanNow();
+                JsonObject out = new JsonObject();
+                out.addProperty("ok", true);
+                return out;
+            });
+        });
+    }
+
+    /** 回收站:分页视图/上限配置/恢复/彻底删除 */
+    private void registerRecycleRoutes() {
+        this.routes.put("/api/recycle", request -> {
+            // 游标分页:cursor 是上一页最后一个组的 id,服务端只读这一页的 manifest
+            String version = request.query().getOrDefault("version", "latest");
+            if (!"latest".equals(version) && !"old".equals(version)) {
+                throw new IllegalArgumentException("version 必须是 latest 或 old");
             }
-            case "teleport_player" -> {
-                requirePost(request);
-                String player = request.query().get("player");
-                if (player == null || player.isBlank()) throw new IllegalArgumentException("player 缺失");
-                UUID playerUuid = UUID.fromString(player);
-                yield enqueue("传送玩家", List.of(uuid), targetLabel(List.of(uuid)),
-                        () -> this.ops.teleport().teleportPlayer(uuid, playerUuid));
-            }
-            case "delete" -> {
-                requirePost(request);
-                yield enqueue("删除", List.of(uuid), targetLabel(List.of(uuid)), () -> this.ops.delete().delete(uuid));
-            }
-            case "adopt" -> {
-                requirePost(request);
-                yield enqueue("收养", List.of(uuid), targetLabel(List.of(uuid)), () -> this.ops.adopt().adopt(uuid));
-            }
-            case "deduplicate" -> {
-                requirePost(request);
-                yield enqueue("去重", List.of(uuid), targetLabel(List.of(uuid)),
-                        () -> this.ops.copies().deduplicate(uuid));
-            }
-            case "resolve_copies" -> {
-                requirePost(request);
-                JsonObject body = request.jsonBody();
-                String version = body.has("version") ? body.get("version").getAsString() : "";
-                if (!version.matches("[0-9a-f]{16}")) throw new IllegalArgumentException("version 无效");
-                yield enqueue("处理副本", List.of(uuid), targetLabel(List.of(uuid)),
-                        () -> this.ops.copies().resolveCopyVersion(uuid, version));
-            }
-            case "quarantine_copies" -> {
-                requirePost(request);
-                yield enqueue("隔离不完整副本", List.of(uuid), targetLabel(List.of(uuid)),
-                        () -> this.ops.copies().quarantineIncompleteCopies(uuid));
-            }
-            default -> PanelResponse.error(404, "not found");
-        };
+            String cursor = request.query().getOrDefault("cursor", "");
+            int limit = request.query().containsKey("limit")
+                    ? Integer.parseInt(request.query().get("limit")) : 0;
+            return PanelResponse.json(200, this.ops.recycle().view(version, cursor, limit), true);
+        });
+        this.routes.put("/api/recycle/config", request -> {
+            requirePost(request);
+            JsonObject body = request.jsonBody();
+            if (!body.has("max_files")) throw new IllegalArgumentException("max_files 缺失");
+            JsonObject out = new JsonObject();
+            out.addProperty("limit", this.ops.recycle().setLimit(body.get("max_files").getAsInt()));
+            out.addProperty("ok", true);
+            return PanelResponse.json(200, out, false);
+        });
+        this.routes.put("/api/recycle/restore", request -> {
+            requirePost(request);
+            List<String> groupIds = readRecycleIds(request);
+            return enqueue("回收站恢复", List.of(), groupIds.size() + " 个依赖组",
+                    () -> this.ops.restore().restoreRecycleGroups(groupIds));
+        });
+        this.routes.put("/api/recycle/purge", request -> {
+            requirePost(request);
+            List<String> groupIds = readRecycleIds(request);
+            return enqueue("回收站彻底删除", List.of(), groupIds.size() + " 个依赖组",
+                    () -> this.ops.restore().purgeRecycleGroups(groupIds));
+        });
+    }
+
+    /** 一致性:结果视图/手动扫描/显式修复 */
+    private void registerConsistencyRoutes() {
+        this.routes.put("/api/consistency", request ->
+                PanelResponse.json(200, this.ops.consistency().view(), true));
+        this.routes.put("/api/consistency/scan", request -> {
+            requirePost(request);
+            return enqueue("一致性检查", List.of(), "", () -> this.ops.consistency().scan(false));
+        });
+        this.routes.put("/api/consistency/repair", request -> {
+            requirePost(request);
+            JsonObject body = request.jsonBody();
+            String scanId = body.has("scan_id") ? body.get("scan_id").getAsString() : "";
+            if (!scanId.matches("[0-9a-z]+-[0-9a-f]{8}")) throw new IllegalArgumentException("scan_id 无效");
+            Set<String> pointers = readStrings(body, "pointers", "[0-9a-f]{16}");
+            Set<UUID> forced = readUuidSet(body, "forced");
+            Set<UUID> paused = readUuidSet(body, "paused");
+            int total = pointers.size() + forced.size() + paused.size();
+            if (total == 0 || total > 10_000) throw new IllegalArgumentException("修复项数量无效");
+            return enqueue("一致性修复", List.of(), total + " 项",
+                    () -> this.ops.consistency().repair(scanId, pointers, forced, paused));
+        });
+    }
+
+    /** 多选批量操作 */
+    private void registerBatchRoutes() {
+        this.routes.put("/api/ops/batch_delete", request -> {
+            requirePost(request);
+            List<UUID> uuids = readUuids(request);
+            return enqueue("批量删除", uuids, targetLabel(uuids), () -> this.ops.delete().deleteBatch(uuids));
+        });
+        this.routes.put("/api/ops/batch_adopt", request -> {
+            requirePost(request);
+            List<UUID> uuids = readUuids(request);
+            return enqueue("批量收养", uuids, targetLabel(uuids), () -> this.ops.adopt().adoptBatch(uuids));
+        });
+        this.routes.put("/api/ops/pause", request -> {
+            requirePost(request);
+            JsonObject body = request.jsonBody();
+            List<UUID> uuids = readUuids(body);
+            boolean paused = body.has("paused") && body.get("paused").getAsBoolean();
+            return enqueue(paused ? "暂停" : "恢复", uuids, targetLabel(uuids),
+                    () -> this.ops.teleport().setPaused(uuids, paused));
+        });
+        this.routes.put("/api/ops/force_load", request -> {
+            requirePost(request);
+            JsonObject body = request.jsonBody();
+            List<UUID> uuids = readUuids(body);
+            boolean forced = body.has("forced") && body.get("forced").getAsBoolean();
+            return enqueue(forced ? "常驻加载" : "取消常驻", uuids, targetLabel(uuids),
+                    () -> this.ops.teleport().setForced(uuids, forced));
+        });
+    }
+
+    /** 单体操作(/api/body/{uuid}/{op});op 未注册即 404,不再另维护一份正则白名单 */
+    private void registerBodyRoutes() {
+        this.bodyRoutes.put("mesh", (request, uuid) -> mesh(uuid));
+        this.bodyRoutes.put("copies", (request, uuid) ->
+                PanelResponse.json(200, this.ops.copies().inspectCopies(uuid), true));
+        this.bodyRoutes.put("teleport", (request, uuid) -> {
+            requirePost(request);
+            // 参数在入队前解析:格式错误要当场 400,而不是过几秒变成一条失败作业
+            double x = Double.parseDouble(request.query().get("x"));
+            double y = Double.parseDouble(request.query().get("y"));
+            double z = Double.parseDouble(request.query().get("z"));
+            return enqueue("传送", List.of(uuid), targetLabel(List.of(uuid)),
+                    () -> this.ops.teleport().teleport(uuid, x, y, z));
+        });
+        this.bodyRoutes.put("teleport_player", (request, uuid) -> {
+            requirePost(request);
+            String player = request.query().get("player");
+            if (player == null || player.isBlank()) throw new IllegalArgumentException("player 缺失");
+            UUID playerUuid = UUID.fromString(player);
+            return enqueue("传送玩家", List.of(uuid), targetLabel(List.of(uuid)),
+                    () -> this.ops.teleport().teleportPlayer(uuid, playerUuid));
+        });
+        this.bodyRoutes.put("delete", (request, uuid) -> {
+            requirePost(request);
+            return enqueue("删除", List.of(uuid), targetLabel(List.of(uuid)),
+                    () -> this.ops.delete().delete(uuid));
+        });
+        this.bodyRoutes.put("adopt", (request, uuid) -> {
+            requirePost(request);
+            return enqueue("收养", List.of(uuid), targetLabel(List.of(uuid)),
+                    () -> this.ops.adopt().adopt(uuid));
+        });
+        this.bodyRoutes.put("deduplicate", (request, uuid) -> {
+            requirePost(request);
+            return enqueue("去重", List.of(uuid), targetLabel(List.of(uuid)),
+                    () -> this.ops.copies().deduplicate(uuid));
+        });
+        this.bodyRoutes.put("resolve_copies", (request, uuid) -> {
+            requirePost(request);
+            JsonObject body = request.jsonBody();
+            String version = body.has("version") ? body.get("version").getAsString() : "";
+            if (!version.matches("[0-9a-f]{16}")) throw new IllegalArgumentException("version 无效");
+            return enqueue("处理副本", List.of(uuid), targetLabel(List.of(uuid)),
+                    () -> this.ops.copies().resolveCopyVersion(uuid, version));
+        });
+        this.bodyRoutes.put("quarantine_copies", (request, uuid) -> {
+            requirePost(request);
+            return enqueue("隔离不完整副本", List.of(uuid), targetLabel(List.of(uuid)),
+                    () -> this.ops.copies().quarantineIncompleteCopies(uuid));
+        });
     }
 
     /**
