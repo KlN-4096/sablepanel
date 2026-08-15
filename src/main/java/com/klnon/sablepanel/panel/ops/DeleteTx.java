@@ -162,17 +162,21 @@ final class DeleteTx {
         for (DeleteComponent component : components) {
             if (component.activeSnapshot != null) validatePreparedDiskSnapshot(component);
         }
-        this.kit.onMainUntilComplete(() -> {
-            DeleteFlush flush = new DeleteFlush(new LinkedHashSet<>(), new LinkedHashMap<>());
-            try {
-                for (DeleteComponent component : components) {
-                    processDeleteComponent(component, statuses, flush);
+        try {
+            this.kit.onMainUntilComplete(() -> {
+                DeleteFlush flush = new DeleteFlush(new LinkedHashSet<>(), new LinkedHashMap<>());
+                try {
+                    for (DeleteComponent component : components) {
+                        processDeleteComponent(component, statuses, flush);
+                    }
+                } finally {
+                    flushDeleteLevels(flush, statuses);
                 }
-            } finally {
-                flushDeleteLevels(flush, statuses);
-            }
-            return new JsonObject();
-        });
+                return new JsonObject();
+            });
+        } finally {
+            PauseService.persist();
+        }
     }
 
     void processDeleteComponent(DeleteComponent component, Map<UUID, DeleteStatus> statuses,

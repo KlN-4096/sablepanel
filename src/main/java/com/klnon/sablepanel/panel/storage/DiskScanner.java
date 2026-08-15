@@ -20,9 +20,11 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -317,6 +319,38 @@ public final class DiskScanner {
     }
 
     public record PointerReference(EntryKey key, int chunkX, int chunkZ) {
+    }
+
+    /**
+     * 一致性修复提交前的定向复核：每个相关 .slvls 只读一次 4 KiB 槽位头。
+     * 非零槽位按“payload 可能已恢复”保守处理，不在主线程解压任何 NBT。
+     */
+    public static Set<EntryKey> occupiedEntrySlots(Map<String, Path> dims, Collection<EntryKey> targets)
+            throws IOException {
+        record EntryFile(String dim, int rx, int rz, int storage) {
+        }
+        Map<EntryFile, List<EntryKey>> grouped = new LinkedHashMap<>();
+        for (EntryKey key : targets) {
+            grouped.computeIfAbsent(new EntryFile(key.dim(), key.rx(), key.rz(), key.storage()),
+                    ignored -> new ArrayList<>()).add(key);
+        }
+        Set<EntryKey> occupied = new LinkedHashSet<>();
+        for (Map.Entry<EntryFile, List<EntryKey>> entry : grouped.entrySet()) {
+            EntryFile fileKey = entry.getKey();
+            Path directory = dims.get(fileKey.dim());
+            if (directory == null) continue;
+            Path file = directory.resolve("r." + fileKey.rx() + "." + fileKey.rz()
+                    + "." + fileKey.storage() + ".slvls");
+            if (!Files.isRegularFile(file)) continue;
+            try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+                ByteBuffer header = readHeader(channel);
+                for (EntryKey key : entry.getValue()) {
+                    if (key.index() >= 0 && key.index() < 1024
+                            && header.getInt(key.index() * Integer.BYTES) != 0) occupied.add(key);
+                }
+            }
+        }
+        return occupied;
     }
 
     /** 流式严格遍历 holding 指针；目标定位和有上限的检查不必先物化全服指针表。 */

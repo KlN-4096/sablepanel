@@ -53,13 +53,26 @@ public final class PauseService {
 
     /** 主线程:冻结集合变化后重挂/解开约束(FreezeService 改完意图就调) */
     public static void refreshOnMain(net.minecraft.server.MinecraftServer server, Collection<UUID> uuids) {
+        Set<UUID> toLock = new java.util.HashSet<>();
         for (UUID uuid : uuids) {
-            if (shouldHold(uuid)) {
-                ServerSubLevel sl = findLoaded(server, uuid);
-                if (sl != null) lock(sl);
-            } else {
-                unlock(uuid);
+            if (shouldHold(uuid)) toLock.add(uuid);
+            else unlock(uuid);
+        }
+        if (toLock.isEmpty()) return;
+        Map<UUID, ServerSubLevel> loaded = new HashMap<>();
+        for (ServerLevel level : server.getAllLevels()) {
+            try {
+                var container = dev.ryanhcode.sable.api.sublevel.SubLevelContainer.getContainer(level);
+                if (container == null) continue;
+                for (ServerSubLevel body : container.getAllSubLevels()) {
+                    if (toLock.contains(body.getUniqueId())) loaded.put(body.getUniqueId(), body);
+                }
+            } catch (Throwable ignored) {
             }
+        }
+        for (UUID uuid : toLock) {
+            ServerSubLevel body = loaded.get(uuid);
+            if (body != null) lock(body);
         }
     }
 
@@ -68,12 +81,11 @@ public final class PauseService {
         return Set.copyOf(REQUESTED);
     }
 
-    /** 主线程:登记/解除暂停,并对已加载体立即挂/拆约束;改动后落盘 */
+    /** 主线程:登记/解除暂停,并对已加载体立即挂/拆约束;调用方离开主线程后再 {@link #persist()} */
     public static void applyOnMain(net.minecraft.server.MinecraftServer server, Collection<UUID> uuids, boolean paused) {
         if (paused) REQUESTED.addAll(uuids);
         else uuids.forEach(REQUESTED::remove);
         refreshOnMain(server, uuids);
-        save();
     }
 
     /** 主线程(PanelObserver 体加载回调):有暂停或冻结意图的体重新锁定 */
@@ -116,20 +128,6 @@ public final class PauseService {
         }
     }
 
-    private static ServerSubLevel findLoaded(net.minecraft.server.MinecraftServer server, UUID uuid) {
-        for (ServerLevel level : server.getAllLevels()) {
-            try {
-                var container = dev.ryanhcode.sable.api.sublevel.SubLevelContainer.getContainer(level);
-                if (container == null) continue;
-                for (ServerSubLevel sl : container.getAllSubLevels()) {
-                    if (sl.getUniqueId().equals(uuid)) return sl;
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-        return null;
-    }
-
     /* ===================== 持久化 ===================== */
 
     private static final IntentFile FILE = new IntentFile("paused.json");
@@ -139,7 +137,7 @@ public final class PauseService {
         REQUESTED.addAll(FILE.loadUuids("paused bodies"));
     }
 
-    private static void save() {
+    public static void persist() {
         FILE.saveUuids(REQUESTED);
     }
 

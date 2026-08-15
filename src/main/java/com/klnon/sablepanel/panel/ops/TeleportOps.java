@@ -62,6 +62,7 @@ public final class TeleportOps {
             com.klnon.sablepanel.panel.ops.PauseService.applyOnMain(this.kit.server, uuids, paused);
             return null;
         });
+        PauseService.persist();
         for (UUID uuid : uuids) this.kit.audit(paused ? "pause" : "resume", uuid, null, null);
         JsonObject out = new JsonObject();
         out.addProperty("ok", true);
@@ -167,6 +168,7 @@ public final class TeleportOps {
             PhysicsService.applyOnMain(this.kit.server, dim, paused);
             return null;
         });
+        PhysicsService.persist();
         this.kit.audit(paused ? "dim_physics_pause" : "dim_physics_resume", null, dim, null);
         JsonObject out = new JsonObject();
         out.addProperty("ok", true);

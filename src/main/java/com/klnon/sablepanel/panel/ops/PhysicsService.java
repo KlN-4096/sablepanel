@@ -37,12 +37,11 @@ public final class PhysicsService {
         return Set.copyOf(PAUSED);
     }
 
-    /** 主线程:登记意图、立即生效、落盘 */
+    /** 主线程:登记意图并立即生效;调用方离开主线程后再 {@link #persist()} */
     public static void applyOnMain(MinecraftServer server, String dim, boolean paused) {
         if (paused) PAUSED.add(dim);
         else PAUSED.remove(dim);
         guardOnMain(server);
-        save();
     }
 
     /**
@@ -80,7 +79,7 @@ public final class PhysicsService {
         }
     }
 
-    private static void save() {
+    public static void persist() {
         FILE.save(PAUSED);
     }
 

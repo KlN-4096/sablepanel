@@ -48,6 +48,7 @@ import com.klnon.sablepanel.panel.storage.ScanSession;
 /** Standalone, removable consistency audit and explicit repair for Sable 2.0.3 metadata. */
 public final class ConsistencyService {
     private static final int MAX_ISSUES = 10_000;
+    private static final int MAX_FINAL_CHECK_FILES = 64;
     private static final DateTimeFormatter BACKUP_TIME = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS");
 
     /**
@@ -118,7 +119,8 @@ public final class ConsistencyService {
                                        Set<UUID> forced, Set<UUID> paused) throws Exception {
         Report shown = this.report;
         if (!shown.ready || !shown.id.equals(scanId)) throw new IllegalStateException("一致性结果已变化，请重新扫描");
-        Report current = JobService.underLocate(() -> collect());
+        Collected collected = JobService.underLocate(this::collectContext);
+        Report current = collected.report;
         Map<String, PointerIssue> pointerById = new LinkedHashMap<>();
         for (PointerIssue issue : current.pointers) pointerById.put(issue.id, issue);
         List<PointerIssue> selectedPointers = pointerIds.stream().map(pointerById::get).toList();
@@ -130,17 +132,28 @@ public final class ConsistencyService {
         if (selectedPointers.isEmpty() && forced.isEmpty() && paused.isEmpty()) {
             throw new IllegalArgumentException("没有选择修复项");
         }
+        requirePointerRepairBounded(selectedPointers);
 
-        Map<String, Path> dimensions = DiskScanner.sublevelDirsStrict(this.server);
         RepairAttempt attempt = null;
         Path backup = null;
         String operationError = null;
         try {
-            attempt = onMain(() -> repairOnMain(dimensions, selectedPointers, forced, paused));
+            Set<String> skipped = new LinkedHashSet<>();
+            Set<UUID> backupForced = onMain(() -> eligibleStates(
+                    forced, collected.diskUuids, true, skipped));
+            Set<UUID> backupPaused = onMain(() -> eligibleStates(
+                    paused, collected.diskUuids, false, skipped));
+            Set<Path> backupFiles = onMain(() -> backupFiles(
+                    collected.dimensions, selectedPointers, backupForced, backupPaused));
+            backup = backupMetadata(current.id, backupFiles);
+            Set<String> initialSkipped = Set.copyOf(skipped);
+            attempt = onMain(() -> repairOnMain(collected.dimensions, selectedPointers,
+                    backupForced, backupPaused, collected.diskUuids, initialSkipped));
             operationError = attempt.error;
-            backup = attempt.backup;
         } catch (Exception error) {
             operationError = messageOf(error);
+        } finally {
+            if (!paused.isEmpty()) PauseService.persist();
         }
 
         Report verified;
@@ -189,38 +202,47 @@ public final class ConsistencyService {
         return out;
     }
 
-    private RepairAttempt repairOnMain(Map<String, Path> dimensions, List<PointerIssue> requestedPointers,
-                                       Set<UUID> requestedForced, Set<UUID> requestedPaused) throws Exception {
-        List<String> warnings = new ArrayList<>();
-        Map<UUID, List<DiskScanner.EntryMeta>> metadata =
-                DiskScanner.scanEntryMetaStrict(dimensions, warnings);
-        Set<DiskScanner.EntryKey> payloads = payloadKeys(metadata);
-        Map<String, PointerIssue> dangling = new LinkedHashMap<>();
-        for (PointerIssue issue : danglingPointers(dimensions, payloads, warnings)) dangling.put(issue.id, issue);
-
-        Set<String> skipped = new LinkedHashSet<>();
-        List<PointerIssue> pointers = new ArrayList<>();
-        for (PointerIssue requested : requestedPointers) {
-            if (payloads.contains(requested.key)) {
-                skipped.add("pointer:" + requested.id);
-                continue;
-            }
-            PointerIssue current = dangling.get(requested.id);
-            if (current != null) pointers.add(current);
-        }
-
-        Set<UUID> forced = eligibleStates(requestedForced, metadata.keySet(), true, skipped);
-        Set<UUID> paused = eligibleStates(requestedPaused, metadata.keySet(), false, skipped);
-        Path backup = backupMetadata(dimensions, pointers, forced, paused);
+    private RepairAttempt repairOnMain(Map<String, Path> dimensions, List<PointerIssue> pointers,
+                                       Set<UUID> requestedForced, Set<UUID> requestedPaused, Set<UUID> diskUuids,
+                                       Set<String> initialSkipped) throws Exception {
+        Set<String> skipped = new LinkedHashSet<>(initialSkipped);
+        Set<UUID> forced = eligibleStates(requestedForced, diskUuids, true, skipped);
+        Set<UUID> paused = eligibleStates(requestedPaused, diskUuids, false, skipped);
+        List<PointerIssue> dangling = stillDangling(dimensions, pointers, skipped);
         String error = null;
         try {
-            repairPointersOnMain(pointers);
+            repairPointersOnMain(dangling);
             for (UUID uuid : forced) ForceLoadService.removeOnMain(this.server, uuid);
             if (!paused.isEmpty()) PauseService.applyOnMain(this.server, paused, false);
         } catch (Exception failure) {
             error = messageOf(failure);
         }
-        return new RepairAttempt(Set.copyOf(skipped), error, backup);
+        return new RepairAttempt(Set.copyOf(skipped), error);
+    }
+
+    private static List<PointerIssue> stillDangling(Map<String, Path> dimensions,
+                                                    List<PointerIssue> pointers,
+                                                    Set<String> skipped) throws IOException {
+        Set<DiskScanner.EntryKey> occupied = DiskScanner.occupiedEntrySlots(
+                dimensions, pointers.stream().map(PointerIssue::key).toList());
+        List<PointerIssue> dangling = new ArrayList<>();
+        for (PointerIssue pointer : pointers) {
+            if (occupied.contains(pointer.key)) skipped.add("pointer:" + pointer.id);
+            else dangling.add(pointer);
+        }
+        return dangling;
+    }
+
+    private static void requirePointerRepairBounded(List<PointerIssue> pointers) {
+        Set<EntryFileKey> files = new LinkedHashSet<>();
+        for (PointerIssue pointer : pointers) {
+            DiskScanner.EntryKey key = pointer.key;
+            files.add(new EntryFileKey(key.dim(), key.rx(), key.rz(), key.storage()));
+        }
+        if (files.size() > MAX_FINAL_CHECK_FILES) {
+            throw new IllegalArgumentException("一次最多修复分布在 " + MAX_FINAL_CHECK_FILES
+                    + " 个存储文件内的悬空指针，请分批选择");
+        }
     }
 
     private Set<UUID> eligibleStates(Set<UUID> requested, Set<UUID> diskUuids, boolean forced,
@@ -250,6 +272,10 @@ public final class ConsistencyService {
     }
 
     private Report collect() throws Exception {
+        return collectContext().report;
+    }
+
+    private Collected collectContext() throws Exception {
         List<String> warnings = new ArrayList<>();
         ScanSession scan = ScanSession.strict(this.server, warnings);
         Set<DiskScanner.EntryKey> payloads = payloadKeys(scan.meta());
@@ -274,8 +300,9 @@ public final class ConsistencyService {
         List<UUID> staleForced = runtime.forced.stream().filter(uuid -> !existing.contains(uuid)).sorted().toList();
         List<UUID> stalePaused = PauseService.snapshot().stream().filter(uuid -> !existing.contains(uuid)).sorted().toList();
         boolean truncated = allPointers.size() > pointers.size();
-        return new Report(scanId(), true, System.currentTimeMillis(), pointers,
+        Report report = new Report(scanId(), true, System.currentTimeMillis(), pointers,
                 staleForced, stalePaused, List.copyOf(new LinkedHashSet<>(warnings)), truncated, null, null);
+        return new Collected(report, Map.copyOf(scan.dims()), Set.copyOf(scan.meta().keySet()));
     }
 
     private static Set<DiskScanner.EntryKey> payloadKeys(
@@ -307,11 +334,8 @@ public final class ConsistencyService {
                 .sorted(Comparator.comparing(PointerIssue::id)).toList();
     }
 
-    private Path backupMetadata(Map<String, Path> dimensions, List<PointerIssue> pointers,
-                                Set<UUID> forced, Set<UUID> paused) throws IOException {
-        Path root = FMLPaths.GAMEDIR.get().resolve("sablepanel-repair")
-                .resolve(BACKUP_TIME.format(LocalDateTime.now()) + "-" + this.report.id);
-        Files.createDirectories(root);
+    private Set<Path> backupFiles(Map<String, Path> dimensions, List<PointerIssue> pointers,
+                                  Set<UUID> forced, Set<UUID> paused) throws IOException {
         Set<Path> files = new LinkedHashSet<>();
         for (PointerIssue issue : pointers) {
             Path directory = dimensions.get(issue.key.dim());
@@ -320,10 +344,15 @@ public final class ConsistencyService {
         }
         if (!paused.isEmpty()) files.add(FMLPaths.CONFIGDIR.get().resolve("sablepanel").resolve("paused.json"));
         if (!forced.isEmpty()) {
-            for (ServerLevel level : this.server.getAllLevels()) {
-                files.add(ticketFile(level));
-            }
+            for (ServerLevel level : this.server.getAllLevels()) files.add(ticketFile(level));
         }
+        return files;
+    }
+
+    private static Path backupMetadata(String scanId, Set<Path> files) throws IOException {
+        Path root = FMLPaths.GAMEDIR.get().resolve("sablepanel-repair")
+                .resolve(BACKUP_TIME.format(LocalDateTime.now()) + "-" + scanId);
+        Files.createDirectories(root);
         int index = 0;
         for (Path source : files) {
             if (!Files.isRegularFile(source)) continue;
@@ -424,7 +453,13 @@ public final class ConsistencyService {
     private record RuntimeState(Set<UUID> loaded, Set<UUID> forced) {
     }
 
-    private record RepairAttempt(Set<String> skipped, String error, Path backup) {
+    private record EntryFileKey(String dimension, int rx, int rz, int storage) {
+    }
+
+    private record Collected(Report report, Map<String, Path> dimensions, Set<UUID> diskUuids) {
+    }
+
+    private record RepairAttempt(Set<String> skipped, String error) {
     }
 
     private record PointerIssue(String id, DiskScanner.EntryKey key, int chunkX, int chunkZ, int count) {

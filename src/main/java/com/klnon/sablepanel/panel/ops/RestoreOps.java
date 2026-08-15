@@ -54,10 +54,14 @@ public final class RestoreOps {
             }
             if (!errors.isEmpty()) throw new IllegalStateException("回滚前残留清理失败: " + String.join(" | ", errors));
         }
-        this.kit.onMainUntilComplete(() -> {
-            this.tx.clearOperationalStateOnMain(targets);
-            return new JsonObject();
-        });
+        try {
+            this.kit.onMainUntilComplete(() -> {
+                this.tx.clearOperationalStateOnMain(targets);
+                return new JsonObject();
+            });
+        } finally {
+            PauseService.persist();
+        }
         this.tx.requireTargetsAbsent(targets, warnings);
     }
 
@@ -147,10 +151,14 @@ public final class RestoreOps {
         Map<UUID, Integer> existingEntries = new HashMap<>();
         for (UUID uuid : targets) existingEntries.put(uuid, scan.entriesOf(uuid).size());
         if (!replaceExisting) requireRestoreTargetsFree(targets, existingEntries);
-        this.kit.onMainUntilComplete(() -> {
-            this.tx.clearOperationalStateOnMain(targets);
-            return new JsonObject();
-        });
+        try {
+            this.kit.onMainUntilComplete(() -> {
+                this.tx.clearOperationalStateOnMain(targets);
+                return new JsonObject();
+            });
+        } finally {
+            PauseService.persist();
+        }
         // 同一趟扫描顺路建 plot 槽位占用表:删除释放的槽位会被 sable 按首位适配复用给新体,
         // 而恢复用的 allocateSubLevel 只查加载态 —— 不拦下来就会造出"同槽双体"(加载互斥)
         Map<DiskScanner.PlotKey, Set<UUID>> plotOwners = DiskScanner.plotOwners(scan.meta());
@@ -187,21 +195,25 @@ public final class RestoreOps {
     void restoreOperationalState(RecycleStore.RestoreGroup group) throws Exception {
         List<UUID> forced = group.bodies().stream()
                 .filter(RecycleStore.RestoreBody::forced).map(RecycleStore.RestoreBody::uuid).toList();
+        List<UUID> paused = group.bodies().stream()
+                .filter(RecycleStore.RestoreBody::paused).map(RecycleStore.RestoreBody::uuid).toList();
         Map<UUID, OpKit.MemberPlan> plans = forced.isEmpty() ? Map.of() : this.kit.prepareChain(forced);
-        this.kit.onMainUntilComplete(() -> {
-            for (UUID uuid : forced) ForceLoadService.addOnMain(this.kit.ensureLoaded(uuid, plans));
-            List<UUID> paused = group.bodies().stream()
-                    .filter(RecycleStore.RestoreBody::paused).map(RecycleStore.RestoreBody::uuid).toList();
-            if (!paused.isEmpty()) PauseService.applyOnMain(this.kit.server, paused, true);
-            for (RecycleStore.RestoreBody body : group.bodies()) {
-                boolean pausedState = PauseService.isPaused(body.uuid());
-                boolean forcedState = ForceLoadService.isForcedOnMain(this.kit.server, body.uuid());
-                if (pausedState != body.paused() || forcedState != body.forced()) {
-                    throw new IllegalStateException("恢复后暂停/常驻状态不一致: " + body.uuid());
+        try {
+            this.kit.onMainUntilComplete(() -> {
+                for (UUID uuid : forced) ForceLoadService.addOnMain(this.kit.ensureLoaded(uuid, plans));
+                if (!paused.isEmpty()) PauseService.applyOnMain(this.kit.server, paused, true);
+                for (RecycleStore.RestoreBody body : group.bodies()) {
+                    boolean pausedState = PauseService.isPaused(body.uuid());
+                    boolean forcedState = ForceLoadService.isForcedOnMain(this.kit.server, body.uuid());
+                    if (pausedState != body.paused() || forcedState != body.forced()) {
+                        throw new IllegalStateException("恢复后暂停/常驻状态不一致: " + body.uuid());
+                    }
                 }
-            }
-            return new JsonObject();
-        });
+                return new JsonObject();
+            });
+        } finally {
+            if (!paused.isEmpty()) PauseService.persist();
+        }
     }
 
     private JsonObject restoreGroupOnMain(RecycleStore.RestoreGroup group,

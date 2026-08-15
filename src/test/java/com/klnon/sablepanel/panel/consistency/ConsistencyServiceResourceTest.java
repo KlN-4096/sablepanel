@@ -9,16 +9,19 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.lang.reflect.Method;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConsistencyServiceResourceTest {
@@ -42,9 +45,60 @@ class ConsistencyServiceResourceTest {
                 "响应只发布 10,000 条时,不能先把全部异常物化后才截断");
     }
 
+    @Test
+    void restoredPayloadIsSkippedByFinalPointerCheck() throws Exception {
+        Path directory = Files.createDirectories(this.root.resolve("sublevels"));
+        writePointerFile(directory.resolve("r.0.0.slvlr"), 1);
+        Method scan = ConsistencyService.class.getDeclaredMethod(
+                "danglingPointers", Map.class, Set.class, List.class);
+        scan.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<?> issues = (List<?>) scan.invoke(null,
+                Map.of(DIMENSION, directory), Set.of(), new ArrayList<>());
+        assertEquals(1, issues.size());
+
+        ByteBuffer header = ByteBuffer.allocate(4096);
+        header.putInt(0, 1); // autosave 在最终提交前重新占用了 storage=0,index=0
+        Files.write(directory.resolve("r.0.0.0.slvls"), header.array());
+        Method verify = ConsistencyService.class.getDeclaredMethod(
+                "stillDangling", Map.class, List.class, Set.class);
+        verify.setAccessible(true);
+        Set<String> skipped = new LinkedHashSet<>();
+        @SuppressWarnings("unchecked")
+        List<?> remaining = (List<?>) verify.invoke(null,
+                Map.of(DIMENSION, directory), issues, skipped);
+
+        assertTrue(remaining.isEmpty(), "payload 已恢复时不能再删除对应 holding 指针");
+        assertEquals(1, skipped.size());
+        assertTrue(skipped.iterator().next().startsWith("pointer:"));
+    }
+
+    @Test
+    void finalPointerCheckRejectsTooManyStorageFiles() throws Exception {
+        Path directory = Files.createDirectories(this.root.resolve("sublevels"));
+        int[] pointers = IntStream.range(0, 65).map(storage -> storage << 16).toArray();
+        writePointerFile(directory.resolve("r.0.0.slvlr"), pointers);
+        Method scan = ConsistencyService.class.getDeclaredMethod(
+                "danglingPointers", Map.class, Set.class, List.class);
+        scan.setAccessible(true);
+        List<?> issues = (List<?>) scan.invoke(null,
+                Map.of(DIMENSION, directory), Set.of(), new ArrayList<>());
+        Method bound = ConsistencyService.class.getDeclaredMethod("requirePointerRepairBounded", List.class);
+        bound.setAccessible(true);
+
+        InvocationTargetException error = assertThrows(InvocationTargetException.class,
+                () -> bound.invoke(null, issues));
+        assertTrue(error.getCause() instanceof IllegalArgumentException);
+        assertTrue(error.getCause().getMessage().contains("分批选择"));
+    }
+
     private static void writePointerFile(Path file, int count) throws Exception {
+        writePointerFile(file, IntStream.range(0, count).toArray());
+    }
+
+    private static void writePointerFile(Path file, int[] pointers) throws Exception {
         CompoundTag tag = new CompoundTag();
-        tag.putIntArray("pointers", IntStream.range(0, count).toArray());
+        tag.putIntArray("pointers", pointers);
         ByteArrayOutputStream encoded = new ByteArrayOutputStream();
         NbtIo.writeCompressed(tag, new DataOutputStream(encoded));
         byte[] payload = encoded.toByteArray();
