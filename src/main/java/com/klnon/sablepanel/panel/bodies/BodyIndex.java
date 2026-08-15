@@ -20,8 +20,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import com.klnon.sablepanel.panel.metrics.StatsCollector;
 import com.klnon.sablepanel.panel.storage.BlockNames;
 import com.klnon.sablepanel.panel.storage.ByteBudget;
@@ -81,10 +83,10 @@ public final class BodyIndex {
     private static final int MAX_ENTRY_IDS = 50;
 
 
-    private volatile List<DiskScanner.DiskEntry> diskSnapshot = List.of();
-    private volatile long diskScanTime;
+    private volatile DiskState disk = DiskState.empty();
+    private final AtomicLong version = new AtomicLong();
     /** 主线程周期刷新:uuid -> 运行时摘要 */
-    private volatile Map<UUID, JsonObject> runtime = Map.of();
+    private volatile Map<UUID, RuntimeBody> runtime = Map.of();
     /** 主线程周期刷新:盘上无指针、但存在于 sable 内存 holding 表的 uuid */
     private volatile Set<UUID> holding = Set.of();
     /** 孤儿告警去抖:上一轮的孤儿集合 */
@@ -92,12 +94,50 @@ public final class BodyIndex {
     /** 推荐删除的保护阈值,来自面板配置(服主可调) */
     private volatile PanelConfig config = new PanelConfig();
 
+    record RuntimeBody(String dim, double x, double y, double z, double linearVelocity,
+                       double mass, int players, boolean paused, double costMs) {
+        static RuntimeBody positionOnly(String dim, double x, double y, double z) {
+            return new RuntimeBody(dim, x, y, z, Double.NaN, Double.NaN, -1, false, Double.NaN);
+        }
+
+        RuntimeBody withPosition(String nextDim, double nextX, double nextY, double nextZ) {
+            return new RuntimeBody(nextDim, nextX, nextY, nextZ, this.linearVelocity, this.mass,
+                    this.players, this.paused, this.costMs);
+        }
+
+        RuntimeBody withCost(double nextCostMs) {
+            return new RuntimeBody(this.dim, this.x, this.y, this.z, this.linearVelocity, this.mass,
+                    this.players, this.paused, nextCostMs);
+        }
+
+        JsonObject toJson() {
+            JsonObject out = new JsonObject();
+            out.addProperty("dim", this.dim);
+            out.addProperty("x", this.x);
+            out.addProperty("y", this.y);
+            out.addProperty("z", this.z);
+            if (Double.isFinite(this.linearVelocity)) out.addProperty("lin_vel", this.linearVelocity);
+            if (Double.isFinite(this.mass)) out.addProperty("mass", this.mass);
+            if (this.players >= 0) out.addProperty("players", this.players);
+            if (this.paused) out.addProperty("paused", true);
+            if (Double.isFinite(this.costMs)) out.addProperty("cost_ms", this.costMs);
+            return out;
+        }
+    }
+
     /** 替换扫描快照；返回可见内容是否变化，避免无变化扫描触发 SSE 全量重拉。 */
     public boolean updateDisk(List<DiskScanner.DiskEntry> entries) {
-        boolean changed = this.diskScanTime == 0 || !sameDiskEntries(this.diskSnapshot, entries);
-        this.diskSnapshot = entries;
-        this.diskScanTime = System.currentTimeMillis();
+        List<DiskScanner.DiskEntry> snapshot = List.copyOf(entries);
+        DiskState previous = this.disk;
+        boolean changed = previous.scanTime == 0 || !sameDiskEntries(previous.entries, snapshot);
+        DiskLookup lookup = changed ? DiskLookup.from(snapshot) : previous.lookup;
+        this.disk = new DiskState(snapshot, System.currentTimeMillis(), lookup);
+        this.version.incrementAndGet();
         return changed;
+    }
+
+    public long version() {
+        return this.version.get();
     }
 
     private static boolean sameDiskEntries(List<DiskScanner.DiskEntry> previous,
@@ -143,16 +183,13 @@ public final class BodyIndex {
         if (position == null || position.length != 3) {
             throw new IllegalArgumentException("position 必须包含 x/y/z");
         }
-        Map<UUID, JsonObject> updated = new HashMap<>(this.runtime);
-        JsonObject state = updated.containsKey(uuid)
-                ? updated.get(uuid).deepCopy()
-                : new JsonObject();
-        state.addProperty("dim", dim);
-        state.addProperty("x", position[0]);
-        state.addProperty("y", position[1]);
-        state.addProperty("z", position[2]);
-        updated.put(uuid, state);
+        Map<UUID, RuntimeBody> updated = new HashMap<>(this.runtime);
+        RuntimeBody state = updated.get(uuid);
+        updated.put(uuid, state == null
+                ? RuntimeBody.positionOnly(dim, position[0], position[1], position[2])
+                : state.withPosition(dim, position[0], position[1], position[2]));
         this.runtime = Map.copyOf(updated);
+        this.version.incrementAndGet();
     }
 
     /** 主线程调用:刷新运行时加载态 + holding 态 + 逐体耗时 + 孤儿告警 */
@@ -162,7 +199,7 @@ public final class BodyIndex {
         com.klnon.sablepanel.panel.ops.ForceLoadService.guardOnMain(server);
         // 停跑物理的意图也在这里重放:维度可能后加载,重启后也要压回去
         com.klnon.sablepanel.panel.ops.PhysicsService.guardOnMain(server);
-        Map<UUID, JsonObject> map = new HashMap<>();
+        Map<UUID, RuntimeBody> map = new HashMap<>();
         Map<String, Integer> loadedPerDim = new HashMap<>();
         for (ServerLevel level : server.getAllLevels()) {
             try {
@@ -171,8 +208,6 @@ public final class BodyIndex {
                 String dim = level.dimension().location().toString();
                 int n = 0;
                 for (ServerSubLevel sl : c.getAllSubLevels()) {
-                    JsonObject o = new JsonObject();
-                    o.addProperty("dim", dim);
                     // 面板坐标统一为包围盒底面中心(与传送目标语义一致);包围盒异常时退回 pose 原点
                     var p = sl.logicalPose().position();
                     double ax = p.x(), ay = p.y(), az = p.z();
@@ -187,22 +222,19 @@ public final class BodyIndex {
                         }
                     } catch (Throwable ignored) {
                     }
-                    o.addProperty("x", r1(ax));
-                    o.addProperty("y", r1(ay));
-                    o.addProperty("z", r1(az));
-                    o.addProperty("lin_vel", r1(sl.latestLinearVelocity.length()));
+                    double mass = Double.NaN;
                     try {
-                        o.addProperty("mass", r1(sl.getMassTracker().getMass()));
+                        mass = r1(sl.getMassTracker().getMass());
                     } catch (Throwable ignored) {
                     }
+                    int players = -1;
                     try {
-                        o.addProperty("players", sl.getTrackingPlayers().size());
+                        players = sl.getTrackingPlayers().size();
                     } catch (Throwable ignored) {
                     }
-                    if (com.klnon.sablepanel.panel.ops.PauseService.isPaused(sl.getUniqueId())) {
-                        o.addProperty("paused", true);
-                    }
-                    map.put(sl.getUniqueId(), o);
+                    boolean paused = com.klnon.sablepanel.panel.ops.PauseService.isPaused(sl.getUniqueId());
+                    map.put(sl.getUniqueId(), new RuntimeBody(dim, r1(ax), r1(ay), r1(az),
+                            r1(sl.latestLinearVelocity.length()), mass, players, paused, Double.NaN));
                     n++;
                 }
                 if (n > 0) loadedPerDim.put(dim, n);
@@ -213,13 +245,21 @@ public final class BodyIndex {
         // 逐体耗时(mixin 采样):附到 runtime,并产出 Top 列表给 /api/stats
         try {
             Map<UUID, Double> cost = com.klnon.sablepanel.panel.metrics.BodyCostTracker.drain(ticksSinceLast, map.keySet());
-            List<Map.Entry<UUID, Double>> top = new ArrayList<>(cost.entrySet());
-            top.sort((a, b) -> Double.compare(b.getValue(), a.getValue()));
+            PriorityQueue<Map.Entry<UUID, Double>> top = new PriorityQueue<>(
+                    Comparator.comparingDouble(Map.Entry::getValue));
             JsonArray topArr = new JsonArray();
             double totalCost = 0;
-            for (Map.Entry<UUID, Double> en : cost.entrySet()) totalCost += en.getValue();
-            for (int i = 0; i < top.size() && i < 10; i++) {
-                Map.Entry<UUID, Double> en = top.get(i);
+            for (Map.Entry<UUID, Double> entry : cost.entrySet()) {
+                totalCost += entry.getValue();
+                if (top.size() < 10) top.offer(entry);
+                else if (entry.getValue() > top.element().getValue()) {
+                    top.remove();
+                    top.offer(entry);
+                }
+            }
+            List<Map.Entry<UUID, Double>> orderedTop = new ArrayList<>(top);
+            orderedTop.sort((a, b) -> Double.compare(b.getValue(), a.getValue()));
+            for (Map.Entry<UUID, Double> en : orderedTop) {
                 JsonObject t = new JsonObject();
                 t.addProperty("uuid", en.getKey().toString());
                 DiskScanner.DiskEntry de = findEntry(en.getKey());
@@ -228,29 +268,26 @@ public final class BodyIndex {
                 topArr.add(t);
             }
             for (Map.Entry<UUID, Double> en : cost.entrySet()) {
-                JsonObject rto = map.get(en.getKey());
-                if (rto != null) rto.addProperty("cost_ms", r3(en.getValue()));
+                RuntimeBody runtimeBody = map.get(en.getKey());
+                if (runtimeBody != null) map.put(en.getKey(), runtimeBody.withCost(r3(en.getValue())));
             }
             StatsCollector.INSTANCE.setBodyCost(topArr, r3(totalCost));
         } catch (Throwable ignored) {
         }
 
-        this.runtime = map;
-        StatsCollector.INSTANCE.setLoadedPerDim(loadedPerDim);
+        this.runtime = Map.copyOf(map);
+        StatsCollector.INSTANCE.setLoadedPerDim(Map.copyOf(loadedPerDim));
 
         // holding/孤儿判定要求磁盘快照与现实足够接近。快照过旧(面板空闲时扫描暂停,
         // 或扫描故障)就跳过:拿陈旧条目对比现实会把正常体误报成孤儿
-        if (System.currentTimeMillis() - this.diskScanTime > STALE_SNAPSHOT_MS) return;
+        DiskState disk = this.disk;
+        if (System.currentTimeMillis() - disk.scanTime > STALE_SNAPSHOT_MS) {
+            this.version.incrementAndGet();
+            return;
+        }
 
         // holding 态:只查"盘上无任何可达条目"的候选(小集合),避免主线程开销
-        List<DiskScanner.DiskEntry> disk = this.diskSnapshot;
-        Map<UUID, Boolean> anyReachable = new HashMap<>();
-        Map<UUID, String> dimOf = new HashMap<>();
-        for (DiskScanner.DiskEntry e : disk) {
-            if (e.uuid() == null) continue;
-            anyReachable.merge(e.uuid(), e.reachable(), Boolean::logicalOr);
-            dimOf.putIfAbsent(e.uuid(), e.key().dim());
-        }
+        Map<UUID, String> unreachable = disk.lookup.unreachableDimensions;
         Set<UUID> holdingSet = new HashSet<>();
         Set<UUID> orphans = new HashSet<>();
         Map<String, ServerSubLevelContainer> containers = new HashMap<>();
@@ -261,9 +298,9 @@ public final class BodyIndex {
             } catch (Throwable ignored) {
             }
         }
-        for (Map.Entry<UUID, Boolean> en : anyReachable.entrySet()) {
-            if (en.getValue() || map.containsKey(en.getKey())) continue;
-            ServerSubLevelContainer c = containers.get(dimOf.get(en.getKey()));
+        for (Map.Entry<UUID, String> en : unreachable.entrySet()) {
+            if (map.containsKey(en.getKey())) continue;
+            ServerSubLevelContainer c = containers.get(en.getValue());
             boolean held = false;
             try {
                 held = c != null && c.getHoldingChunkMap().getHoldingSubLevel(en.getKey()) != null;
@@ -281,30 +318,22 @@ public final class BodyIndex {
                     JsonObject o = new JsonObject();
                     o.addProperty("ev", "alert_orphan");
                     o.addProperty("uuid", u.toString());
-                    o.addProperty("dim", dimOf.get(u));
+                    o.addProperty("dim", unreachable.get(u));
                     EventLog.write(o);
                     SablePanel.LOGGER.warn("sablepanel: body {} became orphan (entry on disk, no pointer, not loaded, not holding)", u);
                 }
             }
         }
         this.prevOrphans = orphans;
-    }
-
-    /** 当前磁盘快照(不可变列表,任意线程可读,零拷贝);缩略图后台线程的增量判据来源 */
-    public List<DiskScanner.DiskEntry> diskEntries() {
-        return this.diskSnapshot;
+        this.version.incrementAndGet();
     }
 
     public DiskScanner.DiskEntry findEntry(UUID uuid) {
-        DiskScanner.DiskEntry best = null;
-        for (DiskScanner.DiskEntry e : this.diskSnapshot) {
-            if (!e.uuid().equals(uuid)) continue;
-            if (best == null || (e.reachable() && !best.reachable())
-                    || (e.reachable() == best.reachable() && e.blocks() > best.blocks())) {
-                best = e;
-            }
-        }
-        return best;
+        return this.disk.lookup.best.get(uuid);
+    }
+
+    public String thumbnailSignature(UUID uuid) {
+        return this.disk.lookup.thumbnailSignatures.get(uuid);
     }
 
     public record PreviewSelection(DiskScanner.DiskEntry entry, boolean ambiguous) {
@@ -312,8 +341,7 @@ public final class BodyIndex {
 
     /** Refuses to guess when more than one reachable/current-looking disk copy exists. */
     public PreviewSelection previewSelection(UUID uuid) {
-        List<DiskScanner.DiskEntry> candidates = this.diskSnapshot.stream()
-                .filter(entry -> entry.uuid().equals(uuid)).toList();
+        List<DiskScanner.DiskEntry> candidates = this.disk.lookup.byUuid.getOrDefault(uuid, List.of());
         if (candidates.isEmpty()) return new PreviewSelection(null, false);
         List<DiskScanner.DiskEntry> reachable = candidates.stream().filter(DiskScanner.DiskEntry::reachable).toList();
         if (reachable.size() == 1) return new PreviewSelection(reachable.get(0), false);
@@ -323,8 +351,9 @@ public final class BodyIndex {
 
     /** 全量视图 JSON:组聚合 + 体明细 + 方块调色板。五段流水,段间以只读 record 传递 */
     public JsonObject view() {
-        List<DiskScanner.DiskEntry> disk = this.diskSnapshot;
-        Map<UUID, JsonObject> rt = this.runtime;
+        DiskState diskState = this.disk;
+        List<DiskScanner.DiskEntry> disk = diskState.entries;
+        Map<UUID, RuntimeBody> rt = this.runtime;
         Set<UUID> held = this.holding;
 
         DiskAggregate agg = aggregate(disk);
@@ -332,7 +361,59 @@ public final class BodyIndex {
         List<Map.Entry<UUID, List<UUID>>> ordered = orderedGroups(agg.byUuid());
         FreshGroups fresh = freshGroups(rt, agg.byUuid());
         Emission emission = emitGroups(agg, clones, fresh, ordered, rt, held);
-        return summarize(disk, agg, clones, fresh, emission, ordered.size());
+        return summarize(disk, agg, clones, fresh, emission, ordered.size(), diskState.scanTime);
+    }
+
+    private record DiskState(List<DiskScanner.DiskEntry> entries, long scanTime, DiskLookup lookup) {
+        static DiskState empty() {
+            return new DiskState(List.of(), 0, DiskLookup.empty());
+        }
+    }
+
+    private record DiskLookup(Map<UUID, List<DiskScanner.DiskEntry>> byUuid,
+                              Map<UUID, DiskScanner.DiskEntry> best,
+                              Map<UUID, String> unreachableDimensions,
+                              Map<UUID, String> thumbnailSignatures) {
+        static DiskLookup empty() {
+            return new DiskLookup(Map.of(), Map.of(), Map.of(), Map.of());
+        }
+
+        static DiskLookup from(List<DiskScanner.DiskEntry> entries) {
+            Map<UUID, List<DiskScanner.DiskEntry>> grouped = new HashMap<>();
+            Map<UUID, DiskScanner.DiskEntry> best = new HashMap<>();
+            Map<UUID, Boolean> reachable = new HashMap<>();
+            Map<UUID, String> dimensions = new HashMap<>();
+            for (DiskScanner.DiskEntry entry : entries) {
+                UUID uuid = entry.uuid();
+                if (uuid == null) continue;
+                grouped.computeIfAbsent(uuid, ignored -> new ArrayList<>()).add(entry);
+                best.compute(uuid, (ignored, current) -> better(current, entry));
+                reachable.merge(uuid, entry.reachable(), Boolean::logicalOr);
+                dimensions.putIfAbsent(uuid, entry.key().dim());
+            }
+            Map<UUID, List<DiskScanner.DiskEntry>> byUuid = new HashMap<>();
+            Map<UUID, String> signatures = new HashMap<>();
+            grouped.forEach((uuid, mine) -> {
+                List<DiskScanner.DiskEntry> immutable = List.copyOf(mine);
+                byUuid.put(uuid, immutable);
+                signatures.put(uuid,
+                        com.klnon.sablepanel.panel.preview.thumb.ThumbService.signature(immutable));
+            });
+            Map<UUID, String> unreachable = new HashMap<>();
+            dimensions.forEach((uuid, dim) -> {
+                if (!reachable.getOrDefault(uuid, false)) unreachable.put(uuid, dim);
+            });
+            return new DiskLookup(Map.copyOf(byUuid), Map.copyOf(best), Map.copyOf(unreachable),
+                    Map.copyOf(signatures));
+        }
+
+        private static DiskScanner.DiskEntry better(DiskScanner.DiskEntry current,
+                                                     DiskScanner.DiskEntry candidate) {
+            if (current == null || (candidate.reachable() && !current.reachable())
+                    || (candidate.reachable() == current.reachable()
+                    && candidate.blocks() > current.blocks())) return candidate;
+            return current;
+        }
     }
 
     /**
@@ -467,27 +548,28 @@ public final class BodyIndex {
         return ordered;
     }
 
-    private static FreshGroups freshGroups(Map<UUID, JsonObject> rt, Map<UUID, DiskScanner.DiskEntry> byUuid) {
+    private static FreshGroups freshGroups(Map<UUID, RuntimeBody> rt, Map<UUID, DiskScanner.DiskEntry> byUuid) {
         // 运行时存在但磁盘还没有条目的体(刚生成/未保存):单独成组显示,可传送不可预览
         JsonArray freshArr = new JsonArray();
         List<UUID> freshUuids = new ArrayList<>();
         // fresh 组先走一份自己的账本,最后并进总账
         ByteBudget freshBudget = new ByteBudget(VIEW_BYTE_BUDGET);
         int freshTotal = 0;
-        for (Map.Entry<UUID, JsonObject> en : rt.entrySet()) {
+        for (Map.Entry<UUID, RuntimeBody> en : rt.entrySet()) {
             if (byUuid.containsKey(en.getKey())) continue;
             freshTotal++;
             if (freshArr.size() >= MAX_VIEW_GROUPS || freshBudget.exhausted()) continue;
-            JsonObject rto = en.getValue();
+            RuntimeBody runtime = en.getValue();
+            JsonObject rto = runtime.toJson();
             JsonObject m = new JsonObject();
             m.addProperty("uuid", en.getKey().toString());
             m.addProperty("entry", "");
-            m.addProperty("dim", rto.get("dim").getAsString());
+            m.addProperty("dim", runtime.dim());
             m.addProperty("blocks", 0);
             JsonArray pos = new JsonArray();
-            pos.add(rto.get("x").getAsDouble());
-            pos.add(rto.get("y").getAsDouble());
-            pos.add(rto.get("z").getAsDouble());
+            pos.add(runtime.x());
+            pos.add(runtime.y());
+            pos.add(runtime.z());
             m.add("pos", pos);
             JsonArray sz = new JsonArray();
             sz.add(0); sz.add(0); sz.add(0);
@@ -501,7 +583,7 @@ public final class BodyIndex {
             go.addProperty("name", "");
             go.addProperty("members", 1);
             go.addProperty("blocks", 0);
-            go.addProperty("dims", rto.get("dim").getAsString());
+            go.addProperty("dims", runtime.dim());
             go.addProperty("loaded", 1);
             go.addProperty("orphans", 0);
             go.addProperty("holding", 0);
@@ -522,7 +604,7 @@ public final class BodyIndex {
 
     private Emission emitGroups(DiskAggregate agg, CloneSets clones, FreshGroups fresh,
                                 List<Map.Entry<UUID, List<UUID>>> ordered,
-                                Map<UUID, JsonObject> rt, Set<UUID> held) {
+                                Map<UUID, RuntimeBody> rt, Set<UUID> held) {
         Map<UUID, DiskScanner.DiskEntry> byUuid = agg.byUuid();
         Map<UUID, Integer> copies = agg.copies();
         Map<UUID, List<String>> entryIds = agg.entryIds();
@@ -578,8 +660,8 @@ public final class BodyIndex {
                     && agg.ambiguousPos().contains(members.get(0));
             for (UUID u : members) {
                 DiskScanner.DiskEntry e = byUuid.get(u);
-                JsonObject rto = rt.get(u);
-                boolean loaded = rto != null;
+                RuntimeBody runtime = rt.get(u);
+                boolean loaded = runtime != null;
                 boolean reach = anyReachable.getOrDefault(u, false);
                 String state = loaded ? "loaded" : reach ? "stored" : held.contains(u) ? "holding" : "orphan";
                 totalBlocks += e.blocks();
@@ -594,7 +676,7 @@ public final class BodyIndex {
                 groupBlockIds.addAll(e.blockIds());
                 if (e.name() != null && !e.name().isBlank()) anyNamed = true;
                 if (e.userData()) anyUserData = true;
-                if (rto != null && rto.has("players") && rto.get("players").getAsInt() > 0) anyTracked = true;
+                if (runtime != null && runtime.players() > 0) anyTracked = true;
                 if (e.name() != null && e.blocks() > bestNameBlocks) {
                     bestName = e.name();
                     bestNameBlocks = e.blocks();
@@ -612,7 +694,7 @@ public final class BodyIndex {
                 if (e.name() != null) m.addProperty("name", e.name());
                 m.addProperty("dim", e.key().dim());
                 m.addProperty("blocks", e.blocks());
-                m.add("pos", arr(displayPos(rto, e.pos())));
+                m.add("pos", arr(displayPos(runtime, e.pos())));
                 m.add("size", arr(e.size()));
                 m.addProperty("state", state);
                 if (detached.contains(u)) m.addProperty("detached", true);
@@ -658,7 +740,7 @@ public final class BodyIndex {
                     blk.add(at);
                 }
                 m.add("blk", blk);
-                if (loaded) m.add("runtime", rto);
+                if (loaded) m.add("runtime", runtime.toJson());
                 // 组内第一条必须发得出去(否则这个组就是个空壳),其余按预算收
                 if (memberArr.isEmpty()) budget.charge(m);
                 else if (!budget.offer(m)) {
@@ -700,7 +782,7 @@ public final class BodyIndex {
     }
 
     private JsonObject summarize(List<DiskScanner.DiskEntry> disk, DiskAggregate agg, CloneSets clones,
-                                 FreshGroups fresh, Emission emission, int groupCount) {
+                                 FreshGroups fresh, Emission emission, int groupCount, long scanTime) {
         Map<UUID, DiskScanner.DiskEntry> byUuid = agg.byUuid();
         int freshTotal = fresh.total();
         JsonArray groupArr = emission.groups();
@@ -710,7 +792,7 @@ public final class BodyIndex {
         JsonArray paletteArr = emission.palette();
         JsonArray cloneSetArr = clones.sets();
         JsonObject out = new JsonObject();
-        out.addProperty("scan_time", this.diskScanTime);
+        out.addProperty("scan_time", scanTime);
         // freshArr 是被截断过的显示量,总数必须用真值,否则截断时连"少了多少"都看不出来
         out.addProperty("total_bodies", byUuid.size() + freshTotal);
         out.addProperty("total_entries", disk.size());
@@ -824,10 +906,9 @@ public final class BodyIndex {
      * 面板显示坐标:加载中的体以运行时坐标为准。磁盘条目要等 autosave 才回写,
      * 传送完/物理漂移后列表会一直显示旧位置(虚空/极高空筛选也跟着错)。
      */
-    static double[] displayPos(JsonObject runtime, double[] diskPos) {
-        if (runtime == null || !runtime.has("x")) return diskPos;
-        return new double[]{runtime.get("x").getAsDouble(),
-                runtime.get("y").getAsDouble(), runtime.get("z").getAsDouble()};
+    static double[] displayPos(RuntimeBody runtime, double[] diskPos) {
+        if (runtime == null) return diskPos;
+        return new double[]{runtime.x(), runtime.y(), runtime.z()};
     }
 
     /**

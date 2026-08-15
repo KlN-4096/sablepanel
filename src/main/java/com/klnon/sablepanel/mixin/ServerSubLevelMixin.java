@@ -21,11 +21,12 @@ public abstract class ServerSubLevelMixin {
 
     @Inject(method = "tick()V", at = @At("HEAD"))
     private void sablepanel$tickHead(CallbackInfo ci) {
-        this.sablepanel$tickT0 = System.nanoTime();
+        this.sablepanel$tickT0 = BodyCostTracker.ENABLED ? System.nanoTime() : 0;
     }
 
     @Inject(method = "tick()V", at = @At("RETURN"))
     private void sablepanel$tickReturn(CallbackInfo ci) {
+        if (!BodyCostTracker.ENABLED || this.sablepanel$tickT0 == 0) return;
         try {
             BodyCostTracker.add(((ServerSubLevel) (Object) this).getUniqueId(),
                     System.nanoTime() - this.sablepanel$tickT0);
@@ -37,13 +38,14 @@ public abstract class ServerSubLevelMixin {
     private void sablepanel$physHead(dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem system,
                                      dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle handle,
                                      double timeStep, CallbackInfo ci) {
-        this.sablepanel$physT0 = System.nanoTime();
+        this.sablepanel$physT0 = BodyCostTracker.ENABLED ? System.nanoTime() : 0;
     }
 
     @Inject(method = "prePhysicsTick", at = @At("RETURN"))
     private void sablepanel$physReturn(dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem system,
                                        dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle handle,
                                        double timeStep, CallbackInfo ci) {
+        if (!BodyCostTracker.ENABLED || this.sablepanel$physT0 == 0) return;
         try {
             BodyCostTracker.add(((ServerSubLevel) (Object) this).getUniqueId(),
                     System.nanoTime() - this.sablepanel$physT0);

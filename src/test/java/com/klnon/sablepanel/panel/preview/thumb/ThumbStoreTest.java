@@ -78,7 +78,8 @@ class ThumbStoreTest {
     void acceptValidatesMagicAndSignature() throws Exception {
         UUID uuid = UUID.randomUUID();
         DiskScanner.DiskEntry entry = entry(uuid, "青鸢", new double[]{1, 2, 3}, 100, 5, 2, List.of("minecraft:stone"));
-        ThumbService service = new ThumbService(dir, () -> List.of(entry));
+        ThumbService service = new ThumbService(dir,
+                target -> target.equals(uuid) ? ThumbService.signature(List.of(entry)) : null);
         String sig = service.currentSig(uuid);
         assertNotNull(sig);
 

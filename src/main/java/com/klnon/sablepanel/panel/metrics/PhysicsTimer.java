@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 事件可能来自非主线程,全部走并发安全结构。
  */
 public final class PhysicsTimer {
+    public static volatile boolean ENABLED;
     private static final ConcurrentHashMap<SubLevelPhysicsSystem, Long> BEGIN = new ConcurrentHashMap<>();
     /** 维度 id 每物理步拼一次字符串太浪费,按物理系统缓存(系统与维度一一对应且不改名) */
     private static final ConcurrentHashMap<SubLevelPhysicsSystem, String> DIM_NAME = new ConcurrentHashMap<>();
@@ -17,6 +18,7 @@ public final class PhysicsTimer {
     }
 
     public static void begin(SubLevelPhysicsSystem system) {
+        if (!ENABLED) return;
         try {
             BEGIN.put(system, System.nanoTime());
         } catch (Throwable ignored) {
@@ -24,6 +26,7 @@ public final class PhysicsTimer {
     }
 
     public static void end(SubLevelPhysicsSystem system) {
+        if (!ENABLED) return;
         try {
             Long t0 = BEGIN.remove(system);
             if (t0 == null) {

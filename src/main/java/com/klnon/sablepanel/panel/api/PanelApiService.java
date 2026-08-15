@@ -54,6 +54,10 @@ public final class PanelApiService {
     private final Map<String, Route> routes = new LinkedHashMap<>();
     private final Map<String, BodyRoute> bodyRoutes = new LinkedHashMap<>();
     private volatile long lastActivityMs = System.currentTimeMillis();
+    private volatile CachedBodies cachedBodies = new CachedBodies(Long.MIN_VALUE, new byte[0]);
+
+    private record CachedBodies(long version, byte[] body) {
+    }
 
     public PanelApiService(PanelConfig config, BodyIndex index, PanelOps ops,
                            JobService jobs, PreviewSubsystem preview,
@@ -140,17 +144,8 @@ public final class PanelApiService {
             this.preview.retryResources();
             return PanelResponse.json(202, new JsonObject(), false);
         });
-        this.routes.put("/api/bodies", request -> {
-            JsonObject view = this.index.view();
-            // 作业状态不在这儿:它每两秒变一次,而这份快照最大 12 MiB。前端改从
-            // /api/jobs 的 running[] 取,那里字段是全的,顺带省掉一次日志请求
-            // "虚空中/极高空"的高度阈值(服主可在配置里调),前端据此筛选
-            JsonObject reach = new JsonObject();
-            reach.addProperty("void_below", this.config.voidBelowY);
-            reach.addProperty("sky_above", this.config.skyAboveY);
-            view.add("reach", reach);
-            return PanelResponse.json(200, view, true);
-        });
+        this.routes.put("/api/bodies", request ->
+                new PanelResponse(200, "application/json", bodiesResponse(), true));
         this.routes.put("/api/jobs", request -> {
             String file = request.query().get("file");
             if (file != null && !file.isBlank()) return PanelResponse.json(200, JobService.readLog(file), true);
@@ -170,6 +165,22 @@ public final class PanelApiService {
                 return out;
             });
         });
+    }
+
+    private synchronized byte[] bodiesResponse() {
+        long version = this.index.version();
+        CachedBodies cached = this.cachedBodies;
+        if (cached.version == version) return cached.body;
+        JsonObject view = this.index.view();
+        // 作业状态不在这儿:它每两秒变一次,而这份快照最大 12 MiB。前端改从
+        // /api/jobs 的 running[] 取,那里字段是全的,顺带省掉一次日志请求
+        JsonObject reach = new JsonObject();
+        reach.addProperty("void_below", this.config.voidBelowY);
+        reach.addProperty("sky_above", this.config.skyAboveY);
+        view.add("reach", reach);
+        byte[] body = view.toString().getBytes(StandardCharsets.UTF_8);
+        this.cachedBodies = new CachedBodies(version, body);
+        return body;
     }
 
     /** 回收站:分页视图/上限配置/恢复/彻底删除 */

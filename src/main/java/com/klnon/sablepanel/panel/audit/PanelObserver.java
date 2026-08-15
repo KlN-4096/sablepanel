@@ -18,6 +18,7 @@ import com.klnon.sablepanel.SablePanel;
  * 回调在容器主循环里,任何异常都必须吞掉,不能影响 sable 本体。
  */
 public final class PanelObserver implements SubLevelObserver {
+    public static volatile boolean ENABLED;
     private static final int STORM_WINDOW_MS = 60_000;
     private static final int STORM_THRESHOLD = 30;
 
@@ -35,6 +36,7 @@ public final class PanelObserver implements SubLevelObserver {
 
     @Override
     public void onSubLevelAdded(SubLevel subLevel) {
+        if (!ENABLED) return;
         try {
             JsonObject o = base("add", subLevel);
             if (subLevel instanceof ServerSubLevel ssl) {
@@ -83,6 +85,7 @@ public final class PanelObserver implements SubLevelObserver {
 
     @Override
     public void onSubLevelRemoved(SubLevel subLevel, SubLevelRemovalReason reason) {
+        if (!ENABLED) return;
         try {
             PauseService.onBodyUnloaded(subLevel.getUniqueId());
             JsonObject o = base("remove", subLevel);

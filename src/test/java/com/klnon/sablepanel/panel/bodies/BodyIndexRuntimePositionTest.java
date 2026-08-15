@@ -3,9 +3,7 @@ package com.klnon.sablepanel.panel.bodies;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -17,17 +15,15 @@ import com.klnon.sablepanel.panel.storage.DiskScanner;
 class BodyIndexRuntimePositionTest {
 
     @Test
-    void runtimePositionUpdateIsImmediatelyVisibleInCache() throws Exception {
+    void runtimePositionUpdateIsImmediatelyVisibleInCache() {
         BodyIndex index = new BodyIndex();
         UUID uuid = UUID.randomUUID();
 
         index.updateRuntimePosition(uuid, "minecraft:overworld", new double[]{12.25, 64.0, -7.5});
 
-        Field runtimeField = BodyIndex.class.getDeclaredField("runtime");
-        runtimeField.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        Map<UUID, JsonObject> states = (Map<UUID, JsonObject>) runtimeField.get(index);
-        JsonObject runtime = states.get(uuid);
+        JsonObject body = index.view().getAsJsonArray("groups").get(0).getAsJsonObject()
+                .getAsJsonArray("bodies").get(0).getAsJsonObject();
+        JsonObject runtime = body.getAsJsonObject("runtime");
         assertEquals("minecraft:overworld", runtime.get("dim").getAsString());
         assertEquals(12.25, runtime.get("x").getAsDouble());
         assertEquals(64.0, runtime.get("y").getAsDouble());
@@ -40,9 +36,27 @@ class BodyIndexRuntimePositionTest {
         UUID uuid = UUID.randomUUID();
         DiskScanner.EntryKey key = new DiskScanner.EntryKey("minecraft:overworld", 1, 2, 3, 4);
 
+        long initialVersion = index.version();
         assertTrue(index.updateDisk(List.of(entry(key, uuid, false))));
+        assertTrue(index.version() > initialVersion);
         assertFalse(index.updateDisk(List.of(entry(key, uuid, false))));
         assertTrue(index.updateDisk(List.of(entry(key, uuid, true))));
+    }
+
+    @Test
+    void diskLookupPrecomputesBestEntryAndThumbnailSignature() {
+        BodyIndex index = new BodyIndex();
+        UUID uuid = UUID.randomUUID();
+        DiskScanner.DiskEntry unreachable = entry(
+                new DiskScanner.EntryKey("minecraft:overworld", 1, 2, 0, 1), uuid, false);
+        DiskScanner.DiskEntry reachable = entry(
+                new DiskScanner.EntryKey("minecraft:overworld", 1, 2, 0, 2), uuid, true);
+
+        index.updateDisk(List.of(unreachable, reachable));
+
+        assertEquals(reachable, index.findEntry(uuid));
+        assertEquals(com.klnon.sablepanel.panel.preview.thumb.ThumbService.signature(
+                List.of(unreachable, reachable)), index.thumbnailSignature(uuid));
     }
 
     @Test
@@ -63,15 +77,11 @@ class BodyIndexRuntimePositionTest {
     @Test
     void displayPosPrefersRuntimeForLoadedBodies() {
         double[] disk = {-11433, -6557, 796};
-        JsonObject runtime = new JsonObject();
-        runtime.addProperty("x", 1000.0);
-        runtime.addProperty("y", 400.0);
-        runtime.addProperty("z", 796.0);
+        BodyIndex.RuntimeBody runtime = BodyIndex.RuntimeBody.positionOnly(
+                "minecraft:overworld", 1000, 400, 796);
 
         assertArrayEquals(new double[]{1000, 400, 796}, BodyIndex.displayPos(runtime, disk));
-        // 未加载的体(没有运行时状态)只能用磁盘快照
         assertArrayEquals(disk, BodyIndex.displayPos(null, disk));
-        assertArrayEquals(disk, BodyIndex.displayPos(new JsonObject(), disk));
     }
 
     private static DiskScanner.DiskEntry entry(DiskScanner.EntryKey key, UUID uuid, boolean reachable) {

@@ -1,6 +1,8 @@
 package com.klnon.sablepanel.panel.bodies;
 
 import com.klnon.sablepanel.panel.metrics.BodyCostTracker;
+import com.klnon.sablepanel.panel.metrics.PhysicsTimer;
+import com.klnon.sablepanel.panel.audit.PanelObserver;
 import com.klnon.sablepanel.SablePanel;
 import com.klnon.sablepanel.panel.api.PanelApiService;
 import com.klnon.sablepanel.panel.storage.DiskScanner;
@@ -61,6 +63,8 @@ public final class PanelRuntime implements AutoCloseable {
             this.scanPending.set(false);
             this.refreshRequested.set(true);
             BodyCostTracker.ENABLED = false;
+            PhysicsTimer.ENABLED = false;
+            PanelObserver.ENABLED = false;
         }
         ScheduledExecutorService createdExecutor = null;
         PanelClusterNode createdNode = null;
@@ -104,7 +108,7 @@ public final class PanelRuntime implements AutoCloseable {
             try {
                 thumbs = new com.klnon.sablepanel.panel.preview.thumb.ThumbService(
                         net.neoforged.fml.loading.FMLPaths.GAMEDIR.get().resolve("cache/sablepanel/thumbs"),
-                        this.bodyIndex::diskEntries);
+                        this.bodyIndex::thumbnailSignature);
             } catch (java.io.IOException unavailable) {
                 SablePanel.LOGGER.warn("sablepanel: thumbnail cache unavailable", unavailable);
             }
@@ -122,12 +126,15 @@ public final class PanelRuntime implements AutoCloseable {
             }, 10, TimeUnit.SECONDS);
             createdHeartbeat = executor.scheduleWithFixedDelay(() -> clusterTick(config, panel, generation),
                     PanelClusterNode.HEARTBEAT_SECONDS, PanelClusterNode.HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+            PauseService.refreshOnMain(server, PauseService.snapshot());
             synchronized (this.lifecycleLock) {
                 if (!isLifecycleCurrent(generation)) throw new IllegalStateException("面板启动已取消");
                 this.scanExecutor = executor;
                 this.panelNode = panel;
                 this.heartbeatTask = createdHeartbeat;
                 BodyCostTracker.ENABLED = true;
+                PhysicsTimer.ENABLED = true;
+                PanelObserver.ENABLED = true;
             }
             if (panel.isHost()) startServerWeb(config, panel, generation);
             return true;
@@ -181,6 +188,8 @@ public final class PanelRuntime implements AutoCloseable {
             this.stopping = true;
             this.lifecycleGeneration.incrementAndGet();
             BodyCostTracker.ENABLED = false;
+            PhysicsTimer.ENABLED = false;
+            PanelObserver.ENABLED = false;
             heartbeat = this.heartbeatTask;
             executor = this.scanExecutor;
             node = this.panelNode;
@@ -297,6 +306,8 @@ public final class PanelRuntime implements AutoCloseable {
             if (ownsLifecycle) {
                 this.stopping = true;
                 BodyCostTracker.ENABLED = false;
+                PhysicsTimer.ENABLED = false;
+                PanelObserver.ENABLED = false;
             }
             if (this.panelNode == node) this.panelNode = null;
             if (this.scanExecutor == executor) this.scanExecutor = null;

@@ -16,7 +16,7 @@ public final class BodyCostTracker {
     /**
      * 面板启用时置位。未启用(enabled=false)就没有人来 drain,
      * mixin 喂进来的采样必须直接丢弃,否则 ACC 会按出现过的 uuid 无限囤积。
-     * 关闭状态下 mixin 的全部开销 = 两次 nanoTime + 这一个 volatile 读。
+     * 关闭状态下 mixin 在 nanoTime 之前短路,只剩这一个 volatile 读。
      */
     public static volatile boolean ENABLED;
 

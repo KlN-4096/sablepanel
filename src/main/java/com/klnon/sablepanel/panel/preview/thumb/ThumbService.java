@@ -4,11 +4,10 @@ import com.klnon.sablepanel.panel.storage.DiskScanner;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
-import java.util.function.Supplier;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -28,11 +27,11 @@ public final class ThumbService {
     private static final byte[] PNG_MAGIC = {(byte) 0x89, 'P', 'N', 'G'};
 
     private final ThumbStore store;
-    private final Supplier<List<DiskScanner.DiskEntry>> entries;
+    private final Function<UUID, String> signatures;
 
-    public ThumbService(Path cacheDir, Supplier<List<DiskScanner.DiskEntry>> entries) throws IOException {
+    public ThumbService(Path cacheDir, Function<UUID, String> signatures) throws IOException {
         this.store = new ThumbStore(cacheDir, ThumbStore.DEFAULT_MAX_BYTES);
-        this.entries = entries;
+        this.signatures = signatures;
     }
 
     /** 请求线程读:PNG 字节,没有返回 null */
@@ -47,11 +46,7 @@ public final class ThumbService {
 
     /** 该体此刻应有的内容签名;体不在盘上返回 null(回收站里的死体渲不了也不用渲) */
     public String currentSig(UUID uuid) {
-        List<DiskScanner.DiskEntry> mine = new ArrayList<>();
-        for (DiskScanner.DiskEntry entry : this.entries.get()) {
-            if (uuid.equals(entry.uuid())) mine.add(entry);
-        }
-        return mine.isEmpty() ? null : signature(mine);
+        return this.signatures.apply(uuid);
     }
 
     /**
@@ -80,7 +75,7 @@ public final class ThumbService {
      *  f2 = 截帧相机按包围球拟合,小体不再缩成一粒,2026-08-15)。
      * 轴承角度不在 DiskEntry 里,角度变化不触发重渲,先不管。
      */
-    static String signature(List<DiskScanner.DiskEntry> entries) {
+    public static String signature(List<DiskScanner.DiskEntry> entries) {
         return entries.stream()
                 .map(entry -> entry.key().id() + ":" + entry.blocks() + ":" + entry.blockEntities()
                         + ":" + entry.contents() + ":" + Integer.toHexString(entry.blockIds().hashCode())
