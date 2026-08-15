@@ -21,12 +21,14 @@ import net.minecraft.server.MinecraftServer;
 
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import com.klnon.sablepanel.panel.PanelConfig;
@@ -35,13 +37,15 @@ import com.klnon.sablepanel.panel.PanelConfig;
 public final class PanelRuntime implements AutoCloseable {
     private static final int RUNTIME_REFRESH_TICKS = 100;
     private static final int RUNTIME_REFRESH_IDLE_TICKS = 1200;
-    private static final int EVENT_REFRESH_TICKS = 5;
+    private static final int EVENT_REFRESH_TICKS = 20;
     private static final int EXECUTOR_SHUTDOWN_SECONDS = 3;
+    private static final int SCAN_IDLE = 0;
+    private static final int SCAN_RUNNING = 1;
+    private static final int SCAN_RERUN = 2;
 
     private final BodyIndex bodyIndex = new BodyIndex();
     private final Object lifecycleLock = new Object();
     private final AtomicLong lifecycleGeneration = new AtomicLong();
-    private final AtomicBoolean scanPending = new AtomicBoolean();
     private final AtomicBoolean refreshRequested = new AtomicBoolean();
     private final AtomicLong bodiesRevision = new AtomicLong();
     private volatile PanelClusterNode panelNode;
@@ -50,7 +54,8 @@ public final class PanelRuntime implements AutoCloseable {
     private volatile PreviewSubsystem previewSubsystem;
     private volatile boolean stopping = true;
     private volatile boolean scanPauseLogged;
-    private ScheduledExecutorService scanExecutor;
+    private ScheduledExecutorService controlExecutor;
+    private ExecutorService scanExecutor;
     private ScheduledFuture<?> heartbeatTask;
     private int ticksSinceRefresh;
 
@@ -60,13 +65,13 @@ public final class PanelRuntime implements AutoCloseable {
             if (this.panelNode != null || !this.stopping) throw new IllegalStateException("面板已启动");
             generation = this.lifecycleGeneration.incrementAndGet();
             this.stopping = false;
-            this.scanPending.set(false);
             this.refreshRequested.set(true);
             BodyCostTracker.ENABLED = false;
             PhysicsTimer.ENABLED = false;
             PanelObserver.ENABLED = false;
         }
-        ScheduledExecutorService createdExecutor = null;
+        ScheduledExecutorService createdControlExecutor = null;
+        ExecutorService createdScanExecutor = null;
         PanelClusterNode createdNode = null;
         ScheduledFuture<?> createdHeartbeat = null;
         try {
@@ -81,15 +86,22 @@ public final class PanelRuntime implements AutoCloseable {
             PauseService.load();
             com.klnon.sablepanel.panel.ops.FreezeService.load();
             com.klnon.sablepanel.panel.ops.PhysicsService.load();
-            createdExecutor = Executors.newScheduledThreadPool(2, runnable -> {
+            createdControlExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "sablepanel-control");
+                thread.setDaemon(true);
+                return thread;
+            });
+            createdScanExecutor = Executors.newSingleThreadExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "sablepanel-scan");
                 thread.setDaemon(true);
                 return thread;
             });
-            ScheduledExecutorService executor = createdExecutor;
+            ScheduledExecutorService control = createdControlExecutor;
+            ExecutorService scans = createdScanExecutor;
+            AtomicInteger scanState = new AtomicInteger();
             Runnable scanOnce = scanTask(server, generation);
-            Runnable requestScan = mergedRunner(this.scanPending, executor,
-                    () -> isLifecycleCurrent(generation) && !executor.isShutdown(), scanOnce);
+            Runnable requestScan = mergedRunner(scanState, scans,
+                    () -> isLifecycleCurrent(generation) && !scans.isShutdown(), scanOnce);
             PanelOps ops = PanelOps.create(server, this.bodyIndex, requestScan, config);
             StatsCollector.INSTANCE.start();
             JobService jobs = new JobService(this::requestRuntimeRefresh);
@@ -117,19 +129,25 @@ public final class PanelRuntime implements AutoCloseable {
             createdNode.start();
 
             PanelClusterNode panel = createdNode;
-            // 周期扫描和手动重扫走同一道 scanPending 门闩:从前周期任务直接跑 scanOnce,
-            // 扫描期间点重扫就会有第二个线程把同一批磁盘数据再全量解压一遍
-            executor.scheduleWithFixedDelay(requestScan, 5, 120, TimeUnit.SECONDS);
-            // 只读一致性分析每次面板启动只跑一次；发现问题由网页提示，绝不在这里自动修复。
-            executor.schedule(() -> {
-                if (isLifecycleCurrent(generation)) ops.consistency().scan();
+            // 周期扫描和手动重扫走同一道门闩；运行期请求只合并成一次补跑。
+            control.scheduleWithFixedDelay(requestScan, 5, 120, TimeUnit.SECONDS);
+            // 和首次普通扫描排在同一个单线程磁盘队列里，避免启动期重复解压同一份存档。
+            control.schedule(() -> {
+                if (!isLifecycleCurrent(generation) || scans.isShutdown()) return;
+                try {
+                    scans.execute(() -> {
+                        if (isLifecycleCurrent(generation)) ops.consistency().scan();
+                    });
+                } catch (RejectedExecutionException ignored) {
+                }
             }, 10, TimeUnit.SECONDS);
-            createdHeartbeat = executor.scheduleWithFixedDelay(() -> clusterTick(config, panel, generation),
+            createdHeartbeat = control.scheduleWithFixedDelay(() -> clusterTick(config, panel, generation),
                     PanelClusterNode.HEARTBEAT_SECONDS, PanelClusterNode.HEARTBEAT_SECONDS, TimeUnit.SECONDS);
             PauseService.refreshOnMain(server, PauseService.snapshot());
             synchronized (this.lifecycleLock) {
                 if (!isLifecycleCurrent(generation)) throw new IllegalStateException("面板启动已取消");
-                this.scanExecutor = executor;
+                this.controlExecutor = control;
+                this.scanExecutor = scans;
                 this.panelNode = panel;
                 this.heartbeatTask = createdHeartbeat;
                 BodyCostTracker.ENABLED = true;
@@ -139,16 +157,14 @@ public final class PanelRuntime implements AutoCloseable {
             if (panel.isHost()) startServerWeb(config, panel, generation);
             return true;
         } catch (Exception error) {
-            rollbackStartup(generation, createdExecutor, createdNode, createdHeartbeat);
+            rollbackStartup(generation, createdControlExecutor, createdScanExecutor,
+                    createdNode, createdHeartbeat);
             throw error;
         } catch (Error error) {
-            rollbackStartup(generation, createdExecutor, createdNode, createdHeartbeat);
+            rollbackStartup(generation, createdControlExecutor, createdScanExecutor,
+                    createdNode, createdHeartbeat);
             throw error;
         }
-    }
-
-    public boolean isRunning() {
-        return this.panelNode != null;
     }
 
     /** Sable/作业线程只置脏标记；真正读取容器统一延迟到服务器 Tick 末尾。 */
@@ -163,7 +179,7 @@ public final class PanelRuntime implements AutoCloseable {
         this.ticksSinceRefresh++;
         int interval = panel.isActive() ? RUNTIME_REFRESH_TICKS : RUNTIME_REFRESH_IDLE_TICKS;
         boolean dirty = this.refreshRequested.get();
-        // 事件刷新最多每 5 tick 一次：正常变化约 250ms 内可见，碎片风暴不会每 tick 全量扫描。
+        // 事件刷新最多每秒一次：主体变化仍及时可见，碎片风暴不会每 5 tick 重建全量运行态。
         int nextRefresh = dirty ? Math.min(EVENT_REFRESH_TICKS, interval) : interval;
         if (this.ticksSinceRefresh < nextRefresh) return;
         boolean requested = this.refreshRequested.getAndSet(false);
@@ -180,7 +196,8 @@ public final class PanelRuntime implements AutoCloseable {
     @Override
     public synchronized void close() {
         ScheduledFuture<?> heartbeat;
-        ScheduledExecutorService executor;
+        ScheduledExecutorService control;
+        ExecutorService scans;
         PanelClusterNode node;
         JobService jobs;
         PreviewSubsystem preview;
@@ -191,11 +208,13 @@ public final class PanelRuntime implements AutoCloseable {
             PhysicsTimer.ENABLED = false;
             PanelObserver.ENABLED = false;
             heartbeat = this.heartbeatTask;
-            executor = this.scanExecutor;
+            control = this.controlExecutor;
+            scans = this.scanExecutor;
             node = this.panelNode;
             jobs = this.jobService;
             preview = this.previewSubsystem;
             this.heartbeatTask = null;
+            this.controlExecutor = null;
             this.scanExecutor = null;
             this.panelNode = null;
             this.jobService = null;
@@ -206,37 +225,39 @@ public final class PanelRuntime implements AutoCloseable {
         if (node != null) node.close();
         if (jobs != null) jobs.close();
         if (preview != null) preview.close();
-        shutdownExecutor(executor);
+        shutdownExecutor(control);
+        shutdownExecutor(scans);
         PauseService.reset();
         com.klnon.sablepanel.panel.ops.FreezeService.reset();
         com.klnon.sablepanel.panel.ops.PhysicsService.reset();
         this.scanPauseLogged = false;
-        this.scanPending.set(false);
         this.refreshRequested.set(false);
         this.ticksSinceRefresh = 0;
     }
 
     /**
      * 周期扫描和手动重扫共用的合并门闩:任何时刻最多一次完整扫描在跑,扫描期间的额外请求
-     * 直接丢弃(不排队成后续扫描 —— 扫描本来就是拿全量快照,再跑一遍没有新信息)。
+     * 最多合并成一次补跑。这样操作完成后的重扫不会被较早开始的扫描覆盖。
      * <p>
      * 从前周期任务直接调原始 scanOnce、只有手动入口过门闩,于是周期扫描进行时点一次重扫,
      * 就会有第二个线程把同一批磁盘数据再全量解压一遍,还占着扫描/心跳共用的调度池。
      */
-    static Runnable mergedRunner(AtomicBoolean pending, Executor executor, BooleanSupplier alive, Runnable work) {
+    static Runnable mergedRunner(AtomicInteger state, Executor executor, BooleanSupplier alive, Runnable work) {
         return () -> {
             if (!alive.getAsBoolean()) return;
-            if (!pending.compareAndSet(false, true)) return;
+            int previous = state.getAndUpdate(current -> current == SCAN_IDLE ? SCAN_RUNNING : SCAN_RERUN);
+            if (previous != SCAN_IDLE) return;
             try {
                 executor.execute(() -> {
-                    try {
+                    while (alive.getAsBoolean()) {
                         work.run();
-                    } finally {
-                        pending.set(false);
+                        if (state.compareAndSet(SCAN_RUNNING, SCAN_IDLE)) return;
+                        if (!state.compareAndSet(SCAN_RERUN, SCAN_RUNNING)) return;
                     }
+                    state.set(SCAN_IDLE);
                 });
             } catch (RejectedExecutionException rejected) {
-                pending.set(false);
+                state.set(SCAN_IDLE);
             }
         };
     }
@@ -256,7 +277,7 @@ public final class PanelRuntime implements AutoCloseable {
                 }
                 this.scanPauseLogged = false;
                 Map<String, java.nio.file.Path> dimensions = DiskScanner.sublevelDirs(server);
-                var entries = DiskScanner.scan(dimensions);
+                var entries = JobService.underLocate(() -> DiskScanner.scan(dimensions));
                 if (!isLifecycleCurrent(generation)) return;
                 if (this.bodyIndex.updateDisk(entries)) publishBodiesChanged(panel);
             } catch (Throwable error) {
@@ -297,7 +318,8 @@ public final class PanelRuntime implements AutoCloseable {
         this.panelWeb = null;
     }
 
-    private void rollbackStartup(long generation, ScheduledExecutorService executor, PanelClusterNode node,
+    private void rollbackStartup(long generation, ScheduledExecutorService control,
+                                 ExecutorService scans, PanelClusterNode node,
                                  ScheduledFuture<?> heartbeat) {
         JobService jobs;
         PreviewSubsystem preview;
@@ -310,7 +332,8 @@ public final class PanelRuntime implements AutoCloseable {
                 PanelObserver.ENABLED = false;
             }
             if (this.panelNode == node) this.panelNode = null;
-            if (this.scanExecutor == executor) this.scanExecutor = null;
+            if (this.controlExecutor == control) this.controlExecutor = null;
+            if (this.scanExecutor == scans) this.scanExecutor = null;
             if (this.heartbeatTask == heartbeat) this.heartbeatTask = null;
             jobs = this.jobService;
             this.jobService = null;
@@ -322,12 +345,12 @@ public final class PanelRuntime implements AutoCloseable {
         if (node != null) node.close();
         if (jobs != null) jobs.close();
         if (preview != null) preview.close();
-        shutdownExecutor(executor);
+        shutdownExecutor(control);
+        shutdownExecutor(scans);
         PauseService.reset();
         com.klnon.sablepanel.panel.ops.FreezeService.reset();
         com.klnon.sablepanel.panel.ops.PhysicsService.reset();
         this.scanPauseLogged = false;
-        this.scanPending.set(false);
         this.refreshRequested.set(false);
     }
 
@@ -347,7 +370,7 @@ public final class PanelRuntime implements AutoCloseable {
         return isLifecycleCurrent(generation) && this.panelNode == panel;
     }
 
-    private static void shutdownExecutor(ScheduledExecutorService executor) {
+    private static void shutdownExecutor(ExecutorService executor) {
         if (executor == null) return;
         executor.shutdownNow();
         try {

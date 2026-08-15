@@ -147,7 +147,7 @@ public final class RestoreOps {
         Set<UUID> targets = new LinkedHashSet<>();
         for (RecycleStore.RestoreBody body : group.bodies()) targets.add(body.uuid());
         if (replaceExisting) purgeRestoreTargets(targets, warnings);
-        ScanSession scan = ScanSession.strict(this.kit.server, warnings);
+        ScanSession scan = this.kit.strictScan(warnings);
         Map<UUID, Integer> existingEntries = new HashMap<>();
         for (UUID uuid : targets) existingEntries.put(uuid, scan.entriesOf(uuid).size());
         if (!replaceExisting) requireRestoreTargetsFree(targets, existingEntries);
@@ -278,13 +278,13 @@ public final class RestoreOps {
             targets.add(body.uuid());
             expected.put(body.uuid(), body);
         }
-        ScanSession scan = ScanSession.fresh(this.kit.server, warnings);
+        ScanSession scan = this.kit.freshScan(warnings);
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         for (UUID uuid : targets) {
             for (DiskScanner.EntryMeta copy : scan.entriesOf(uuid)) keys.add(copy.key());
         }
-        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
-                DiskScanner.locatePointersStrict(scan.dims(), keys, warnings);
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers = JobService.underLocate(
+                () -> DiskScanner.locatePointersStrict(scan.dims(), keys, warnings));
         JsonObject runtime = this.kit.readRuntimeStates(targets);
         for (UUID uuid : targets) {
             List<DiskScanner.EntryMeta> copies = scan.entriesOf(uuid);

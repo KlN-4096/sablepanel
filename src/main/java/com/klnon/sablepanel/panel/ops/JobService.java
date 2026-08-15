@@ -43,7 +43,7 @@ import java.util.concurrent.TimeUnit;
  * {@link Job#phase} 回报给面板。三层保护:
  * <ul>
  *   <li>同一个体同时只允许一个作业({@link #busy}),重复点击直接被拒——事故的放大器就是它;</li>
- *   <li>worker 池上限 = 核心数/3,空闲 30 秒自动回收(见 {@link #JobService});</li>
+ *   <li>worker 池上限 = min(4, 核心数/3),空闲 30 秒自动回收(见 {@link #JobService});</li>
  *   <li>翻存档这一段全局串行({@link #LOCATE}):多个线程读同一批文件、做同一份解压,
  *       并行没有收益,只会互相抢 IO 和 CPU。</li>
  * </ul>
@@ -55,6 +55,7 @@ public final class JobService implements AutoCloseable {
     private static final int TRAIL_MAX = 64;
     /** 队列硬上限:worker 数有界但队列无界时,重复提交只会无限排队而不报容量不足 */
     private static final int QUEUE_CAPACITY = 64;
+    private static final int MAX_WORKERS = 4;
     /** 每次启动一个新日志文件,只保留最近这些个:长期运行 + 反复重启会无限累积 */
     private static final int LOG_KEEP_FILES = 20;
     /** 历史日志只从文件尾部读这么多字节,堆峰值与文件大小无关 */
@@ -136,7 +137,8 @@ public final class JobService implements AutoCloseable {
      */
     public JobService(Runnable afterJob) {
         this.afterJob = afterJob;
-        this.maxWorkers = Math.max(1, Runtime.getRuntime().availableProcessors() / 3);
+        this.maxWorkers = Math.max(1,
+                Math.min(MAX_WORKERS, Runtime.getRuntime().availableProcessors() / 3));
         // core=max + allowCoreThreadTimeOut:任务来了才建线程,建到上限为止,空闲 30 秒全部回收
         this.workers = new ThreadPoolExecutor(this.maxWorkers, this.maxWorkers, 30L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(QUEUE_CAPACITY), runnable -> {

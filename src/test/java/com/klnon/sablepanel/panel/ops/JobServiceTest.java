@@ -303,6 +303,14 @@ class JobServiceTest {
         return false;
     }
 
+    @Test
+    void workerCountHasAHardCeiling() {
+        try (JobService jobs = new JobService(null)) {
+            assertTrue(jobs.maxWorkers() >= 1);
+            assertTrue(jobs.maxWorkers() <= 4, "高核心数机器也不能放大主线程和磁盘竞争");
+        }
+    }
+
     private static boolean waitUntil(java.util.function.BooleanSupplier condition, long timeoutMs)
             throws InterruptedException {
         long deadline = System.nanoTime() + timeoutMs * 1_000_000L;

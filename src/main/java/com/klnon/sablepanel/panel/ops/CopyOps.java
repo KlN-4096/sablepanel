@@ -62,10 +62,11 @@ public final class CopyOps {
     }
 
     private CopyVersionScanner.Scan inspectVersionState(UUID uuid, List<String> warnings) throws Exception {
-        ScanSession scan = ScanSession.strict(this.kit.server, warnings);
+        ScanSession scan = this.kit.strictScan(warnings);
         Set<UUID> members = CopyVersionScanner.members(scan.meta(), uuid);
         JsonObject runtime = this.kit.readOperationalMetadata(members);
-        return CopyVersionScanner.scan(scan.dims(), scan.meta(), uuid, activeEntries(runtime, members), warnings);
+        return JobService.underLocate(() -> CopyVersionScanner.scan(
+                scan.dims(), scan.meta(), uuid, activeEntries(runtime, members), warnings));
     }
 
     private static CopyVersionScanner.Version requireVersion(CopyVersionScanner.Scan scan, String versionId,
@@ -173,10 +174,10 @@ public final class CopyOps {
             throws Exception {
         // flush 之前判定:那之后活着那份的 id 和槽位都不再是用户看到的那一个
         boolean live = requireVersion(inspectVersionState(uuid, warnings), versionId, true).active();
-        ScanSession scan = ScanSession.strict(this.kit.server, warnings);
+        ScanSession scan = this.kit.strictScan(warnings);
         Set<UUID> members = CopyVersionScanner.members(scan.meta(), uuid);
         this.kit.flushLoadedTargets(members);
-        scan = ScanSession.strict(this.kit.server, warnings);
+        scan = this.kit.strictScan(warnings);
         members = CopyVersionScanner.members(scan.meta(), uuid);
         DeleteTx.DeleteComponent component = this.tx.prepareExactDeleteComponent(members, warnings);
         if (!component.targets.equals(members)) {

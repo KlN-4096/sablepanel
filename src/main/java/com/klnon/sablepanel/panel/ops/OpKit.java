@@ -2,6 +2,7 @@ package com.klnon.sablepanel.panel.ops;
 
 import com.klnon.sablepanel.panel.bodies.BodyIndex;
 import com.klnon.sablepanel.panel.storage.DiskScanner;
+import com.klnon.sablepanel.panel.storage.ScanSession;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.panel.audit.EventLog;
@@ -63,8 +64,7 @@ public final class OpKit {
     List<UUID> expandToDependencyGroups(Collection<UUID> roots) {
         try {
             List<String> warnings = new ArrayList<>();
-            com.klnon.sablepanel.panel.storage.ScanSession scan =
-                    com.klnon.sablepanel.panel.storage.ScanSession.fresh(this.server, warnings);
+            ScanSession scan = freshScan(warnings);
             Set<UUID> all = new LinkedHashSet<>(roots);
             for (Set<UUID> component : DiskScanner.selectedDependencyComponents(scan.meta(), List.copyOf(all))) {
                 all.addAll(component);
@@ -74,6 +74,14 @@ public final class OpKit {
             SablePanel.LOGGER.warn("sablepanel: expanding force-load targets to dependency groups failed", error);
             return List.copyOf(new LinkedHashSet<>(roots));
         }
+    }
+
+    ScanSession freshScan(List<String> warnings) throws Exception {
+        return JobService.underLocate(() -> ScanSession.fresh(this.server, warnings));
+    }
+
+    ScanSession strictScan(List<String> warnings) throws Exception {
+        return JobService.underLocate(() -> ScanSession.strict(this.server, warnings));
     }
 
     /**
