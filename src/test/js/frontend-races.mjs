@@ -5,7 +5,8 @@
  *   node src/test/js/frontend-races.mjs
  *
  * 覆盖:UI-01 终态契约、UI-02 并发登录、UI-03 切服隔离、UI-04 预览旧失败、
- *      LOAD-01 加载失败不伪装成空、PERF-03 忙碌轮询与注销、PERF-04 作业轮询与 bodies 解耦、PERF-05 批量收养只发一次请求刷一次、回收站版本/清除交互。
+ *      LOAD-01 加载失败不伪装成空、PERF-03 忙碌轮询与注销、PERF-04 作业轮询与 bodies 解耦、
+ *      PERF-05 批量收养只发一次请求刷一次、SSE 定向刷新、缩略图按可视区加载、回收站版本/清除交互。
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -788,6 +789,99 @@ test('PERF-04 作业在首轮轮询之前就结束时也要刷新一次 bodies',
   await tick();
   assert.equal(evalIn(sandbox, '__toasts').length, 1, '完成 toast 本来就弹得出来');
   assert.equal(bodies, 1, '终态既然消费掉了,列表也必须跟着刷一次');
+});
+
+test('PERF-04 awaitJob 复用中央 compact 轮询,不自行请求完整日志', async () => {
+  const hits = [];
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    hits.push(url);
+    if (url.startsWith('/api/jobs')) return jsonResponse({ running: [], log: [
+      { seq: 7, op: '批量删除', state: 'done', outcome: 'partial', message: '1/2' },
+    ] });
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    return jsonResponse({});
+  };
+  evalIn(sandbox, "authenticated = true; JOB_WATCH.set(7, '批量删除'); toast = () => {}");
+
+  const waiting = evalIn(sandbox, 'awaitJob')(7);
+  await tick();
+  assert.equal(hits.length, 0, '等待者只登记回调,不能再启动一条每秒 /api/jobs 循环');
+  await evalIn(sandbox, 'pollJobs')();
+  assert.equal(await waiting, 'partial');
+  assert.equal(hits.filter(url => url.startsWith('/api/jobs')).length, 1);
+  assert.ok(hits[0].startsWith('/api/jobs?poll=1'), '终态必须来自 compact 作业轮询');
+});
+
+test('PERF-04 compact 历史缺少终态时等待者立即失败,不挂到超时', async () => {
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => url.startsWith('/api/jobs')
+    ? jsonResponse({running: [], log: []}) : bodiesResponse();
+  evalIn(sandbox, "authenticated = true; JOB_WATCH.set(8, '删除'); toast = () => {}");
+  const waiting = evalIn(sandbox, 'awaitJob')(8);
+  await evalIn(sandbox, 'pollJobs')();
+  assert.equal(await waiting, 'fail');
+  assert.equal(evalIn(sandbox, 'JOB_WAITERS.size'), 0);
+});
+
+test('PERF-04 作业目标不变时只更新徽章文字,不重建整页卡片', () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    BUSY = new Map([['u1', {seq:1}]]);
+    __renders = 0; __labels = 0;
+    renderAll = () => __renders++;
+    refreshBusyLabels = () => __labels++;
+    applyJobs([{seq:1, op:'删除', state:'running', targets:['u1'], started_at:1}]);
+  `);
+  assert.equal(evalIn(sandbox, '__renders'), 0);
+  assert.equal(evalIn(sandbox, '__labels'), 1);
+});
+
+test('SSE 只让当前服务器的 bodies 事件触发刷新', () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, "authenticated = true; CURSRV = 'A'; SERVERS = [{id:'A',self:true},{id:'B'}]");
+  evalIn(sandbox, 'handleEventBlock')('event: bodies\ndata: {"server":"B"}');
+  assert.equal(evalIn(sandbox, 'eventRefreshTimer'), null, '别的成员事件不能让当前页重拉快照');
+  evalIn(sandbox, 'handleEventBlock')('event: bodies\ndata: {"server":"A"}');
+  assert.notEqual(evalIn(sandbox, 'eventRefreshTimer'), null);
+  evalIn(sandbox, 'stopEventStream()');
+});
+
+test('缩略图进入可视区附近后才加入下载队列', () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    __queued = []; __io = null;
+    queueThumb = uuid => __queued.push(uuid);
+    IntersectionObserver = class {
+      constructor(callback){ this.callback = callback; __io = this; }
+      observe(target){}
+      unobserve(target){}
+      disconnect(){}
+    };
+    thumbObserver = null;
+    __boxes = [
+      {dataset:{tu:'near',tb:'10'}},
+      {dataset:{tu:'too-large',tb:String(THUMB_MAX_BLOCKS + 1)}},
+    ];
+    document.querySelectorAll = () => __boxes;
+    observeThumbs();
+  `);
+  assert.equal(evalIn(sandbox, '__queued.length'), 0, '初次渲染不能把整页缩略图全部入队');
+  evalIn(sandbox, '__io.callback([{isIntersecting:true,target:__boxes[0]}])');
+  assert.equal(evalIn(sandbox, '__queued.join()'), 'near');
+});
+
+test('stale 缩略图重渲完成后原位替换已显示的 img', () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    __img = {src:'blob:old', classList:{add(){}}};
+    __box = {querySelector: selector => selector === '.thImg' ? __img : null};
+    document.querySelectorAll = () => [__box];
+    THUMBS.set('u-stale', {url:'blob:old'});
+    SableThumbRender.onDone('u-stale', 'blob:new');
+  `);
+  assert.equal(evalIn(sandbox, '__img.src'), 'blob:new');
+  assert.equal(evalIn(sandbox, "THUMBS.get('u-stale').url"), 'blob:new');
 });
 
 test('PERF-03 慢响应期间不重叠请求,期间的请求合并成完事后再跑一次', async () => {

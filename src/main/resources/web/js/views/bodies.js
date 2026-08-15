@@ -236,7 +236,17 @@ function busyTag(uuid){
   if (!job) return '';
   const secs = Math.max(0, Math.round((Date.now() - job.since) / 1000));
   const label = job.state === 'queued' ? T.jobQueued : (job.phase || job.op);
-  return `<span class="tag busy" title="${esc(job.op)}"><i class="spin"></i>${esc(label)} ${secs}s</span>`;
+  return `<span class="tag busy" data-busy="${uuid}" title="${esc(job.op)}"><i class="spin"></i>${esc(label)} ${secs}s</span>`;
+}
+function refreshBusyLabels(){
+  for (const tag of document.querySelectorAll('[data-busy]')) {
+    const job = BUSY.get(tag.dataset.busy);
+    if (!job) continue;
+    const secs = Math.max(0, Math.round((Date.now() - job.since) / 1000));
+    const label = job.state === 'queued' ? T.jobQueued : (job.phase || job.op);
+    tag.title = job.op;
+    tag.innerHTML = `<i class="spin"></i>${esc(label)} ${secs}s`;
+  }
 }
 
 /* 收藏以依赖组为单位(按组根 uuid 存),避免组内个别成员收藏造成状态歧义 */
@@ -292,8 +302,31 @@ function thumbHtml(uuid, blocks, silent){
   const cached = uuid && THUMBS.get(uuid);
   if (cached && cached.url) return `<img class="thImg" src="${cached.url}" alt="">`;
   if (!uuid || blocks > THUMB_MAX_BLOCKS) return THUMB_CUBE;
-  queueThumb(uuid);
   return THUMB_CUBE + (silent ? '' : `<span class="thPend">${T.thumbPending}</span>`);
+}
+let thumbObserver = null;
+function observeThumbs(){
+  const boxes = [...document.querySelectorAll('.bthumb[data-tu]')]
+    .filter(box => Number(box.dataset.tb) <= THUMB_MAX_BLOCKS);
+  if (!thumbObserver && typeof IntersectionObserver !== 'undefined') {
+    try {
+      const observer = new IntersectionObserver(entries => {
+        for (const entry of entries) if (entry.isIntersecting) {
+          observer.unobserve(entry.target);
+          queueThumb(entry.target.dataset.tu);
+        }
+      }, {rootMargin:'240px'});
+      if (typeof observer.observe === 'function'
+          && typeof observer.unobserve === 'function'
+          && typeof observer.disconnect === 'function') thumbObserver = observer;
+    } catch (_) { /* 旧浏览器回退到立即排队 */ }
+  }
+  if (!thumbObserver) {
+    boxes.forEach(box => queueThumb(box.dataset.tu));
+    return;
+  }
+  thumbObserver.disconnect();
+  boxes.forEach(box => thumbObserver.observe(box));
 }
 function queueThumb(uuid){
   const cached = THUMBS.get(uuid);
@@ -314,7 +347,7 @@ async function fetchThumb(uuid){
     if (gen !== SRVGEN) return;               // 切服期间的旧响应整个作废
     if (r.ok) {
       const url = URL.createObjectURL(await r.blob());
-      THUMBS.set(uuid, {url});
+      replaceThumbUrl(uuid, url);
       patchThumb(uuid, url);
       // 内容已过期:旧图先亮着,后台重渲上传,渲完就地替换
       const stale = r.headers.get('X-Thumb-Stale');
@@ -336,6 +369,12 @@ async function fetchThumb(uuid){
 /* 就地点亮:图到了别等下一次整表重画,替换占位立方体并淡入 */
 function patchThumb(uuid, url){
   for (const box of document.querySelectorAll(`.bthumb[data-tu="${uuid}"]`)) {
+    const current = box.querySelector('.thImg');
+    if (current) {
+      current.src = url;
+      current.classList.add('thIn');
+      continue;
+    }
     const cube = box.querySelector('.thCube');
     if (!cube) continue;
     const img = document.createElement('img');
@@ -349,15 +388,21 @@ function patchThumb(uuid, url){
 /* 离屏渲染的回执:url=渲好并已上传(直接用本地位图,不再 GET);null=永久放弃
    (too_large/副本歧义/空体),摘掉"生成中"并且本会话不再问 */
 SableThumbRender.onDone = (uuid, url) => {
-  if (url) { THUMBS.set(uuid, {url}); patchThumb(uuid, url); return; }
+  if (url) { replaceThumbUrl(uuid, url); patchThumb(uuid, url); return; }
   THUMBS.set(uuid, {until: Infinity});
   for (const pending of document.querySelectorAll(`.bthumb[data-tu="${uuid}"] .thPend`)) pending.remove();
 };
+function replaceThumbUrl(uuid, url){
+  const previous = THUMBS.get(uuid);
+  if (previous && previous.url && previous.url !== url) URL.revokeObjectURL(previous.url);
+  THUMBS.set(uuid, {url});
+}
 onServerReset(() => {
   SableThumbRender.reset();
   for (const cached of THUMBS.values()) if (cached.url) URL.revokeObjectURL(cached.url);
   THUMBS.clear();
   thumbQueue.length = 0;
+  if (thumbObserver) thumbObserver.disconnect();
 });
 
 function render() {
@@ -438,6 +483,7 @@ function render() {
   }
   renderToolbar(matchedGroups, DATA.groups.filter(inTab).length);
   updateSelUI();
+  observeThumbs();
 }
 
 /* 一组一卡。primary=可见成员里块数最大的:组根(gid)常是绳链上的小碎片,
@@ -460,7 +506,7 @@ function buildCard(g, vis){
   const stateDots = Object.entries(stateCounts).map(([s,n]) =>
     `<i class="dot" style="background:${STATE_DOT[s]}" title="${stateLabel(s)}"></i>${g.members>1?n:''}`).join('');
   div.innerHTML = `
-    <div class="bthumb" data-tu="${primary.uuid}" style="color:hsl(${hueOf(g.gid)} 32% 56%)">
+    <div class="bthumb" data-tu="${primary.uuid}" data-tb="${primary.blocks}" style="color:hsl(${hueOf(g.gid)} 32% 56%)">
       ${thumbHtml(primary.uuid, primary.blocks)}
       <input type="checkbox" class="gsel" ${partial ? `disabled title="${T.groupPartialTip(g.members_omitted)}"` : ''}>
       <button class="favStar ${FAV.has(g.gid)?'on':''}" title="${T.favTip}">${FAV.has(g.gid)?'★':'☆'}</button>

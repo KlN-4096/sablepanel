@@ -68,9 +68,15 @@ async function readEventStream(stream, generation){
 }
 
 function handleEventBlock(block){
-  const eventLine = block.split('\n').find(line => line.startsWith('event:'));
+  const lines = block.split('\n');
+  const eventLine = lines.find(line => line.startsWith('event:'));
   const event = eventLine ? eventLine.slice(6).trim() : '';
   if (event === 'bodies') {
+    const raw = lines.filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n');
+    let source = '';
+    try { source = raw ? JSON.parse(raw).server || '' : ''; } catch (_) { return; }
+    const current = CURSRV || ((SERVERS.find(server => server.self) || {}).id || '');
+    if (source && current && source !== current) return;
     scheduleEventRefresh();
   }
 }

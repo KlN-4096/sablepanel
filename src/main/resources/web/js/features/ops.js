@@ -282,18 +282,20 @@ async function batchDelete(uuids, expand = true){
  * 2026-08-08 实测:清理残骸 0/173 全失败,后续的常驻加载照样跑了,192 个体一起挂票崩服。
  */
 async function awaitJob(seq){
-  const ctx = captureCtx();
-  for (let i = 0; i < 900; i++) {
-    let r;
-    try { r = await api('/api/jobs'); } catch { return 'fail'; }
-    if (!ctx.fresh()) return 'fail';
-    if (!(r.running || []).some(job => job.seq === seq)) {
-      const job = (r.log || []).find(entry => entry.seq === seq);
-      return job ? jobOutcome(job) : 'fail';
-    }
-    await new Promise(res => setTimeout(res, 1000));
+  if (JOB_RESULTS.has(seq)) {
+    const outcome = JOB_RESULTS.get(seq);
+    JOB_RESULTS.delete(seq);
+    return outcome;
   }
-  return 'fail';
+  const ctx = captureCtx();
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      JOB_WAITERS.delete(seq);
+      resolve('fail');
+    }, 900000);
+    JOB_WAITERS.set(seq, {ctx, resolve, timer});
+    syncBusyPolling();
+  });
 }
 async function doAdopt() {
   if (!SEL) return;

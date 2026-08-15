@@ -63,6 +63,8 @@ let ACTIVE_JOBS = [];
 let BUSY = new Map();
 /* 本页提交过、还没弹过结果的作业:seq → 操作名。从 BUSY 消失时去 /api/jobs 取终态 */
 let JOB_WATCH = new Map();
+/* 只有需要串接后续动作的调用方才等待终态；结果仍由中央 compact 轮询交付。 */
+let JOB_WAITERS = new Map(), JOB_RESULTS = new Map();
 /* 有作业在跑时的加速轮询句柄(2 秒),跑完自动停 */
 let busyTimer = null;
 
@@ -78,9 +80,6 @@ let R_DIM_DISABLED = new Set();
 /* 回收站游标分页:服务端按 latest/old 分页并返回全局版本计数。
    RECYCLE.groups 仍只是当前版本页签已经加载的页。 */
 let RECYCLE_CURSOR = '', RECYCLE_TOTAL = 0, RECYCLE_LOADING = false;
-
-/* 折叠记忆:用户显式展开/折叠过的组(gid → bool),优先于默认展开策略;切服清空 */
-let EXPAND_STATE = new Map();
 
 /* 收藏:以依赖组为单位(存组根 uuid=gid),持久化 localStorage,按当前查看的服务器隔离
    (不自动清理:holding 期组会短暂从索引消失,自动清理会误删收藏) */
@@ -100,6 +99,6 @@ onServerReset(() => {
   SELECTED = new Set(); BODY_BY_UUID = new Map();
   R_SELECTED = new Set(); RECYCLE_BY_ID = new Map(); RECYCLE_VISIBLE = [];
   RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
-  EXPAND_STATE.clear(); loadFav();
+  loadFav();
   PLAYERS = []; PLAYERS_ERROR = ''; playersFetchedAt = 0; PAUSED = new Set(); FORCED = new Set();
 });

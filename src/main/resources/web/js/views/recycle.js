@@ -85,7 +85,7 @@ function renderRecycle(){
       const selected = RSELG && RSELG.id === group.id;
       const clickable = bodies.length ? ` onclick="selectRecycleBody('${group.id}','${primary.uuid}')"` : '';
       return `<div class="bcard rcard ${group.state==='restored'?'is-restored':''} ${selected?'is-sel':''}"${clickable}>
-        <div class="bthumb" ${primary?`data-tu="${primary.uuid}"`:''} style="color:hsl(${hueOf(group.id)} 32% 56%)">
+        <div class="bthumb" ${primary?`data-tu="${primary.uuid}" data-tb="${primary.blocks||0}"`:''} style="color:hsl(${hueOf(group.id)} 32% 56%)">
           ${primary ? thumbHtml(primary.uuid, primary.blocks||0, true) : THUMB_CUBE}
           <input type="checkbox" class="gsel" ${R_SELECTED.has(group.id)?'checked':''}
             onclick="event.stopPropagation();toggleRecycleGroup('${group.id}')">
@@ -99,6 +99,7 @@ function renderRecycle(){
     }).join('');
   }
   renderRecycleToolbar(visible.length, RECYCLE.groups.length);
+  observeThumbs();
 }
 function renderRecycleToolbar(visible, total){
   const selectedGroups=[...R_SELECTED].map(id=>RECYCLE_BY_ID.get(id)).filter(Boolean);

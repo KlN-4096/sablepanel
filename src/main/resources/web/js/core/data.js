@@ -146,6 +146,7 @@ function pollJobs(){
 /* 每个作业一条,按 targets 展开成"体 → 作业"给行徽章用;
    没有目标体的作业(回收站恢复/重扫磁盘)只进 ACTIVE_JOBS,靠顶栏指示器显示 */
 function applyJobs(list){
+  const previousTargets = [...BUSY.keys()].sort().join('\n');
   // /api/jobs 给的是 started_at / queued_at 两个字段,顶栏指示器算已耗时用的是 since。
   // 不归一化的话 Date.now() - undefined 就是 NaN,界面上显示 "NaNs"
   ACTIVE_JOBS = list.map(job => job.since === undefined
@@ -153,7 +154,9 @@ function applyJobs(list){
   BUSY = new Map();
   for (const job of ACTIVE_JOBS) for (const u of (job.targets || [])) BUSY.set(u, job);
   renderJobPill();
-  renderAll();
+  const currentTargets = [...BUSY.keys()].sort().join('\n');
+  if (previousTargets !== currentTargets) renderAll();
+  else if (typeof refreshBusyLabels === 'function') refreshBusyLabels();
 }
 /* 有作业在跑时把作业状态轮询加速到 2 秒,跑完自动停。
    取代从前散落在各操作里的 setTimeout(loadBodies, 1200/1500/4000) —— 那些是对
@@ -179,7 +182,12 @@ function clearBusyTimer(){
    旧服的 JOB_WATCH 留着还会跟新服相同 seq 的作业错配 */
 function stopBusyPolling(){
   clearBusyTimer();
-  ACTIVE_JOBS = []; BUSY = new Map(); JOB_WATCH.clear();
+  ACTIVE_JOBS = []; BUSY = new Map(); JOB_WATCH.clear(); JOB_RESULTS.clear();
+  for (const waiter of JOB_WAITERS.values()) {
+    clearTimeout(waiter.timer);
+    waiter.resolve('fail');
+  }
+  JOB_WAITERS.clear();
   renderJobPill();
 }
 /* 顶栏"处理中"指示:唯一能显示无目标体作业(回收站恢复/重扫磁盘)进度的地方 */
@@ -208,9 +216,26 @@ function reapFinishedJobs(log){
   for (const seq of finished) {
     JOB_WATCH.delete(seq);
     const job = log.find(entry => entry.seq === seq);
-    if (!job) continue;
+    if (!job) {
+      const missing = JOB_WAITERS.get(seq);
+      if (missing) {
+        JOB_WAITERS.delete(seq);
+        clearTimeout(missing.timer);
+        missing.resolve('fail');
+      }
+      continue;
+    }
     // 终态一律走 outcome:从前 0/3(全部失败)在这里弹的是绿色"完成"
     const outcome = jobOutcome(job);
+    const waiter = JOB_WAITERS.get(seq);
+    if (waiter) {
+      JOB_WAITERS.delete(seq);
+      clearTimeout(waiter.timer);
+      waiter.resolve(waiter.ctx.fresh() ? outcome : 'fail');
+    } else {
+      JOB_RESULTS.set(seq, outcome);
+      if (JOB_RESULTS.size > 64) JOB_RESULTS.delete(JOB_RESULTS.keys().next().value);
+    }
     const label = outcome === 'fail' ? T.jobFailed : outcome === 'partial' ? T.jobPartial : T.jobDone;
     const parts = [job.op, job.name, label, job.message];
     if (job.op === '回收站彻底删除' && (job.warnings || []).length) parts.push(job.warnings[0]);
