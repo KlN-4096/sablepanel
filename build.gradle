@@ -1,0 +1,114 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.142'
+    id 'idea'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+repositories {
+    mavenCentral()
+}
+
+neoForge {
+    version = project.neo_version
+
+    parchment {
+        mappingsVersion = project.parchment_mappings_version
+        minecraftVersion = project.parchment_minecraft_version
+    }
+
+    runs {
+        server {
+            server()
+            programArgument '--nogui'
+        }
+        // 同机第二个服务端:用来验证面板集群(抢端口选主 / 挂靠 / 接管)
+        server2 {
+            server()
+            programArgument '--nogui'
+            gameDirectory = file('run2')
+        }
+        client {
+            client()
+            gameDirectory = file('run-client')
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+dependencies {
+    // sable 2.0.3 与其内嵌 companion:仅编译期,运行时由服务器 mods 目录提供
+    compileOnly files("libs/sable-neoforge-1.21.1-2.0.3.jar")
+    compileOnly files("libs/sable-companion-common-1.21.1-1.6.0.jar")
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    // 单元测试要能调 BodyIndex.view():它引用 sable 的 SubLevel 类型，只 compileOnly 会 NoClassDefFound。
+    // 只进测试类路径，不影响发布产物（运行时仍由服务器 mods 目录提供）。
+    testRuntimeOnly files("libs/sable-neoforge-1.21.1-2.0.3.jar")
+    testRuntimeOnly files("libs/sable-companion-common-1.21.1-1.6.0.jar")
+
+    jarJar(implementation('org.bouncycastle:bcprov-jdk18on:1.84')) {
+        version { strictly '[1.84,1.85)'; prefer '1.84' }
+    }
+    jarJar(implementation('org.bouncycastle:bcutil-jdk18on:1.84')) {
+        version { strictly '[1.84,1.85)'; prefer '1.84' }
+    }
+    jarJar(implementation('org.bouncycastle:bcpkix-jdk18on:1.84')) {
+        version { strictly '[1.84,1.85)'; prefer '1.84' }
+    }
+    // 1.21.1 的开发运行不会自动展开普通 Jar-in-Jar 依赖。
+    additionalRuntimeClasspath 'org.bouncycastle:bcprov-jdk18on:1.84'
+    additionalRuntimeClasspath 'org.bouncycastle:bcutil-jdk18on:1.84'
+    additionalRuntimeClasspath 'org.bouncycastle:bcpkix-jdk18on:1.84'
+}
+
+// 单元测试直接使用 MC 的 NBT 类(无需 Bootstrap),由 MDG 提供测试类路径
+neoForge.addModdingDependenciesTo(sourceSets.test)
+
+test {
+    useJUnitPlatform()
+}
+
+var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
+    var replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            neo_version            : neo_version,
+            neo_version_range      : neo_version_range,
+            loader_version_range   : loader_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+    ]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from "src/main/templates"
+    into "build/generated/sources/modMetadata"
+}
+sourceSets.main.resources.srcDir generateModMetadata
+neoForge.ideSyncTask generateModMetadata
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}
