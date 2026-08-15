@@ -1,0 +1,39 @@
+modLoader="javafml"
+loaderVersion="${loader_version_range}"
+license="${mod_license}"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+authors="KlNon"
+# 服务端提供数据；客户端安装后可在 localhost:25580 打开本地管理页
+displayTest="IGNORE_ALL_VERSION"
+description='''
+Web admin panel for Sable sub-levels with a TLS data endpoint and an optional localhost client gateway.
+Sable 物理体网页管理面板:全量存档索引 / 清理建议 / 传送・删除・孤儿收养(带回收站)/ 3D 体素预览 / 逐体耗时分析 / 同机多服集群。服务端提供 TLS 数据接口,客户端可在 localhost 打开管理页。
+'''
+
+[[mixins]]
+config="sablepanel.mixins.json"
+
+[[dependencies.${mod_id}]]
+modId="neoforge"
+type="required"
+versionRange="${neo_version_range}"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="minecraft"
+type="required"
+versionRange="${minecraft_version_range}"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="sable"
+type="required"
+versionRange="[2.0,)"
+ordering="AFTER"
+side="BOTH"
