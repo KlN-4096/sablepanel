@@ -204,6 +204,26 @@ class RecycleStoreVersionTest {
                 () -> store.stage(List.of(source(UUID.randomUUID(), 1)), Map.of()));
     }
 
+    @Test
+    void batchStagesShareOneCapacityBudgetAndFailIndependently() throws Exception {
+        PanelConfig config = new PanelConfig();
+        config.recycleMaxFiles = 2;
+        RecycleStore store = new RecycleStore(config, this.root);
+        List<RecycleStore.StageRequest> requests = List.of(
+                new RecycleStore.StageRequest(List.of(source(UUID.randomUUID(), 0)), Map.of()),
+                new RecycleStore.StageRequest(List.of(source(UUID.randomUUID(), 1)), Map.of()),
+                new RecycleStore.StageRequest(List.of(source(UUID.randomUUID(), 2)), Map.of()));
+
+        List<RecycleStore.StageAttempt> attempts = store.stageBatch(requests);
+
+        assertTrue(attempts.get(0).stage() != null && attempts.get(0).error() == null);
+        assertTrue(attempts.get(1).stage() != null && attempts.get(1).error() == null);
+        assertTrue(attempts.get(2).stage() == null && attempts.get(2).error() instanceof IllegalStateException);
+        try (var pending = Files.list(this.root.resolve(".pending"))) {
+            assertEquals(2, pending.count());
+        }
+    }
+
     private RecycleStore store() {
         return new RecycleStore(new PanelConfig(), this.root);
     }

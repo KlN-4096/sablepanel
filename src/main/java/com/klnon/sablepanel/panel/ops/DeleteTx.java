@@ -137,8 +137,8 @@ final class DeleteTx {
                 tags.put(copy.key(), OpKit.readVerifiedTag(scan.dims(), target, copy.key()));
             }
         }
-        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
-                DiskScanner.locatePointersStrict(scan.dims(), tags.keySet(), warnings);
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers = JobService.underLocate(
+                () -> DiskScanner.locatePointersStrict(scan.dims(), tags.keySet(), warnings));
         Map<UUID, List<DeleteCopy>> result = new LinkedHashMap<>();
         for (UUID target : targets) {
             List<DeleteCopy> copies = new ArrayList<>();
@@ -209,7 +209,7 @@ final class DeleteTx {
     /** 作业线程:确认快照的磁盘侧校验 —— 全量重扫+整组重读+指针定位,这些 IO 不占主线程 */
     void validatePreparedDiskSnapshot(DeleteComponent component) throws Exception {
         List<String> warnings = new ArrayList<>();
-        ScanSession scan = ScanSession.fresh(this.kit.server, warnings);
+        ScanSession scan = this.kit.freshScan(warnings);
         if (!warnings.isEmpty()) {
             throw new IOException("删除前存储校验失败: " + String.join("; ", warnings));
         }
@@ -235,8 +235,8 @@ final class DeleteTx {
             currentEntries.put(uuid, current);
         }
 
-        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> currentPointers =
-                DiskScanner.locatePointersStrict(scan.dims(), keys, warnings);
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> currentPointers = JobService.underLocate(
+                () -> DiskScanner.locatePointersStrict(scan.dims(), keys, warnings));
         if (!warnings.isEmpty()) {
             throw new IOException("删除前指针校验失败: " + String.join("; ", warnings));
         }
@@ -405,7 +405,6 @@ final class DeleteTx {
         if (pointer != null) {
             execution.handledPointers.computeIfAbsent(uuid, ignored -> new ArrayList<>()).add(pointer);
         }
-        dropHoldingRecords(level, uuid);
     }
 
     /**
@@ -417,11 +416,11 @@ final class DeleteTx {
      * 顺序是「先清空旧槽位、再搬家写新槽位」,于是删除变成了搬家:
      * 校验只看到条目还在(换了个区域文件),而旧指针没了 —— 体变成孤儿。
      * <p>
-     * ponytail: 扫全部已加载 holding 区块,不按 pointer.chunkPos() 直接定位 ——
+     * 每个维度在 saveAll 前只扫一次全部已加载 holding 区块,不按 pointer.chunkPos() 直接定位 ——
      * 记录所在区块和 pointer 说的区块本来就可能对不上(sable 那句 mis-match 日志就是为此),
-     * 直接定位会漏。删除是低频作业,这点开销无所谓;真成瓶颈再建 uuid→chunk 反查。
+     * 直接定位会漏。
      */
-    private void dropHoldingRecords(ServerLevel level, UUID uuid) {
+    private void dropHoldingRecords(ServerLevel level, Set<UUID> uuids) {
         try {
             ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
             if (container == null) return;
@@ -429,20 +428,26 @@ final class DeleteTx {
                     (Object) container.getHoldingChunkMap();
             int dropped = 0;
             for (var chunk : map.sablepanel$loadedHoldingChunks().values()) {
-                if (((com.klnon.sablepanel.mixin.HoldingChunkAccessor) (Object) chunk)
-                        .sablepanel$loadedHoldingSubLevels().remove(uuid) != null) {
-                    dropped++;
-                }
+                dropped += removeKeys(((com.klnon.sablepanel.mixin.HoldingChunkAccessor) (Object) chunk)
+                        .sablepanel$loadedHoldingSubLevels(), uuids);
             }
             // 全局索引也要摘:区块表清了条目才真的删得掉,这张不清体依旧被判定为 holding
-            if (map.sablepanel$allHoldingSubLevels().remove(uuid) != null) dropped++;
+            dropped += removeKeys(map.sablepanel$allHoldingSubLevels(), uuids);
             if (dropped > 0) {
-                SablePanel.LOGGER.debug("sablepanel: delete {} dropped {} holding record(s)", uuid, dropped);
+                SablePanel.LOGGER.debug("sablepanel: delete {} target(s) dropped {} holding record(s)",
+                        uuids.size(), dropped);
             }
         } catch (Throwable error) {
             // 摘不掉不该让删除事务失败:后面的校验会发现条目还在并如实报错
-            SablePanel.LOGGER.warn("sablepanel: dropping holding records for {} failed", uuid, error);
+            SablePanel.LOGGER.warn("sablepanel: dropping holding records for {} target(s) failed",
+                    uuids.size(), error);
         }
+    }
+
+    static int removeKeys(Map<UUID, ?> values, Set<UUID> targets) {
+        int before = values.size();
+        values.keySet().removeAll(targets);
+        return before - values.size();
     }
 
     void queueRemainingCopies(DeleteExecution execution, UUID uuid, ServerSubLevel removedBody) {
@@ -480,7 +485,6 @@ final class DeleteTx {
                 execution.flush.targetsByLevel().computeIfAbsent(level, ignored -> new LinkedHashSet<>()).add(uuid);
                 removedBody.setLastSerializationPointer(pointer);
                 container.getHoldingChunkMap().queueDeletion(removedBody);
-                dropHoldingRecords(level, uuid);
             }
         }
     }
@@ -515,6 +519,7 @@ final class DeleteTx {
             try {
                 ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
                 if (container == null) throw new IllegalStateException("物理体容器不存在");
+                dropHoldingRecords(level, flush.targetsByLevel().getOrDefault(level, Set.of()));
                 container.getHoldingChunkMap().saveAll();
             } catch (Throwable error) {
                 String message = "saveAll 失败: " + messageOf(error);
@@ -569,7 +574,7 @@ final class DeleteTx {
 
     DiskVerification scanRemainingEntries(Map<UUID, DeleteStatus> statuses, List<String> warnings)
             throws Exception {
-        ScanSession scan = ScanSession.fresh(this.kit.server, warnings);
+        ScanSession scan = this.kit.freshScan(warnings);
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         Map<UUID, Integer> entries = new HashMap<>();
         for (DeleteStatus status : statuses.values()) {
@@ -577,7 +582,7 @@ final class DeleteTx {
             entries.put(status.uuid, scan.entriesOf(status.uuid).size());
         }
         Map<DiskScanner.EntryKey, Integer> pointerCounts = new HashMap<>();
-        DiskScanner.locatePointersStrict(scan.dims(), keys, warnings)
+        JobService.underLocate(() -> DiskScanner.locatePointersStrict(scan.dims(), keys, warnings))
                 .forEach((key, locations) -> pointerCounts.put(key, locations.size()));
         /* 验收失败时把「到底哪个槽位还剩着」打出来。「仍有 N 个磁盘条目」单看数字定位不了 ——
            排查这条错时最想知道的是残留的是规范副本(指望 removeSubLevel 清)还是排了队的那份。 */
@@ -593,9 +598,9 @@ final class DeleteTx {
 
     DeleteComponent prepareExactDeleteComponent(Set<UUID> targets, List<String> warnings)
             throws Exception {
-        ScanSession scan = ScanSession.strict(this.kit.server, warnings);
+        ScanSession scan = this.kit.strictScan(warnings);
         if (this.kit.flushUnsavedTargets(new ArrayList<>(targets), scan.meta())) {
-            scan = ScanSession.strict(this.kit.server, warnings);
+            scan = this.kit.strictScan(warnings);
         }
         Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(scan, targets, warnings);
         DeleteComponent component = new DeleteComponent();
@@ -611,7 +616,7 @@ final class DeleteTx {
     }
 
     void requireTargetsAbsent(Set<UUID> targets, List<String> warnings) throws Exception {
-        ScanSession scan = ScanSession.fresh(this.kit.server, warnings);
+        ScanSession scan = this.kit.freshScan(warnings);
         JsonObject runtime = this.kit.readRuntimeStates(targets);
         for (UUID uuid : targets) {
             if (!scan.entriesOf(uuid).isEmpty()) {

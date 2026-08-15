@@ -85,10 +85,10 @@ public final class DeleteOps {
     private List<DeleteTx.DeleteComponent> prepareDeleteComponents(List<UUID> targets, boolean expandGroups,
                                                                    List<String> warnings)
             throws Exception {
-        ScanSession scan = ScanSession.strict(this.kit.server, warnings);
+        ScanSession scan = this.kit.strictScan(warnings);
         // 纯运行时新体(刚生成、盘上还没有条目)先落一次盘再删:内存里的方块不落盘就无从备份
         if (this.kit.flushUnsavedTargets(targets, scan.meta())) {
-            scan = ScanSession.strict(this.kit.server, warnings);
+            scan = this.kit.strictScan(warnings);
         }
         List<Set<UUID>> selectedGroups = expandGroups
                 ? DiskScanner.selectedDependencyComponents(scan.meta(), targets)
@@ -143,6 +143,8 @@ public final class DeleteOps {
     }
 
     private void stageDeleteBackups(List<DeleteTx.DeleteComponent> components, Map<UUID, DeleteTx.DeleteStatus> statuses) {
+        List<DeleteTx.DeleteComponent> candidates = new ArrayList<>();
+        List<RecycleStore.StageRequest> requests = new ArrayList<>();
         for (DeleteTx.DeleteComponent component : components) {
             if (this.tx.componentHasErrors(component, statuses)) continue;
             List<RecycleStore.Source> sources = new ArrayList<>();
@@ -152,10 +154,27 @@ public final class DeleteOps {
                         uuid, copy.key().dim(), copy.key(), copy.tag()));
             }
             if (sources.isEmpty()) continue;
-            try {
-                component.stage = this.recycle.stage(sources, component.states);
-            } catch (Exception error) {
-                this.tx.failComponent(component, statuses, "删除前临时备份失败: " + messageOf(error));
+            candidates.add(component);
+            requests.add(new RecycleStore.StageRequest(sources, component.states));
+        }
+        if (requests.isEmpty()) return;
+        List<RecycleStore.StageAttempt> attempts;
+        try {
+            attempts = this.recycle.stageBatch(requests);
+        } catch (Exception error) {
+            for (DeleteTx.DeleteComponent component : candidates) {
+                this.tx.failComponent(component, statuses, "删除前容量统计失败: " + messageOf(error));
+            }
+            return;
+        }
+        for (int index = 0; index < attempts.size(); index++) {
+            RecycleStore.StageAttempt attempt = attempts.get(index);
+            DeleteTx.DeleteComponent component = candidates.get(index);
+            if (attempt.error() == null) {
+                component.stage = attempt.stage();
+            } else {
+                this.tx.failComponent(component, statuses,
+                        "删除前临时备份失败: " + messageOf(attempt.error()));
             }
         }
     }

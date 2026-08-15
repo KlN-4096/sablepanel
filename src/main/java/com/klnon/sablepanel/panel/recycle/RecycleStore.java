@@ -74,6 +74,16 @@ public final class RecycleStore {
     public record OperationalState(boolean paused, boolean forced) {
     }
 
+    public record StageRequest(List<Source> sources, Map<UUID, OperationalState> states) {
+        public StageRequest {
+            sources = List.copyOf(sources);
+            states = Map.copyOf(states);
+        }
+    }
+
+    public record StageAttempt(Stage stage, Exception error) {
+    }
+
     public record RestoreBody(UUID uuid, String dimension, CompoundTag tag,
                               boolean paused, boolean forced) {
     }
@@ -103,6 +113,9 @@ public final class RecycleStore {
     }
 
     private record StorageStats(int files, long bytes) {
+    }
+
+    private record Capacity(int stored, int pending) {
     }
 
     private final PanelConfig config;
@@ -137,16 +150,42 @@ public final class RecycleStore {
         return stageInternal(sources, states, null);
     }
 
+    /** 一批删除组件共用一次容量统计；每组仍独立暂存、独立失败。 */
+    public synchronized List<StageAttempt> stageBatch(List<StageRequest> requests) throws IOException {
+        Capacity capacity = capacity();
+        int pending = capacity.pending;
+        List<StageAttempt> attempts = new ArrayList<>(requests.size());
+        for (StageRequest request : requests) {
+            try {
+                Stage stage = stageChecked(request.sources, request.states, null, capacity.stored, pending);
+                pending += request.sources.size();
+                attempts.add(new StageAttempt(stage, null));
+            } catch (Exception error) {
+                attempts.add(new StageAttempt(null, error));
+            }
+        }
+        return List.copyOf(attempts);
+    }
+
     private Stage stageInternal(List<Source> sources, Map<UUID, OperationalState> states,
                                 String archivedState) throws IOException {
+        Capacity capacity = capacity();
+        return stageChecked(sources, states, archivedState, capacity.stored, capacity.pending);
+    }
+
+    private Capacity capacity() throws IOException {
+        int stored = Files.isDirectory(this.root) ? countBackupFiles(this.root, true) : 0;
+        int pending = Files.isDirectory(this.pendingRoot) ? countBackupFiles(this.pendingRoot, false) : 0;
+        return new Capacity(stored, pending);
+    }
+
+    private Stage stageChecked(List<Source> sources, Map<UUID, OperationalState> states,
+                               String archivedState, int storedFiles, int pendingFiles) throws IOException {
         if (sources.isEmpty()) throw new IllegalArgumentException("回收组没有可备份条目");
         if (sources.size() > this.config.recycleMaxFiles) {
             throw new IllegalStateException("该依赖组需要 " + sources.size()
                     + " 个备份文件，超过当前回收站上限 " + this.config.recycleMaxFiles);
         }
-        int storedFiles = Files.isDirectory(this.root) ? countBackupFiles(this.root, true) : 0;
-        int pendingFiles = Files.isDirectory(this.pendingRoot)
-                ? countBackupFiles(this.pendingRoot, false) : 0;
         if (sources.size() > this.config.recycleMaxFiles - storedFiles - pendingFiles) {
             throw new IllegalStateException("回收站已占用 " + storedFiles
                     + " 个文件，待提交事务已占用 " + pendingFiles + " 个文件，剩余容量不足；请先人工彻底删除旧组");

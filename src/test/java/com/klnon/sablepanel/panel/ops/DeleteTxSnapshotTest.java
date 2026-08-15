@@ -6,12 +6,14 @@ import net.minecraft.nbt.CompoundTag;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class DeleteTxSnapshotTest {
     private final UUID target = UUID.randomUUID();
@@ -49,6 +51,18 @@ class DeleteTxSnapshotTest {
                 expected, operational("other-entry", false)));
         assertThrows(IllegalStateException.class, () -> DeleteTx.requireUnchangedOperationalSnapshot(
                 expected, operational(this.key.id(), true)));
+    }
+
+    @Test
+    void batchHoldingRemovalOnlyDropsSelectedTargets() {
+        UUID kept = UUID.randomUUID();
+        UUID removed = UUID.randomUUID();
+        Map<UUID, String> values = new LinkedHashMap<>();
+        values.put(kept, "keep");
+        values.put(removed, "drop");
+
+        assertEquals(1, DeleteTx.removeKeys(values, Set.of(removed, UUID.randomUUID())));
+        assertEquals(Map.of(kept, "keep"), values);
     }
 
     private DeleteTx.DiskSnapshot disk(CompoundTag tag, List<DiskScanner.LiveLocation> pointers) {
