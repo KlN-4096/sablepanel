@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>SablePanel</title>
+<!-- 声明"本站自带明暗双主题":Chromium 系的强制暗色(Auto Dark)看到 dark 就不再代为暗化。
+     不声明的话,亮色主题会被它把纯色背景压黑,而带噪点图的 MC 按钮/缩略图不受影响 —— 整页混色 -->
+<meta name="color-scheme" content="light dark">
+<script>/* 防闪:在 CSS 之前定下主题,手动选择(spTheme)优先,否则跟随系统按模式取默认。
+   合法值/日夜归属/取默认逻辑与 util.js 的 THEMES 表两处同步 */
+(function(){var t=null,d=null,n=null;
+try{t=localStorage.getItem('spTheme');d=localStorage.getItem('spThemeDay');n=localStorage.getItem('spThemeNight')}catch(e){}
+var ok={'light':1,'dark':1,'aero-day':1,'aero-ink':1,'aero-star':1,'aero-dusk':1,'aero-blueprint':1};
+var day={'light':1,'aero-day':1};
+document.documentElement.dataset.theme=ok[t]?t
+  :matchMedia('(prefers-color-scheme: dark)').matches?(ok[n]&&!day[n]?n:'dark'):(ok[d]&&day[d]?d:'light');})();</script>
+<link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/img/favicon-16.png">
+<link rel="preload" href="/fonts/Monocraft.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="stylesheet" href="/css/panel.css">
+</head>
+<body class="locked">
+<div id="loginGate">
+  <form id="loginBox" onsubmit="loginSubmit(event)">
+    <div id="loginBrand">
+      <img class="brandIcon" src="/img/favicon-32.png" width="23" height="23" alt="">
+      SablePanel
+    </div>
+    <div id="loginAddressWrap" style="display:none">
+      <label for="loginAddress">服务器地址</label>
+      <input type="text" id="loginAddress" autocomplete="off" placeholder="example.com:25581">
+    </div>
+    <label for="loginToken">访问口令</label>
+    <div id="loginRow">
+      <input type="password" id="loginToken" autocomplete="current-password" autofocus>
+      <button class="primary" type="submit">进入</button>
+    </div>
+    <div id="loginError" role="alert"></div>
+  </form>
+</div>
+<header>
+  <div class="logo">
+    <img class="brandIcon" src="/img/favicon-32.png" width="21" height="21" alt="">
+    SablePanel
+  </div>
+  <div id="nav">
+    <button data-view="dash" onclick="setView('dash')">◧ <span>总览</span></button>
+    <button data-view="bodies" onclick="setView('bodies')">⬢ <span>物理体</span></button>
+    <button data-view="recycle" onclick="setView('recycle')">♲ <span>回收站</span></button>
+    <button data-view="jobs" onclick="setView('jobs')">▤ <span>日志</span></button>
+  </div>
+  <div id="srvWrap" style="position:relative;display:none">
+    <button class="hbtn" id="srvBtn" onclick="toggleSrvPop()"></button>
+    <div id="srvPop"></div>
+  </div>
+  <div style="position:relative">
+    <div id="loadPill" onclick="toggleStatPop()">
+      <div class="kv"><b id="pillCost" class="mono">--</b><span>物理体开销 ms/t</span></div>
+      <div class="kv"><b id="pillLoaded" class="mono">--</b><span>加载中</span></div>
+      <canvas id="pillSpark" width="132" height="30"></canvas>
+    </div>
+    <div id="statPop"></div>
+  </div>
+  <div id="jobPill" style="display:none" onclick="setView('jobs')" title="查看日志"></div>
+  <div id="scanMeta"></div>
+  <button class="hbtn" id="gatewayDisconnect" onclick="disconnectGateway()" style="display:none" title="Disconnect">⏻</button>
+  <div id="themeWrap">
+    <button class="hbtn" id="themeBtn" onclick="toggleThemePop()" title="切换主题" aria-label="切换主题">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 3h8v8H3zM13 3h8v8h-8zM3 13h8v8H3z"/><path d="M13 13h8v8h-8z" fill="currentColor" stroke="none" opacity=".55"/></svg>
+    </button>
+    <div id="themePop"></div>
+  </div>
+  <button class="hbtn primary" onclick="loadAll(true)"><span>刷新</span> <span id="countdown" class="mono" style="font-size:11px;opacity:.75"></span></button>
+</header>
+
+<div id="views">
+  <!-- ===================== 总览 ===================== -->
+  <section class="view" id="viewDash">
+    <div id="dashSrv"></div>
+    <div class="card statStrip" id="dashTop"></div>
+    <div class="split">
+      <div class="card">
+        <h4>物理性能历史</h4>
+        <div class="chartTools">
+          <div class="chartPresets" id="chartPresets"></div>
+          <span class="chartMeta" id="chartMeta"></span>
+        </div>
+        <div id="physChartWrap"><canvas id="physChart"></canvas><div id="chartTip"></div></div>
+        <div class="legend" style="margin-top:10px" id="physLegend"></div>
+        <div class="hint">维度曲线是物理引擎整体步进耗时,粉色曲线是全部加载体的 Java 逻辑耗时;均不含其它 mod。</div>
+      </div>
+      <div class="card">
+        <h4><span>最吃性能的物理体</span><span class="more" onclick="setView('bodies',{sortCost:true})">查看 →</span></h4>
+        <div class="mini" id="dashTopCost"></div>
+      </div>
+    </div>
+    <div class="grid g3" id="dashMid"></div>
+    <div class="split">
+      <div class="card" id="cleanCard"></div>
+      <div class="card" id="toolCard"></div>
+    </div>
+  </section>
+
+  <!-- ===================== 物理体(卡片网格 + 全屏详情) ===================== -->
+  <section class="view" id="viewBodies">
+    <div id="bBrowse">
+      <div id="bHead">
+        <div id="tabs"></div>
+        <div id="bTools">
+          <input type="text" id="fSearch" placeholder="名称 / UUID" oninput="render()">
+          <div class="segCtl" id="sizeSeg" title="卡片大小">
+            <button data-size="s" onclick="setCardSize('s')">小</button>
+            <button data-size="m" onclick="setCardSize('m')">中</button>
+            <button data-size="l" onclick="setCardSize('l')">大</button>
+          </div>
+          <div class="popWrap">
+            <button id="sortBtn" onclick="togglePop('sortPop')">⇅ <span>排序</span></button>
+            <div class="popPanel" id="sortPop">
+              <h3>排序(可多条件)</h3>
+              <div id="sortRows"></div>
+              <button id="addSort" onclick="addSort()">+ <span>添加条件</span></button>
+            </div>
+          </div>
+          <div class="popWrap">
+            <button id="mfBtn" onclick="togglePop('mfPop')">⛭ <span>更多筛选</span><span class="cnt" id="mfCount" style="display:none"></span></button>
+            <div class="popPanel" id="mfPop">
+              <h3>包含方块</h3>
+              <input type="text" id="fBlock" list="blockList" placeholder="方块名或 id" oninput="onBlockFilter()">
+              <datalist id="blockList"></datalist>
+              <div id="blockChip"></div>
+              <h3>重复</h3>
+              <select id="fDup" onchange="render()">
+                <option value="all">全部显示</option>
+                <option value="dup">仅多副本</option>
+                <option value="clone">仅疑似克隆</option>
+                <option value="any">两者任一</option>
+              </select>
+              <h3>其他</h3>
+              <label><input type="checkbox" id="fNamedOnly" onchange="render()"> <span>仅命名体</span></label>
+              <label><input type="checkbox" id="fGroupOnly" onchange="render()"> <span>仅组合体</span></label>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="bChips">
+        <div class="chipRow"><span class="chipLabel">状态</span>
+          <label class="fchip"><input type="checkbox" class="fState" value="loaded" checked onchange="render()"><span>加载中</span></label>
+          <label class="fchip"><input type="checkbox" class="fState" value="stored" checked onchange="render()"><span>未加载</span></label>
+          <label class="fchip"><input type="checkbox" class="fState" value="holding" checked onchange="render()"><span>暂存中</span></label>
+          <label class="fchip"><input type="checkbox" class="fState" value="orphan" checked onchange="render()"><span>孤儿</span></label>
+        </div>
+        <div class="chipRow"><span class="chipLabel">规模</span>
+          <label class="fchip"><input type="checkbox" class="fSize" value="huge" checked onchange="render()"><span>巨型 ≥10000</span></label>
+          <label class="fchip"><input type="checkbox" class="fSize" value="large" checked onchange="render()"><span>大型 ≥1000</span></label>
+          <label class="fchip"><input type="checkbox" class="fSize" value="mid" checked onchange="render()"><span>中型 ≥100</span></label>
+          <label class="fchip"><input type="checkbox" class="fSize" value="small" checked onchange="render()"><span>小型 ≥10</span></label>
+          <label class="fchip"><input type="checkbox" class="fSize" value="frag" checked onchange="render()"><span>碎片 &lt;10</span></label>
+        </div>
+        <div class="chipRow"><span class="chipLabel">维度</span><span id="fDims"></span></div>
+      </div>
+      <div id="toolbar"></div>
+      <div id="list"></div>
+    </div>
+    <div id="bDetail">
+      <div id="dCrumb"></div>
+      <div id="dMain">
+        <aside id="dMembers"></aside>
+        <div id="dViewport">
+          <div id="bodyPreviewHost" class="previewHost">
+            <div id="previewWrap">
+              <span id="pvInfo"></span>
+              <div id="pvProgress" role="progressbar" aria-label="预览资源准备中"><i></i></div>
+              <div class="pvCtrl">
+                <button id="rotBtn" onclick="toggleRotate()">⟳</button>
+                <input type="range" id="rotSpeed" min="0" max="100" value="18" oninput="setRotSpeed(this.value)">
+                <button id="pvRetry" onclick="retryPreviewResources()" title="重试资源准备" style="display:none">↻</button>
+                <button id="pvVersions" onclick="openDedupe()" title="该体有多个磁盘副本，去副本面板逐版本预览并选定" style="display:none">副本</button>
+                <button id="fsOpen">⛶</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <aside id="dSide">
+          <div id="dbody"></div>
+          <div class="ops" id="ops" style="display:none">
+            <div class="opGroup">
+              <div class="opTitle"><span>传送</span></div>
+              <div class="row">
+                <span class="opLabel">目的坐标</span>
+                <input class="coord" id="tx" placeholder="x"><input class="coord" id="ty" placeholder="y"><input class="coord" id="tz" placeholder="z">
+              </div>
+              <div class="row dual">
+                <button onclick="fillCurrentPos()">取当前</button>
+                <button class="primary" onclick="doTeleport()">传送结构</button>
+              </div>
+              <div class="row">
+                <span class="opLabel">玩家</span>
+                <select id="tpPlayer"></select>
+                <button class="primary" onclick="doTeleportPlayer()" id="tpPlayerBtn">传送玩家</button>
+              </div>
+            </div>
+            <div class="opGroup">
+              <div class="opTitle"><span>物理与恢复</span><span class="opHint">两个是不同的东西,悬停看说明</span></div>
+              <div class="row dual">
+                <button id="pauseBtn" class="warnb" onclick="doPauseCurrent()">⏸</button>
+                <button id="freezeBtn" class="warnb" onclick="doFreezeCurrent()">❄</button>
+              </div>
+              <div class="row">
+                <button id="forceBtn" onclick="doForceCurrent()">常驻加载</button>
+              </div>
+              <div class="row" id="adoptRow" style="display:none">
+                <button onclick="doAdopt()">收养找回(含依赖)</button>
+                <span class="opHint">重建加载指针,数据不动盘</span>
+              </div>
+            </div>
+            <div class="opGroup danger">
+              <div class="opTitle"><span>危险操作</span><span class="opHint">删除严格验收成功后才会进入回收站</span></div>
+              <div class="row">
+                <button class="danger" id="delBodyBtn" onclick="doDelete()">删除该物理体</button>
+                <button id="dedupeBtn" onclick="openDedupe()" style="display:none">处理副本</button>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 回收站 ===================== -->
+  <section class="view" id="viewRecycle">
+    <div id="rListPane">
+      <div id="rHead">
+        <div id="rTabs"></div>
+        <div id="rTools">
+          <input type="text" id="rSearch" placeholder="名称 / UUID" oninput="renderRecycle()">
+          <div class="segCtl" id="rSizeSeg" title="卡片大小">
+            <button data-size="s" onclick="setCardSize('s')">小</button>
+            <button data-size="m" onclick="setCardSize('m')">中</button>
+            <button data-size="l" onclick="setCardSize('l')">大</button>
+          </div>
+          <div class="popWrap">
+            <button onclick="togglePop('rCfgPop')">⛭ <span>存储上限</span></button>
+            <div class="popPanel" id="rCfgPop">
+              <h3>存储上限</h3>
+              <div class="rLimitRow">
+                <input type="number" id="rLimit" min="1" max="1000000" value="500">
+                <button onclick="saveRecycleLimit()">应用</button>
+              </div>
+              <div class="hint" id="rUsage"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="rChips">
+        <div class="chipRow"><span class="chipLabel">恢复状态</span>
+          <label class="fchip"><input type="checkbox" class="rFState" value="deleted" checked onchange="renderRecycle()"><span>待恢复</span></label>
+          <label class="fchip"><input type="checkbox" class="rFState" value="recovery_required" checked onchange="renderRecycle()"><span>需恢复</span></label>
+          <label class="fchip"><input type="checkbox" class="rFState" value="restored" checked onchange="renderRecycle()"><span>已恢复</span></label>
+          <label class="fchip"><input type="checkbox" class="rFState" value="incomplete" checked onchange="renderRecycle()"><span>依赖不完整</span></label>
+        </div>
+        <div class="chipRow"><span class="chipLabel">规模</span>
+          <label class="fchip"><input type="checkbox" class="rFSize" value="huge" checked onchange="renderRecycle()"><span>巨型 ≥10000</span></label>
+          <label class="fchip"><input type="checkbox" class="rFSize" value="large" checked onchange="renderRecycle()"><span>大型 ≥1000</span></label>
+          <label class="fchip"><input type="checkbox" class="rFSize" value="mid" checked onchange="renderRecycle()"><span>中型 ≥100</span></label>
+          <label class="fchip"><input type="checkbox" class="rFSize" value="small" checked onchange="renderRecycle()"><span>小型 ≥10</span></label>
+          <label class="fchip"><input type="checkbox" class="rFSize" value="frag" checked onchange="renderRecycle()"><span>碎片 &lt;10</span></label>
+        </div>
+        <div class="chipRow"><span class="chipLabel">维度</span><span id="rDims"></span>
+          <label class="fchip"><input type="checkbox" id="rNamedOnly" onchange="renderRecycle()"><span>仅命名体</span></label>
+        </div>
+      </div>
+      <div id="rToolbar"></div>
+      <div id="rList"></div>
+    </div>
+    <div id="rDetail">
+      <div id="recyclePreviewHost" class="previewHost"></div>
+      <div id="rBody"><div id="rDetailEmpty"><span class="big">♲</span><span>选择一个备份物理体查看详情</span></div></div>
+      <div class="ops" id="rOps" style="display:none">
+        <div class="row">
+          <button class="primary" id="restoreGroupBtn" onclick="restoreCurrentGroup()">恢复该依赖组</button>
+          <button class="danger" onclick="purgeCurrentGroup()">彻底删除该依赖组</button>
+          <span class="muted" style="font-size:11px">恢复后会在保存位置重新加载</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 日志(面板操作作业) ===================== -->
+  <section class="view" id="viewJobs">
+    <div id="jobsWrap">
+      <div id="jobsBar">
+        <span>日志文件</span>
+        <select id="jobsFileSel" onchange="setJobsFile(this.value)"></select>
+        <button id="jobsFailedBtn" onclick="toggleJobsFailed()">只看失败</button>
+        <button onclick="loadJobs()">刷新</button>
+        <span id="jobsWorkers" class="muted"></span>
+      </div>
+      <div id="jobsList"></div>
+    </div>
+  </section>
+</div>
+
+<div id="fsOverlay">
+  <button id="fsClose">✕ <span>关闭</span></button>
+  <div id="fsCanvasBox"></div>
+  <div id="fsMembers"></div>
+  <div id="fsSide">
+    <h3 id="fsName"></h3>
+    <div class="fsub" id="fsMeta"></div>
+    <div id="fsHover" class="muted" style="font-size:12px;min-height:36px"></div>
+    <h4 style="font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin:10px 0 7px">方块构成</h4>
+    <div id="fsComp"></div>
+  </div>
+</div>
+
+<div id="hoverTip"></div>
+<div id="toasts"></div>
+<dialog id="modalBack"><div id="modal">
+  <h3 id="modalTitle"></h3><div class="msg" id="modalMsg"></div>
+  <input id="modalInput" style="display:none" autocomplete="off">
+  <label id="modalNever"><input type="checkbox" id="modalNeverInput"><span>永不提醒</span></label>
+  <div class="btns"><button id="modalCancelBtn" onclick="modalCancel()">取消</button><button id="modalConfirmBtn" class="primary" onclick="modalConfirm()">确认</button></div>
+</div></dialog>
+<dialog id="manualBack" class="panelBack"><div class="widePanel">
+  <div class="wideHead"><h3>SablePanel 使用说明</h3><button onclick="closeManual()">✕</button></div>
+  <div class="manualLayout"><div id="manualTabs"></div><div id="manualContent"></div></div>
+</div></dialog>
+<dialog id="copyBack" class="panelBack"><div class="widePanel copyResolverPanel">
+  <div class="wideHead"><h3>处理物理结构副本</h3><button onclick="closeDedupe()">✕</button></div>
+  <div class="copyResolver">
+    <div class="copyPanelBody" id="copyPanelBody"></div>
+    <div class="copyPreviewColumn"><div id="copyPreviewHost" class="previewHost"></div><div id="copyPreviewNote"></div><div id="copyComp"></div></div>
+  </div>
+  <div class="copyPanelFoot"><span class="status" id="copyPanelStatus"></span><button onclick="closeDedupe()">取消</button><button class="primary" id="dedupeConfirm" onclick="confirmDedupe()">设为主版本</button></div>
+</div></dialog>
+<dialog id="consistencyBack" class="panelBack"><div class="widePanel consistencyPanel">
+  <div class="wideHead"><h3>存档一致性检查</h3><button onclick="closeConsistency()">✕</button></div>
+  <div id="consistencyBody"></div>
+  <div class="copyPanelFoot"><span class="status" id="consistencyStatus"></span><button onclick="closeConsistency()">关闭</button><button class="danger" id="consistencyRepair" onclick="repairConsistency()">修复所选项</button></div>
+</div></dialog>
+<div id="busy"><div class="spinner"></div><div id="busyText"></div></div>
+
+<script src="/vendor/three.min.js"></script>
+<script src="/js/core/util.js"></script>
+<script src="/js/core/i18n.js"></script>
+<script src="/js/core/state.js"></script>
+<script src="/js/core/api.js"></script>
+<script src="/js/core/data.js"></script>
+<script src="/js/core/events.js"></script>
+<script src="/js/features/cluster.js"></script>
+<script src="/js/features/ops.js"></script>
+<script src="/js/features/dedupe.js"></script>
+<script src="/js/features/consistency.js"></script>
+<script src="/js/preview/spm2.js"></script>
+<script src="/js/preview/transport.js"></script>
+<script src="/js/preview/runtime.js"></script>
+<script src="/js/preview/thumbrender.js"></script>
+<script src="/js/views/chart.js"></script>
+<script src="/js/views/dash.js"></script>
+<script src="/js/views/bodies.js"></script>
+<script src="/js/views/recycle.js"></script>
+<script src="/js/views/jobs.js"></script>
+<script src="/js/views/preview.js"></script>
+<script src="/js/views/manual.js"></script>
+<script src="/js/views/shell.js"></script>
+<script src="/js/main.js"></script>
+</body>
+</html>
