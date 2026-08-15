@@ -55,6 +55,11 @@ final class HttpIo {
         return map;
     }
 
+    static boolean acceptsGzip(HttpExchange exchange) {
+        String value = exchange.getRequestHeaders().getFirst("Accept-Encoding");
+        return value != null && value.contains("gzip");
+    }
+
     /** cacheable 资源(three.min.js 669KB)的字节缓存:原始与 gzip 各一份,不再每请求读盘+实时压缩 */
     private record Asset(byte[] raw, byte[] gz) {
     }
@@ -108,12 +113,11 @@ final class HttpIo {
     }
 
     /** 唯一发送路径。{@code preGz} 非空 = 预压字节可用(对端接受即发,精确 Content-Length,无阈值)。 */
-    private static void send(HttpExchange ex, int code, String type, byte[] body, boolean tryGzip,
-                             Map<String, String> headers, byte[] preGz) throws IOException {
+    static void send(HttpExchange ex, int code, String type, byte[] body, boolean tryGzip,
+                     Map<String, String> headers, byte[] preGz) throws IOException {
         ex.getResponseHeaders().set("Content-Type", type);
         headers.forEach((key, value) -> ex.getResponseHeaders().set(key, value));
-        String ae = ex.getRequestHeaders().getFirst("Accept-Encoding");
-        boolean acceptsGzip = ae != null && ae.contains("gzip");
+        boolean acceptsGzip = acceptsGzip(ex);
         if (acceptsGzip && preGz != null) {
             ex.getResponseHeaders().set("Content-Encoding", "gzip");
             ex.getResponseHeaders().set("Vary", "Accept-Encoding");

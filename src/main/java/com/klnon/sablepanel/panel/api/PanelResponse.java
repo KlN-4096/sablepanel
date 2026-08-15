@@ -8,6 +8,8 @@ import java.util.Map;
 public record PanelResponse(int status, String contentType, byte[] body, boolean compressible,
                             Map<String, String> headers) {
 
+    public static final String BODIES_SNAPSHOT_HEADER = "X-SablePanel-Bodies-Snapshot";
+
     public PanelResponse(int status, String contentType, byte[] body, boolean compressible) {
         this(status, contentType, body, compressible, Map.of());
     }

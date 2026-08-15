@@ -52,6 +52,25 @@ public final class PanelWebGateway implements AutoCloseable {
     private volatile ExecutorService forwardPool;
     private volatile PanelEventStreams eventStreams;
     private volatile boolean closed = true;
+    private final LatestGzip bodiesGzip = new LatestGzip();
+
+    static final class LatestGzip {
+        private String snapshot = "";
+        private byte[] gzip = new byte[0];
+
+        synchronized byte[] get(String nextSnapshot, byte[] raw) throws IOException {
+            if (nextSnapshot.equals(this.snapshot)) return this.gzip;
+            byte[] compressed = PanelNet.gzip(raw);
+            this.snapshot = nextSnapshot;
+            this.gzip = compressed;
+            return compressed;
+        }
+
+        synchronized void clear() {
+            this.snapshot = "";
+            this.gzip = new byte[0];
+        }
+    }
 
     private PanelWebGateway(boolean clientMode, String bind, int port, ClientPanelConfig clientConfig,
                             PanelEndpoint fixedEndpoint, String fixedFingerprint) {
@@ -287,8 +306,16 @@ public final class PanelWebGateway implements AutoCloseable {
                 query, body, token, target == null ? "" : target);
         // request() 内部已按 REQUEST_TIMEOUT 跟踪超时,无参等即可,别再叠一层同值超时
         PanelResponse response = client.request(request).get();
+        byte[] preGzip = null;
+        if (request.path().equals("/api/bodies") && response.status() == 200
+                && response.body().length > 1024 && HttpIo.acceptsGzip(exchange)) {
+            String snapshot = response.headers().get(PanelResponse.BODIES_SNAPSHOT_HEADER);
+            if (snapshot != null && !snapshot.isBlank()) {
+                preGzip = this.bodiesGzip.get(snapshot, response.body());
+            }
+        }
         HttpIo.send(exchange, response.status(), response.contentType(), response.body(),
-                response.compressible(), response.headers());
+                response.compressible(), response.headers(), preGzip);
     }
 
     private void sendState(HttpExchange exchange) throws IOException {
@@ -359,6 +386,7 @@ public final class PanelWebGateway implements AutoCloseable {
         }
         if (currentHttp != null) currentHttp.stop(0);
         if (currentStreams != null) currentStreams.close();
+        this.bodiesGzip.clear();
         this.connection.close();
         PanelNet.shutdown(currentForwardPool);
         PanelNet.shutdown(currentHttpPool);

@@ -16,7 +16,6 @@ import net.minecraft.nbt.CompoundTag;
 
 import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -49,6 +48,7 @@ public final class PanelApiService {
     private final PreviewSubsystem preview;
     private final com.klnon.sablepanel.panel.preview.thumb.ThumbService thumbs;
     private final String selfId;
+    private final String bodiesEpoch = UUID.randomUUID().toString();
     private final Object tokenLock = new Object();
     /** 精确路径与单体操作的路由表;构造时按所属服务分组注册 */
     private final Map<String, Route> routes = new LinkedHashMap<>();
@@ -144,8 +144,12 @@ public final class PanelApiService {
             this.preview.retryResources();
             return PanelResponse.json(202, new JsonObject(), false);
         });
-        this.routes.put("/api/bodies", request ->
-                new PanelResponse(200, "application/json", bodiesResponse(), true));
+        this.routes.put("/api/bodies", request -> {
+            CachedBodies bodies = bodiesResponse();
+            return new PanelResponse(200, "application/json", bodies.body(), true,
+                    Map.of(PanelResponse.BODIES_SNAPSHOT_HEADER,
+                            this.bodiesEpoch + "-" + bodies.version()));
+        });
         this.routes.put("/api/jobs", request -> {
             String file = request.query().get("file");
             if (file != null && !file.isBlank()) return PanelResponse.json(200, JobService.readLog(file), true);
@@ -167,10 +171,10 @@ public final class PanelApiService {
         });
     }
 
-    private synchronized byte[] bodiesResponse() {
+    private synchronized CachedBodies bodiesResponse() {
         long version = this.index.version();
         CachedBodies cached = this.cachedBodies;
-        if (cached.version == version) return cached.body;
+        if (cached.version == version) return cached;
         JsonObject view = this.index.view();
         // 作业状态不在这儿:它每两秒变一次,而这份快照最大 12 MiB。前端改从
         // /api/jobs 的 running[] 取,那里字段是全的,顺带省掉一次日志请求
@@ -179,8 +183,9 @@ public final class PanelApiService {
         reach.addProperty("sky_above", this.config.skyAboveY);
         view.add("reach", reach);
         byte[] body = view.toString().getBytes(StandardCharsets.UTF_8);
-        this.cachedBodies = new CachedBodies(version, body);
-        return body;
+        CachedBodies fresh = new CachedBodies(version, body);
+        this.cachedBodies = fresh;
+        return fresh;
     }
 
     /** 回收站:分页视图/上限配置/恢复/彻底删除 */
