@@ -1,0 +1,303 @@
+'use strict';
+/* 操作层:传送/删除/收养/恢复/口令/重扫。
+   除"改口令""改回收站上限"这两个纯配置写入外,所有会改变物理体状态的操作都走后台作业:
+   请求只负责入队并立刻返回,进度和结果由 /api/jobs?poll=1 的 running[] 与 log[] 回报。
+   —— 从前是同步等待,巨型体能让一次请求跑十几分钟,浏览器 30 秒就超时,
+   用户看不到任何进展就会重复点击,最终把传输层的在飞槽位占满、整个面板 503。 */
+
+/* 提交一个后台作业。目标体已有作业在跑时后端返回 409,这里当普通失败提示。
+   POST 发出后也可能切服:旧服的接受响应不能把 job seq 写进新服的 watch,更不能让
+   调用方拿旧服的成功结果去乐观更新新服。 */
+async function submitJob(path, opts){
+  const ctx = captureCtx();
+  try {
+    const r = await api(path, opts);
+    if (!ctx.fresh()) return null;
+    if (r && r.job) JOB_WATCH.set(r.job, r.op || '');
+    await pollJobs();   // 立刻把"处理中"画出来,不再靠写死的 setTimeout 等
+    return ctx.fresh() ? r : null;
+  } catch(e){
+    if (ctx.fresh()) toast(e.message, 'bad');
+    return null;
+  }
+}
+/* 改访问口令:后端会同步给集群所有成员,改完本地也要跟着换,否则下一个请求就 401 */
+async function doChangeToken(){
+  if (!await askModal(T.tokenChangeT, T.tokenChangeMsg, true)) return;
+  const next = document.getElementById('modalInput').value.trim();
+  if (!next) return;
+  if (next === token) { toast(T.tokenSame); return; }
+  // 改口令是集群级操作,收尾只看会话代次(authFresh):中途切换查看的服务器不该作废它
+  let ctx = captureCtx();
+  busy(T.loading);
+  try {
+    const r = await api('/api/cluster/token', {method:'POST', body: JSON.stringify({token: next})});
+    if (!ctx.authFresh()) return;
+    token = r.token;
+    // 凭据已经改变,旧 token 发出的所有读取/写入响应从这里起都属于上一会话
+    authSeq++;
+    ctx = captureCtx();
+    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    if (r.failed && r.failed.length) toast(T.tokenPartial(r.failed.join('、')), 'bad');
+    else toast(T.tokenOk, 'ok');
+    if (r.warn) toast(r.warn, 'bad');
+    await loadServers();
+    if (!ctx.authFresh()) return;
+    await loadAll(true);
+    if (ctx.authFresh()) startEventStream();
+  } catch(e){ if (ctx.authFresh()) toast(T.tokenFail + e.message, 'bad'); }
+  finally { busy(null); }
+}
+async function doRescan(){
+  await submitJob('/api/rescan', {method:'POST'});
+}
+async function doDeleteSelected(){
+  const groups=[];
+  const seen=new Set();
+  for (const uuid of SELECTED) {
+    const entry=BODY_BY_UUID.get(uuid);
+    if (entry&&!seen.has(entry.g.gid)) { seen.add(entry.g.gid); groups.push(entry.g); }
+  }
+  let uuids=groups.flatMap(group=>group.bodies.map(body=>body.uuid));
+  if (!uuids.length) return;
+  const blocks=groups.reduce((sum,group)=>sum+group.blocks,0);
+  // 后端按依赖链把每个组重新展开成完整组,所以确认数和 500 上限都要按 members(真值)算。
+  // 按可见 uuid 算的话:提示说删 60 个实际删 100 个,展开后超 500 还会直接失败
+  const total=groups.reduce((sum,group)=>sum+group.members,0);
+  if (!await askModal(T.selDelT, T.selDelMsg(total, blocks), false)) return;
+  if (total > 500) { toast(T.recTooMany, 'bad'); return; }
+  await batchDelete(uuids);
+  clearSel();
+}
+async function doAdoptSelected(){
+  const orphans = [...SELECTED].map(u => BODY_BY_UUID.get(u))
+    .filter(e => e && e.b.state === 'orphan').map(e => e.b.uuid);
+  if (!orphans.length) return;
+  if (orphans.length > 500) { toast(T.recTooMany, 'bad'); return; }
+  if (!await askModal(T.selAdoptT, T.selAdoptMsg(orphans.length), false)) return;
+  // 整批一个作业。从前是逐个 POST:N 个体 = N 次提交 + N 次全量 bodies 刷新,选区一大就线性放大
+  await submitJob('/api/ops/batch_adopt', {method:'POST', body: JSON.stringify({uuids: orphans})});
+  clearSel();
+}
+async function saveRecycleLimit(){
+  const limit=Number(document.getElementById('rLimit').value);
+  if (!Number.isInteger(limit)||limit<1) return;
+  if (RECYCLE&&limit<(RECYCLE.file_count||0)) {
+    const confirmed=await askModal(T.limitConfirmT,T.limitConfirmMsg(RECYCLE.file_count,limit),false);
+    if (!confirmed) { document.getElementById('rLimit').value=RECYCLE.limit||500; return; }
+  }
+  const ctx=captureCtx();
+  busy(T.loading);
+  try {
+    await api('/api/recycle/config',{method:'POST',body:JSON.stringify({max_files:limit})});
+    if (!ctx.fresh()) return;
+    toast(T.saveLimitOk,'ok'); await loadRecycle();
+  } catch(e){ if (ctx.fresh()) toast(T.saveLimitFail+e.message,'bad'); }
+  finally { busy(null); }
+}
+async function restoreCurrentGroup(){
+  if (!RSELG) return;
+  await confirmRestore([RSELG]);
+}
+async function restoreSelectedGroups(){
+  const groups=[...R_SELECTED].map(id=>RECYCLE_BY_ID.get(id)).filter(Boolean);
+  if (groups.length) await confirmRestore(groups);
+}
+async function confirmRestore(groups){
+  if (groups.some(group=>group.state==='incomplete')) { toast(T.restoreIncomplete,'bad'); return; }
+  const bodies=groups.reduce((sum,group)=>sum+group.members,0);
+  const blocks=groups.reduce((sum,group)=>sum+(group.blocks||0),0);
+  const old=groups.filter(group=>group.version_state==='old').length;
+  const recovery=groups.filter(group=>group.version_state!=='old'&&group.state==='recovery_required').length;
+  const message=T.restoreSelectedMsg(groups.length,bodies,blocks)
+    +(old?T.restoreOldWarn(old):'')+(recovery?T.restoreRecoveryWarn(recovery):'');
+  if (!await askModal(T.restoreSelectedT,message,false)) return;
+  const r = await submitJob('/api/recycle/restore',
+    {method:'POST',body:JSON.stringify({ids:groups.map(g=>g.id)})});
+  if (r) { R_SELECTED.clear(); renderRecycle(); }
+}
+async function purgeCurrentGroup(){
+  if (RSELG) await confirmPurge([RSELG]);
+}
+async function purgeSelectedGroups(){
+  const groups=[...R_SELECTED].map(id=>RECYCLE_BY_ID.get(id)).filter(Boolean);
+  if (groups.length) await confirmPurge(groups);
+}
+async function confirmPurge(groups){
+  const bodies=groups.reduce((sum,group)=>sum+group.members,0);
+  const files=groups.reduce((sum,group)=>sum+(group.file_count||0),0);
+  const recovery=groups.filter(group=>group.state==='recovery_required').length;
+  const message=T.purgeMsg(groups.length,bodies,files)+(recovery?T.purgeRecoveryWarn(recovery):'');
+  if (!await askModal(T.purgeT,message,false)) return;
+  const r=await submitJob('/api/recycle/purge',
+    {method:'POST',body:JSON.stringify({ids:groups.map(group=>group.id)})});
+  if (r) { R_SELECTED.clear(); clearRecycleDetail(); renderRecycle(); }
+}
+/* 单体物理暂停:无确认直接执行;内存态,重启服务端自动恢复运行 */
+async function setPausedBodies(uuids, paused){
+  if (!uuids.length) return;
+  const r = await submitJob('/api/ops/pause', {method:'POST', body: JSON.stringify({uuids, paused})});
+  if (!r) return;
+  for (const u of uuids) paused ? PAUSED.add(u) : PAUSED.delete(u);
+  renderAll();
+  if (SEL) renderDetail();
+}
+function doPauseCurrent(){
+  if (SEL) setPausedBodies([SEL.uuid], !PAUSED.has(SEL.uuid));
+}
+function doPauseSelected(paused){
+  setPausedBodies([...SELECTED].filter(u => paused !== PAUSED.has(u)), paused);
+}
+/* 暂停 tick(冻结):后端按整个依赖组生效,点一个体会连坐全组。
+   恢复 tick 才是危险动作 —— 大组一旦重新开跑就是主线程被压垮的那种崩,所以只在这头弹确认。 */
+async function setFrozenBodies(uuids, frozen){
+  if (!uuids.length) return;
+  const r = await submitJob('/api/ops/freeze', {method:'POST', body: JSON.stringify({uuids, frozen})});
+  if (!r) return;
+  // 后端展开到整组,乐观更新只覆盖点名的体;整组真值由下一次 loadBodies 纠正
+  for (const u of uuids) frozen ? FROZEN.add(u) : FROZEN.delete(u);
+  renderAll();
+  if (SEL) renderDetail();
+}
+async function doFreezeCurrent(){
+  if (!SEL) return;
+  const frozen = !FROZEN.has(SEL.uuid);
+  if (!frozen && !await askModal(T.thawT,
+      T.thawMsg(SEL.name || SEL.uuid.slice(0,8), SELG ? SELG.members : 1, SELG ? SELG.blocks : SEL.blocks), false)) return;
+  setFrozenBodies([SEL.uuid], frozen);
+}
+async function doFreezeSelected(frozen){
+  const uuids = [...SELECTED].filter(u => frozen !== FROZEN.has(u));
+  if (!frozen && uuids.length && !await askModal(T.thawT, T.thawSelMsg(uuids.length), false)) return;
+  setFrozenBodies(uuids, frozen);
+}
+/* 常驻加载(sable force-load ticket):开启时后端会先把体加载出来,大体可能耗时数分钟;
+   票由 sable 持久化,重启后仍然生效。注意后端会顺带冻结整组 —— 不冻结就是几十秒内崩 */
+async function setForcedBodies(uuids, forced){
+  if (!uuids.length) return null;
+  const r = await submitJob('/api/ops/force_load', {method:'POST', body: JSON.stringify({uuids, forced})});
+  if (!r) return null;
+  // 乐观更新;作业失败时下一次 loadBodies 会用服务端真值纠正回来
+  for (const u of uuids) forced ? FORCED.add(u) : FORCED.delete(u);
+  renderAll();
+  if (SEL) renderDetail();
+  return r;   // 副本对话框的唤醒出口要拿 job seq 等它结束
+}
+/**
+ * 整维度停跑/恢复物理 —— sable 自己的 setPaused,跳掉 Rapier3D.step 那一整段。
+ * 影响的是这个维度里所有人的船,所以停之前必须确认。不走作业队列:一次字段写,没有等待。
+ */
+async function toggleDimPhysics(dim, paused){
+  const label = dim.replace('minecraft:','');
+  if (!await askModal(T.dimPhysT, paused ? T.dimPhysStopMsg(label) : T.dimPhysStartMsg(label), false)) return;
+  const r = await api('/api/ops/dim_physics', {method:'POST', body: JSON.stringify({dim, paused})}).catch(()=>null);
+  if (!r || !r.ok) { toast(T.opFail, 'bad'); return; }
+  toast(paused ? T.dimPhysStopped(label) : T.dimPhysStarted(label), paused ? 'bad' : 'ok');
+  loadStats();
+}
+async function doForceCurrent(){
+  if (!SEL) return;
+  const forced = !FORCED.has(SEL.uuid);
+  if (forced && !await dropDetachedBefore(SELG)) return;
+  setForcedBodies([SEL.uuid], forced);
+}
+/**
+ * 常驻加载前先清掉断链残骸。常驻加载必须整组,而"整组"在 sable 眼里包含那些甩出去几百格
+ * 的残骸(轴承方块记着对方 UUID 不撒手)—— 不清就是把几百个体一起钉进内存。
+ * 删除走 expand:false,否则后端按依赖链一展开就把主体也删了。
+ * 返回 false = 用户取消或删除失败,调用方不要继续。
+ */
+async function dropDetachedBefore(g){
+  if (!g || !g.detached) return true;
+  const det = g.bodies.filter(b => b.detached);
+  // 成员被截断时手上的名单不全,删了等于只清一半 —— 交回给用户,不自作主张
+  if (g.members_omitted || det.length !== g.detached) {
+    return await askModal(T.detachedT, T.detachedTruncated(g.detached), false);
+  }
+  const blocks = det.reduce((sum, b) => sum + b.blocks, 0);
+  // 参照系存疑时判定可能整个反过来(留下的和删掉的对调),这话必须在按确认之前说
+  const msg = T.detachedMsg(g.name || T.unnamed, g.members, det.length, blocks, g.members - det.length)
+    + (g.detach_unsure ? '\n\n' + T.detachedUnsure : '');
+  if (!await askModal(T.detachedT, msg, false)) return false;
+  if (await batchDelete(det.map(b => b.uuid), false) === 'ok') return true;
+  // 没清干净就挂票 = 照样要去几千格外同步拉区块,实测就是这么把主线程卡死的。让用户自己定
+  return await askModal(T.detachedT, T.detachedPartial, false);
+}
+async function doForceSelected(forced){
+  const uuids = [...SELECTED].filter(u => forced !== FORCED.has(u));
+  if (forced) {
+    const groups = [...new Set(uuids.map(u => BODY_BY_UUID.get(u)?.g).filter(Boolean))];
+    for (const g of groups) if (!await dropDetachedBefore(g)) return;
+  }
+  setForcedBodies(uuids, forced);
+}
+/* 传送玩家到选中结构顶面中心(必须落进包围盒,否则体在人到达前就被卸载);
+   体未加载后端会先按依赖链强制加载 */
+async function doTeleportPlayer(){
+  if (!SEL) return;
+  const pu = document.getElementById('tpPlayer').value;
+  if (!pu) { toast(T.tpNoPlayers, 'bad'); return; }
+  const p = PLAYERS.find(x=>x.uuid===pu);
+  const nm = SEL.name || SEL.uuid.slice(0,8);
+  if (!await askModal(T.tpPlayerT, T.tpPlayerMsg(p ? p.name : pu, nm), false)) return;
+  await submitJob(`/api/body/${SEL.uuid}/teleport_player?player=${pu}`, {method:'POST'});
+}
+async function doTeleport() {
+  if (!SEL) return;
+  const x = document.getElementById('tx').value, y = document.getElementById('ty').value, z = document.getElementById('tz').value;
+  const nm = SEL.name || SEL.uuid.slice(0,8);
+  if (!await askModal(T.tpConfirmT, T.tpConfirm(nm,x,y,z), false)) return;
+  await submitJob(`/api/body/${SEL.uuid}/teleport?x=${x}&y=${y}&z=${z}`, {method:'POST'});
+}
+async function doDelete() {
+  if (!SEL || !SELG) return;
+  const group=SELG;
+  const title=group.members>1?T.delGroupT:T.delConfirmT;
+  const message=group.members>1?T.delGroupMsg(group.members,group.blocks)
+    :T.delConfirm(SEL.name||SEL.uuid.slice(0,8),SEL.blocks);
+  if (!await askModal(title,message,false)) return;
+  await batchDelete(group.bodies.map(body=>body.uuid));
+}
+async function doDeleteRecommended(){
+  const groups = lastVisibleGroups.filter(g => g.rec);
+  if (!groups.length) return;
+  let uuids = groups.flatMap(g => g.bodies.map(b=>b.uuid));
+  const blocks = groups.reduce((s,g)=>s+g.blocks,0);
+  const total = groups.reduce((s,g)=>s+g.members,0);   // 同上:后端展开后的真实数量
+  if (!await askModal(T.recBatchT, T.recBatchMsg(groups.length, total, blocks), false)) return;
+  if (total > 500) { toast(T.recTooMany, 'bad'); return; }
+  await batchDelete(uuids);
+}
+async function batchDelete(uuids, expand = true){
+  const r = await submitJob('/api/ops/batch_delete',
+    {method:'POST', body: JSON.stringify({uuids, expand})});
+  if (!r) return 'fail';
+  const outcome = r.job ? await awaitJob(r.job) : 'ok';
+  loadRecycle();
+  return outcome;
+}
+/**
+ * 等一个已提交的作业跑到终态,返回 'ok' | 'partial' | 'fail'。
+ * submitJob 只等到"作业已受理" —— 拿它的返回值当成功判据,失败的删除也会一路放行。
+ * 2026-08-08 实测:清理残骸 0/173 全失败,后续的常驻加载照样跑了,192 个体一起挂票崩服。
+ */
+async function awaitJob(seq){
+  const ctx = captureCtx();
+  for (let i = 0; i < 900; i++) {
+    let r;
+    try { r = await api('/api/jobs'); } catch { return 'fail'; }
+    if (!ctx.fresh()) return 'fail';
+    if (!(r.running || []).some(job => job.seq === seq)) {
+      const job = (r.log || []).find(entry => entry.seq === seq);
+      return job ? jobOutcome(job) : 'fail';
+    }
+    await new Promise(res => setTimeout(res, 1000));
+  }
+  return 'fail';
+}
+async function doAdopt() {
+  if (!SEL) return;
+  const nm = SEL.name || SEL.uuid.slice(0,8);
+  if (!await askModal(T.adoptT, T.adoptMsg(nm), false)) return;
+  await submitJob(`/api/body/${SEL.uuid}/adopt`, {method:'POST'});
+}
