@@ -9,6 +9,7 @@ import io.netty.handler.codec.TooLongFrameException;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.net.InetSocketAddress;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
@@ -113,6 +114,13 @@ class PanelTransportTest {
         PanelResponse decoded = PanelWire.response(frame);
         assertEquals(200, decoded.status());
         assertArrayEquals(body, decoded.body());
+    }
+
+    @Test
+    void loopbackLinksAreRecognizedForSinglePassHttpCompression() {
+        assertTrue(PanelWire.isLoopback(new InetSocketAddress("127.0.0.1", 25581)));
+        assertTrue(PanelWire.isLoopback(new InetSocketAddress("::1", 25581)));
+        assertTrue(!PanelWire.isLoopback(new InetSocketAddress("192.0.2.10", 25581)));
     }
 
     @Test

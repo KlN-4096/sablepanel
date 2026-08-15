@@ -7,6 +7,8 @@ import com.klnon.sablepanel.panel.api.PanelResponse;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
@@ -59,9 +61,13 @@ final class PanelWire {
     }
 
     static PanelFrame response(long id, PanelResponse response) throws IOException {
+        return response(id, response, true);
+    }
+
+    private static PanelFrame response(long id, PanelResponse response, boolean allowCompression) throws IOException {
         PanelResponse capped = cap(response);
         byte[] body = capped.body();
-        boolean compressed = capped.compressible() && body.length > COMPRESS_AFTER;
+        boolean compressed = allowCompression && capped.compressible() && body.length > COMPRESS_AFTER;
         if (compressed) body = PanelNet.gzip(body);
         JsonObject meta = new JsonObject();
         meta.addProperty("status", capped.status());
@@ -101,10 +107,16 @@ final class PanelWire {
     static void sendResponse(io.netty.channel.ChannelHandlerContext context, long id, PanelResponse response) {
         try {
             context.writeAndFlush(response(id,
-                    response != null ? response : PanelResponse.error(500, "请求处理未返回响应")));
+                    response != null ? response : PanelResponse.error(500, "请求处理未返回响应"),
+                    !isLoopback(context.channel().remoteAddress())));
         } catch (Exception error) {
             context.close();
         }
+    }
+
+    static boolean isLoopback(SocketAddress address) {
+        return address instanceof InetSocketAddress inet
+                && inet.getAddress() != null && inet.getAddress().isLoopbackAddress();
     }
 
     static PanelResponse response(PanelFrame frame) throws IOException {
