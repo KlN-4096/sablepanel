@@ -45,6 +45,32 @@ class ThumbStoreTest {
     }
 
     @Test
+    void overwriteUpdatesTheIncrementalByteBudget() throws Exception {
+        UUID first = UUID.randomUUID(), second = UUID.randomUUID();
+        ThumbStore store = new ThumbStore(dir, 100);
+        store.put(first, "large", new byte[60]);
+        store.put(first, "small", new byte[20]);
+        store.put(second, "second", new byte[70]);
+
+        assertNotNull(store.read(first), "覆盖后应扣除旧文件尺寸");
+        assertNotNull(store.read(second));
+    }
+
+    @Test
+    void appendIndexReplaysLatestRecordAndCompactsOnRestart() throws Exception {
+        UUID uuid = UUID.randomUUID();
+        ThumbStore store = new ThumbStore(dir, ThumbStore.DEFAULT_MAX_BYTES);
+        store.put(uuid, "old", new byte[]{1});
+        store.put(uuid, "new", new byte[]{2});
+        assertEquals(2, Files.readAllLines(dir.resolve("index.tsv")).size(), "运行期只追加变更记录");
+
+        ThumbStore reloaded = new ThumbStore(dir, ThumbStore.DEFAULT_MAX_BYTES);
+        assertEquals("new", reloaded.sig(uuid));
+        assertArrayEquals(new byte[]{2}, reloaded.read(uuid));
+        assertEquals(1, Files.readAllLines(dir.resolve("index.tsv")).size(), "启动时压缩追加日志");
+    }
+
+    @Test
     void lruEvictsOldestWhenOverBudget() throws Exception {
         ThumbStore store = new ThumbStore(dir, 100);
         UUID first = UUID.randomUUID(), second = UUID.randomUUID(), third = UUID.randomUUID();
@@ -59,6 +85,10 @@ class ThumbStoreTest {
         assertNull(store.read(first), "最旧的应被淘汰");
         assertNull(store.sig(first), "淘汰的条目索引也要摘掉,下轮才会重渲");
         assertNotNull(store.read(third));
+
+        ThumbStore reloaded = new ThumbStore(dir, 100);
+        assertNull(reloaded.sig(first), "淘汰 tombstone 必须跨重启生效");
+        assertNotNull(reloaded.read(third));
     }
 
     @Test
@@ -67,6 +97,7 @@ class ThumbStoreTest {
         UUID legacy = UUID.randomUUID(), current = UUID.randomUUID();
         Files.writeString(dir.resolve("index.tsv"),
                 legacy + "\tr3|x\tok\n" + current + "\tf1|y\n垃圾行\nnot-a-uuid\ts\n");
+        Files.write(dir.resolve(current + ".png"), PNG);
         ThumbStore store = new ThumbStore(dir, ThumbStore.DEFAULT_MAX_BYTES);
         assertNull(store.sig(legacy));
         assertEquals("f1|y", store.sig(current));
