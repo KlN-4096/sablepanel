@@ -66,45 +66,36 @@ function appendServer(url, server) {
   return url + (url.includes('?') ? '&' : '?') + 'server=' + encodeURIComponent(server);
 }
 
-async function fetchJson(url, token, server) {
+async function fetchResource({url, token, server, label, progress, arrayBuffer}) {
   for (let attempt = 0; attempt < 120; attempt++) {
     const response = await fetch(appendServer(url, server), {headers:{'X-Token':token || ''}});
     if (response.status === 202 || response.status === 503) {
       const body = await response.json().catch(() => ({}));
       if (response.status === 503 && body.error !== 'preview_resource_busy') {
-        throw new Error('资源清单 ' + response.status);
+        throw new Error(label + ' ' + response.status);
       }
-      self.postMessage({type:'progress', phase:body.phase || '', source:body.source || '',
+      if (progress) self.postMessage({type:'progress', phase:body.phase || '', source:body.source || '',
         downloaded:Number(body.downloaded), total:Number(body.total), detail:body.detail || ''});
       /* 闭包现场构建通常几百 ms,按 retry_after 睡满 1 秒是每个新闭包的固定税 —— 快问慢退。
          缩略图队列会提前预热下一体的闭包(thumbrender.prewarm),轮到时多半已就绪,首跳压到 100ms */
       await new Promise(resolve => setTimeout(resolve, Math.min(100 * 2 ** attempt, 5000)));
       continue;
     }
-    if (!response.ok) throw new Error('资源清单 ' + response.status);
-    return response.json();
+    if (!response.ok) throw new Error(label + ' ' + response.status);
+    return arrayBuffer ? response.arrayBuffer() : response.json();
   }
-  throw new Error('资源清单准备超时');
+  throw new Error(label + '准备超时');
+}
+
+async function fetchJson(url, token, server) {
+  return fetchResource({url, token, server, label:'资源清单', progress:true, arrayBuffer:false});
 }
 
 async function fetchShard(entry, baseUrl, token, server) {
   const slash = baseUrl.lastIndexOf('/');
   const root = slash < 0 ? baseUrl : baseUrl.slice(0, slash);
   const url = root + '/shard/' + entry.shard;
-  for (let attempt = 0; attempt < 120; attempt++) {
-    const response = await fetch(appendServer(url, server), {headers:{'X-Token':token || ''}});
-    if (response.status === 202 || response.status === 503) {
-      const body = await response.json().catch(() => ({}));
-      if (response.status === 503 && body.error !== 'preview_resource_busy') {
-        throw new Error('资源分片 ' + response.status);
-      }
-      await new Promise(resolve => setTimeout(resolve, Math.min(100 * 2 ** attempt, 5000)));
-      continue;
-    }
-    if (!response.ok) throw new Error('资源分片 ' + response.status);
-    return response.arrayBuffer();
-  }
-  throw new Error('资源分片准备超时');
+  return fetchResource({url, token, server, label:'资源分片', progress:false, arrayBuffer:true});
 }
 
 async function loadResources(manifestUrl, token, server, maxBytes = Infinity) {

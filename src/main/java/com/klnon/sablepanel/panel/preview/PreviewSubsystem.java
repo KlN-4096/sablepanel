@@ -61,13 +61,13 @@ public final class PreviewSubsystem implements AutoCloseable {
 
     public Result onlineSpm2(UUID uuid) throws Exception {
         ensureOpen();
-        startResources();
+        this.resourcePreparation.start();
         return submitLoaded("online@" + uuid, () -> this.onlineSource.load(uuid));
     }
 
     public Result renderSpm2Async(String key, TagLoader loader) {
         ensureOpen();
-        startResources();
+        this.resourcePreparation.start();
         Objects.requireNonNull(loader, "loader");
         return submitLoaded("load@" + key, () -> {
             CompoundTag tag = loader.load();
@@ -287,10 +287,6 @@ public final class PreviewSubsystem implements AutoCloseable {
             digest.update((byte) 0);
         }
         return HexFormat.of().formatHex(digest.digest());
-    }
-
-    private void startResources() {
-        this.resourcePreparation.start();
     }
 
     private String readyCacheKey(String base) {
