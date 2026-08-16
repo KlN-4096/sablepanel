@@ -36,7 +36,7 @@ const T = {
   thawT:'恢复 tick',
   thawMsg:(n,m,b)=>`将恢复「${n}」所在依赖组的 tick:${m} 个物理体、共 ${fmt(b)} 块。\n\n组一旦重新开跑,Create 机器和物理求解会同时上来。\n实测这个量级会把主线程压垮,最终被看门狗判定卡死并崩服。\n\n确认恢复?`,
   thawSelMsg:(n)=>`将恢复所选 ${n} 个物理体所在依赖组的 tick(后端按整组展开,实际数量更多)。\n\n大组重新开跑有压垮主线程并崩服的风险。确认恢复?`,
-  forceBody:'常驻加载', unforceBody:'取消常驻', forcedTag:'面板常驻加载', forcedBadge:'常驻',
+  forceBody:'常驻加载[断链处理]', unforceBody:'取消常驻', forcedTag:'面板常驻加载', forcedBadge:'常驻',
   selForce:(n)=>`常驻加载所选 (${n})`, selUnforce:(n)=>`取消常驻所选 (${n})`,
   forceHint:'常驻加载 = sable 常驻票,结构随时保持加载(区块跟着走)。\n按整个依赖组挂票(只钉一部分无效,整条链照样会被卸载),\n并自动「暂停 tick」—— 不停机的话大组几十秒内就会崩服。\n组里有断链残骸时会先问你要不要清掉。\n重启后仍生效。',
   detachedBadge:'断链', detachedTag:'包围盒连不上主体 —— 物理轴承断开后留在原地的残骸。\n它仍算在同一个依赖组里,常驻加载会被迫把它一起钉进内存。',
@@ -50,7 +50,7 @@ const T = {
   delGroupMsg:(n,b)=>`将删除该组全部 ${n} 个物理体,共 ${fmt(b)} 块。\n每个体都会先备份到回收站,可随时恢复。`,
   adoptT:'收养孤儿物理体', adoptMsg:(n)=>`将把「${n}」重新接入 sable 加载管线(依赖体一并收养)。\n不修改任何磁盘数据,失败也无副作用。`,
   recycleT:'回收站', recycleEmpty:'回收站为空', recycleVersionEmpty:'此版本页签暂无回收组',
-  recycleDeleted:'待恢复', recycleRecovery:'需恢复', recycleRestored:'已恢复',
+  recycleDeleted:'可恢复', recycleRecovery:'需恢复', recycleRestored:'已恢复',
   recycleIncomplete:'依赖不完整', restoreIncomplete:'依赖不完整的隔离副本不能直接恢复',     recycleDisk:n=>`磁盘占用 ${n}`,
   // 待提交事务占的文件同样吃上限,所以有就得单列出来 —— 否则用量看着有余,删除却报容量不足
   recycleUsage:(n,p,m)=>p?`${n} + ${p} 待提交 = ${n+p} / ${m} 个备份文件`:`${n} / ${m} 个备份文件`,
@@ -114,14 +114,14 @@ const T = {
   recBatchT:'批量删除推荐项', recBatchMsg:(g,b,blk)=>`将删除 ${g} 个推荐组,共 ${b} 个物理体、${fmt(blk)} 块。\n每个体都会先备份到回收站,可随时恢复。`,
   recNone:'没有需要清理的物理体', recTooMany:'单次最多处理 500 个物理体,未执行删除',
   dashBodies:'物理体总数', dashBlocks:'方块总量', dashLoaded:'加载中', dashClean:'可清理',
-  dashState:'状态分布', dashScale:'规模分布', dashDims:'维度分布', dashAnom:'异常',
+  dashState:'成员状态分布', dashGroupScale:'依赖组规模', dashBodyScale:'成员体规模', dashDims:'成员维度分布', dashAnom:'异常',
           dashGo:'查看 →', dashHealthy:'存档干净',
   dashOrphans:'孤儿体', dashDup:'多副本体', dashClone:'疑似克隆体', dashHolding:'暂存中',
   tools:'维护', rescan:'立即重扫磁盘', consistencyScan:'存档一致性检查',
   exitCluster:'退出面板集群', exitClusterHint:'断开与当前面板集群的连接,回到地址与口令输入页。',
   consistencyTitle:'存档一致性检查', consistencyPointers:'悬空 holding 指针',
-  consistencyForced:'失效常驻票', consistencyPaused:'失效暂停状态', consistencyMissingBody:'物理体不存在',
-  consistencyHealthy:'未发现可确定修复的一致性问题。',     consistencyAsk:(n)=>`确认修复所选 ${n} 项?\n修改前会备份对应元数据文件,不会删除任何仍存在的物理结构数据。`,
+  consistencyTracking:'失效追踪点', consistencyForced:'失效常驻票', consistencyPaused:'失效暂停状态', consistencyMissingBody:'物理体不存在', consistencyMissingSlot:'存储槽不存在',
+  consistencyHealthy:'未发现可确定修复的一致性问题。',     consistencyAsk:(n)=>`确认修复所选 ${n} 项?\n修改前会备份对应元数据文件；失效追踪点会被移除，不会删除任何仍存在的物理结构数据。`,
   consistencyNone:'没有选择修复项', consistencyFail:'一致性检查失败: ', consistencyTruncated:'结果超过显示上限,请先修复本页后重新扫描。',
   consistencyRepairResult:(ok,total)=>`本次修复 ${ok}/${total} 项`, consistencyBackup:'元数据备份',
   consistencyRepairFailed:(n)=>`${n} 项因状态已变化或写入失败而跳过：`,
@@ -129,7 +129,7 @@ const T = {
   dedupeTitle:'处理物理结构副本', dedupeConfirm:'设为主版本',
   dedupeScanning:'正在扫描完整依赖组、存储条目和 holding 指针…',
   dedupeSingle:'没有需要处理的副本版本。', dedupeFail:'副本扫描失败: ',
-  copyVersionN:(n)=>`候选版本 ${n}`, copyCurrent:'当前使用', copyComplete:'依赖完整', copyIncomplete:'依赖不完整',
+  copyVersionN:(n)=>`候选版本 ${n}`, copyCurrent:'当前使用', copyComplete:'依赖完整', copyIncomplete:'依赖不完整', copyRepairable:'可修复当前版本',
   copyRedundant:(n)=>`${n} 个相同冗余`, copyVersionMeta:(members,blocks,delta)=>
     `${members} 个成员 · ${fmt(blocks)} 个方块${delta===null?' · 当前基准未知':` · 相对当前 ${delta>0?'+':''}${fmt(delta)}`}`,
   copyActiveEvidence:(active,members)=>`运行证据 ${active}/${members}`,
@@ -145,6 +145,7 @@ const T = {
   copyCannotSelect:'依赖不完整,不可选为主版本', copyNoVersion:'没有完整候选版本',
   copyReadyClean:'证据收敛且移出为 0，零损失，可直接确认',
   copyReadyLoss:(n)=>`证据收敛，但该版本不覆盖全组：${n} 个成员将被移出世界（进入回收站，可恢复）`,
+  copyReadyRepair:(missing,removed)=>`运行证据完整；确认后清理 ${missing} 个失效依赖引用${removed?`，并将 ${removed} 个旧成员移入回收站`:''}`,
   copyNotLoadedHint:'全组没有运行证据（体未加载），无法判定当前版本。',
   copyWakeBtn:'常驻加载并重扫', copyWaking:'唤醒中，作业完成后自动重扫…',
   copyWakeRisk:'会唤醒整个依赖组并自动冻结，大组可能拖慢服务器',
@@ -152,7 +153,7 @@ const T = {
   copyEvidenceAmbiguous:'运行证据同时兼容多个完整版本，请重新扫描',
   copyOnlyIncomplete:'没有完整候选版本，只能隔离全部残缺条目', copyQuarantineAll:'隔离全部',
   copyQuarantineAsk:(n)=>`确认隔离全部 ${n} 个残缺条目?\n原始 NBT 会逐份进入回收站旧版本，但不能直接恢复；世界中不会保留这个残缺依赖组。`,
-  copyResolveAsk:({total,keep,removed,old,incomplete})=>`确认处理整个关联组?\n将清理 ${total} 个 UUID，恢复所选版本的 ${keep} 个成员。\n${removed} 个成员会从世界移出，仅保留在回收站旧版本。\n${old} 个未选完整版本将进入旧版本，${incomplete} 个不完整条目将被隔离。`,
+  copyResolveAsk:({total,keep,removed,old,incomplete,repair=0})=>`确认处理整个关联组?\n将清理 ${total} 个 UUID，恢复所选版本的 ${keep} 个成员。\n${removed} 个成员会从世界移出，仅保留在回收站旧版本。\n${old} 个未选完整版本将进入旧版本，${incomplete} 个不完整条目将被隔离。${repair?`\n恢复时会移除 ${repair} 个已不存在的依赖引用。`:''}`,
   copyUnreachable:'无有效指针',
   cloneWith:(n)=>`与 ${n} 个物理体疑似克隆`, cloneRelation:'疑似克隆关联',
   cloneNamedReason:'名称、方块数和取整包围盒相同',
@@ -197,8 +198,8 @@ const MANUAL = {
       {h:'副本处理',body:'<p>打开后按完整依赖组、holding 位置和当前活动指针列出候选版本，并提供只读预览。只有依赖完整的版本可以设为主版本；未选版本会进入旧版本回收站，不会自动晋升。无法组成完整依赖组的条目只能隔离，不能直接恢复。</p>'}
     ]},
     {k:'recycle',label:'回收站',sections:[
-      {h:'何时进入回收站',body:'<p>删除前会暂存完整依赖组备份；磁盘条目和 holding 指针通过删除后验收时记为待恢复。删除或自动回滚中断时，完整备份会记为需恢复，不再隐藏。回收站不会自动清除任何组，容量不足时请在列表中多选并彻底删除。</p>'},
-      {h:'恢复与容量',body:'<ul><li>恢复始终恢复完整依赖组，并在保存的维度和位置重新加载；旧版本不会覆盖世界中已有的同 UUID 物理体。</li><li><b>待恢复</b>表示删除成功且备份可用；最新版本的<b>需恢复</b>会先清除同 UUID 残留再从快照重建整组；<b>已恢复</b>表示该记录已经成功执行过恢复。</li><li>容量按实际备份文件计数。面板不会自动淘汰任何回收组；达到或超过上限时，新删除会在执行前被拒绝，需人工多选并彻底删除。</li></ul>'}
+      {h:'何时进入回收站',body:'<p>删除前会暂存完整依赖组备份；磁盘条目和 holding 指针通过删除后验收时记为可恢复。删除或自动回滚中断时，完整备份会记为需恢复，不再隐藏。回收站不会自动清除任何组，容量不足时请在列表中多选并彻底删除。</p>'},
+      {h:'恢复与容量',body:'<ul><li>恢复始终恢复完整依赖组，并在保存的维度和位置重新加载；旧版本不会覆盖世界中已有的同 UUID 物理体。</li><li><b>可恢复</b>表示删除成功且备份可用；最新版本的<b>需恢复</b>会先清除同 UUID 残留再从快照重建整组；<b>已恢复</b>表示该记录已经成功执行过恢复。</li><li>容量按实际备份文件计数。面板不会自动淘汰任何回收组；达到或超过上限时，新删除会在执行前被拒绝，需人工多选并彻底删除。</li></ul>'}
     ]},
     {k:'performance',label:'性能数据',sections:[
       {h:'曲线口径',body:'<ul><li><b>各维度物理引擎</b>：该维度物理步进耗时按服务器 tick 折算的毫秒值。</li><li><b>物理体逻辑</b>：所有已加载物理体 Java 逻辑每 tick 的采样合计，不包含服务器其它 mod。</li></ul>'},

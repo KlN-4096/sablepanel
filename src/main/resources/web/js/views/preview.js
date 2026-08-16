@@ -9,9 +9,14 @@ let rotSpeed = parseFloat(localStorage.getItem('spRotSpeed') || '0.18');
 /* previewWrap 挪宿主(视图切换/副本弹层开合共用):画布节点常驻复用,
    搬完把 renderer 的 canvas 拽回容器首位 —— 三处此前各抄一份 */
 function movePreviewTo(hostId){
+  hideTip();
   const preview = document.getElementById('previewWrap');
   const host = document.getElementById(hostId);
   if (host && preview.parentElement !== host) host.appendChild(preview);
+  const tip = document.getElementById('hoverTip');
+  const layer = host && host.closest ? host.closest('dialog') : null;
+  const tipOwner = layer || document.body;
+  if (tip && tip.parentElement !== tipOwner && typeof tipOwner.appendChild === 'function') tipOwner.appendChild(tip);
   const canvas = previewRuntime && previewRuntime.renderer && previewRuntime.renderer.domElement;
   if (canvas && canvas.parentElement !== preview) preview.insertBefore(canvas, preview.firstChild);
 }

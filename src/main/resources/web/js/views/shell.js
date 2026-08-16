@@ -62,6 +62,7 @@ function renderStats(){
     tip.style.display = 'none';
     tip.innerHTML = '';
     CHART.hoverIndex = -1;
+    CHART.hoverTime = null;
   }
 }
 /* 分发必须是全函数:每个视图都要能从 (数据|null, 错误|'') 画出东西。

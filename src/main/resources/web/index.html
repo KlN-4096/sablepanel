@@ -80,14 +80,14 @@ document.documentElement.dataset.theme=ok[t]?t
     <div class="card statStrip" id="dashTop"></div>
     <div class="split">
       <div class="card">
-        <h4>物理性能历史</h4>
+        <h4>Sable 物理求解历史</h4>
         <div class="chartTools">
           <div class="chartPresets" id="chartPresets"></div>
           <span class="chartMeta" id="chartMeta"></span>
         </div>
-        <div id="physChartWrap"><canvas id="physChart"></canvas><div id="chartTip"></div></div>
+        <div id="physChartWrap"><canvas id="physChart"></canvas></div>
         <div class="legend" style="margin-top:10px" id="physLegend"></div>
-        <div class="hint">维度曲线是物理引擎整体步进耗时,粉色曲线是全部加载体的 Java 逻辑耗时;均不含其它 mod。</div>
+        <div class="hint">维度曲线为 Sable 物理求解耗时,不是维度总 MSPT;空维度仍有少量管线基础开销。粉色曲线为已加载物理体的 Java 逻辑合计。</div>
       </div>
       <div class="card">
         <h4><span>最吃性能的物理体</span><span class="more" onclick="setView('bodies',{sortCost:true})">查看 →</span></h4>
@@ -206,7 +206,7 @@ document.documentElement.dataset.theme=ok[t]?t
                 <button id="freezeBtn" class="warnb" onclick="doFreezeCurrent()">❄</button>
               </div>
               <div class="row">
-                <button id="forceBtn" onclick="doForceCurrent()">常驻加载</button>
+                <button id="forceBtn" onclick="doForceCurrent()">常驻加载[断链处理]</button>
               </div>
               <div class="row" id="adoptRow" style="display:none">
                 <button onclick="doAdopt()">收养找回(含依赖)</button>
@@ -253,7 +253,7 @@ document.documentElement.dataset.theme=ok[t]?t
       </div>
       <div id="rChips">
         <div class="chipRow"><span class="chipLabel">恢复状态</span>
-          <label class="fchip"><input type="checkbox" class="rFState" value="deleted" checked onchange="renderRecycle()"><span>待恢复</span></label>
+          <label class="fchip"><input type="checkbox" class="rFState" value="deleted" checked onchange="renderRecycle()"><span>可恢复</span></label>
           <label class="fchip"><input type="checkbox" class="rFState" value="recovery_required" checked onchange="renderRecycle()"><span>需恢复</span></label>
           <label class="fchip"><input type="checkbox" class="rFState" value="restored" checked onchange="renderRecycle()"><span>已恢复</span></label>
           <label class="fchip"><input type="checkbox" class="rFState" value="incomplete" checked onchange="renderRecycle()"><span>依赖不完整</span></label>
@@ -313,6 +313,7 @@ document.documentElement.dataset.theme=ok[t]?t
   </div>
 </div>
 
+<div id="chartTip"></div>
 <div id="hoverTip"></div>
 <div id="toasts"></div>
 <dialog id="modalBack"><div id="modal">

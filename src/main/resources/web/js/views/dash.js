@@ -3,14 +3,16 @@
 /* ===================== 总览 ===================== */
 function summarize(){
   const s = {bodies:0, groups:DATA.groups.length, blocks:0, entries:DATA.total_entries,
-    state:{loaded:0,stored:0,holding:0,orphan:0}, size:{huge:0,large:0,mid:0,small:0,frag:0},
+    state:{loaded:0,stored:0,holding:0,orphan:0},
+    groupSize:{huge:0,large:0,mid:0,small:0,frag:0}, bodySize:{huge:0,large:0,mid:0,small:0,frag:0},
     dims:{}, dup:0, clone:0, rec:{groups:0,bodies:0,blocks:0}};
   for (const g of DATA.groups) {
     s.blocks += g.blocks;
+    s.groupSize[sizeClass(g.blocks)]++;
     for (const b of g.bodies) {
       s.bodies++;
       s.state[b.state] = (s.state[b.state]||0)+1;
-      s.size[sizeClass(b.blocks)]++;
+      s.bodySize[sizeClass(b.blocks)]++;
       s.dims[b.dim] = (s.dims[b.dim]||0)+1;
       if (b.copies) s.dup++;
       if (b.clone) s.clone++;
@@ -19,10 +21,15 @@ function summarize(){
   }
   return s;
 }
-function barRow(items, colors){
+function barRow(items, colors, unit){
   const total = items.reduce((s,i)=>s+i[1],0) || 1;
   return `<div class="bar">${items.filter(i=>i[1]>0).map(i=>`<i style="width:${i[1]/total*100}%;background:${colors[i[0]]}"></i>`).join('')}</div>
-    <div class="legend">${items.map(i=>`<span><i style="background:${colors[i[0]]}"></i>${i[2]} <b>${fmt(i[1])}</b></span>`).join('')}</div>`;
+    <div class="legend">${items.map(i=>`<span><i style="background:${colors[i[0]]}"></i>${i[2]} <b>${fmt(i[1])} ${unit}</b></span>`).join('')}</div>`;
+}
+function sizeBar(size, unit){
+  return barRow([['huge',size.huge,T.szHuge.split(' ')[0]],['large',size.large,T.szLarge.split(' ')[0]],
+    ['mid',size.mid,T.szMid.split(' ')[0]],['small',size.small,T.szSmall.split(' ')[0]],
+    ['frag',size.frag,T.szFrag.split(' ')[0]]], SIZE_COLORS, unit);
 }
 /* 总览顶部的"当前服务器"横幅:多服时直接列出所有成员,点一下就切 */
 function renderDashServer(){
@@ -93,7 +100,7 @@ function renderDash(){
       <div class="statSub">${fmt(s.groups)} ${T.groupsUnit} · ${fmt(s.entries)} ${T.entries}</div></div>
     <div class="stat"><div class="statLabel">${T.dashBlocks}</div>
       <div class="statNum">${fmt(s.blocks)}</div>
-      <div class="statSub">${T.szHuge} ${s.size.huge} · ${T.szLarge} ${s.size.large}</div></div>
+      <div class="statSub">${T.szHuge} ${s.groupSize.huge} · ${T.szLarge} ${s.groupSize.large}</div></div>
     <div class="stat"><div class="statLabel">${T.dashLoaded}</div>
       <div class="statNum" style="color:var(--acc)">${s.state.loaded}<small>/${fmt(s.bodies)}</small></div>
       <div class="ratio"><i style="width:${(loadFrac*100).toFixed(1)}%"></i></div>
@@ -108,14 +115,12 @@ function renderDash(){
   document.getElementById('dashMid').innerHTML = `
     <div class="card"><h4><span>${T.dashState}</span><span class="more" onclick="setView('bodies',{tab:'all',reset:true})">${T.dashGo}</span></h4>
       ${barRow([['loaded',s.state.loaded,T.stLoaded],['stored',s.state.stored,T.stStored],
-        ['holding',s.state.holding,T.holdingX],['orphan',s.state.orphan,T.orphanX]], STATE_COLORS)}</div>
-    <div class="card"><h4>${T.dashScale}</h4>
-      ${barRow([['huge',s.size.huge,T.szHuge.split(' ')[0]],['large',s.size.large,T.szLarge.split(' ')[0]],
-        ['mid',s.size.mid,T.szMid.split(' ')[0]],['small',s.size.small,T.szSmall.split(' ')[0]],
-        ['frag',s.size.frag,T.szFrag.split(' ')[0]]], SIZE_COLORS)}</div>
+        ['holding',s.state.holding,T.holdingX],['orphan',s.state.orphan,T.orphanX]], STATE_COLORS, T.bodies)}</div>
+    <div class="card"><h4>${T.dashGroupScale}</h4>${sizeBar(s.groupSize,T.groupsUnit)}</div>
+    <div class="card"><h4>${T.dashBodyScale}</h4>${sizeBar(s.bodySize,T.bodies)}</div>
     <div class="card"><h4>${T.dashDims}</h4><div class="kvgrid">
       ${Object.entries(s.dims).sort((a,b)=>b[1]-a[1]).map(([d,n])=>
-        `<div class="k">${esc(d.replace('minecraft:',''))}</div><div class="v">${fmt(n)}</div>`).join('')}</div></div>
+        `<div class="k">${esc(d.replace('minecraft:',''))}</div><div class="v">${fmt(n)} ${T.bodies}</div>`).join('')}</div></div>
     <div class="card ${(s.state.orphan)?'accent-bad':''}"><h4><span>${T.dashAnom}</span>${(s.state.orphan+s.dup+s.clone)?`<span class="more" onclick="setView('bodies',{tab:'anom',reset:true})">${T.dashGo}</span>`:''}</h4>
       <div class="kvgrid">
         <div class="k"><i class="dot" style="background:var(--bad)"></i>${T.dashOrphans}</div><div class="v" style="color:${s.state.orphan?'var(--bad)':'var(--dim)'}">${s.state.orphan}</div>
@@ -150,8 +155,8 @@ function renderDashStats(){
   const dims = STATS ? Object.keys(STATS.phys||{}) : [];
   document.getElementById('physLegend').innerHTML = STATS
     ? dims.map((d,i)=>`<span><i style="background:${DIM_COLORS[i%DIM_COLORS.length]}"></i>${esc(d.replace('minecraft:',''))}
-        <b>${(STATS.phys_1m?.[d]??0).toFixed(2)} ms</b></span>`).join('')
-      + `<span><i style="background:${BODY_COLOR}"></i>${T.physBodies} <b>${(STATS.body_cost_total??0).toFixed(2)} ms</b></span>`
+        <b>${(STATS.phys_1m?.[d]??0).toFixed(2)} ms/t</b></span>`).join('')
+      + `<span><i style="background:${BODY_COLOR}"></i>${T.physBodies} <b>${(STATS.body_cost_total??0).toFixed(2)} ms/t</b></span>`
     : '';
   document.getElementById('dashTopCost').innerHTML = topCostTable(8);   // STATS 为空时是"暂无数据"
 }

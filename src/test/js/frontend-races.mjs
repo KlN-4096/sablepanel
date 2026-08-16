@@ -153,6 +153,76 @@ const bodiesResponse = (extra = {}) => jsonResponse({
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
+test('总览分别按依赖组和成员体统计规模', () => {
+  const { sandbox } = setup();
+  const summary = JSON.parse(evalIn(sandbox, `
+    DATA = {total_entries:4,groups:[
+      {blocks:10100,members:2,bodies:[
+        {blocks:10000,state:'loaded',dim:'minecraft:overworld'},
+        {blocks:100,state:'loaded',dim:'minecraft:overworld'}]},
+      {blocks:11,members:2,bodies:[
+        {blocks:6,state:'loaded',dim:'minecraft:the_end'},
+        {blocks:5,state:'loaded',dim:'minecraft:the_end'}]}
+    ]};
+    JSON.stringify(summarize())
+  `));
+  assert.deepEqual(summary.groupSize, {huge:1,large:0,mid:0,small:1,frag:0});
+  assert.deepEqual(summary.bodySize, {huge:1,large:0,mid:1,small:0,frag:2});
+  assert.equal(summary.groups, 2);
+  assert.equal(summary.bodies, 4);
+  evalIn(sandbox, 'renderDash()');
+  const html = evalIn(sandbox, "document.getElementById('dashMid').innerHTML");
+  assert.match(html, /依赖组规模/);
+  assert.match(html, /成员体规模/);
+  assert.match(html, />1 组</);
+  assert.match(html, />2 体</);
+});
+
+test('性能图表悬停跟随鼠标时间并在稀疏采样间插值', () => {
+  const { sandbox } = setup();
+  const frame = JSON.parse(evalIn(sandbox, 'JSON.stringify(chartHoverFrame([0,10],4))'));
+  assert.deepEqual(frame, {time:4,left:0,right:1,mix:0.4});
+  assert.equal(evalIn(sandbox, 'chartFrameValue(chartHoverFrame([0,10],4),[0,100])'), 40);
+});
+
+test('性能图表切换时间窗口会重画总览大图', () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    STATS={t:[0,600],phys:{overworld:[1,2]},phys_1m:{},loaded:{},body_cost_total:0,top_cost:[]};
+    __chartDraws=[];
+    drawPhysChart=(canvas,big)=>__chartDraws.push([canvas.id,big]);
+    renderStatPop=()=>{};
+    setChartPreset(900);
+  `);
+  assert.equal(evalIn(sandbox, 'CHART.span'), 900);
+  assert.equal(evalIn(sandbox, "__chartDraws.some(([id,big])=>id==='physChart'&&big)"), true);
+});
+
+test('性能图表悬浮面板跟随鼠标并在视口边缘翻转', () => {
+  const { sandbox } = setup();
+  assert.deepEqual(
+    JSON.parse(evalIn(sandbox, 'JSON.stringify(chartTipPosition(100,80,240,120,1000,720))')),
+    {left:112,top:92}
+  );
+  assert.deepEqual(
+    JSON.parse(evalIn(sandbox, 'JSON.stringify(chartTipPosition(980,700,240,120,1000,720))')),
+    {left:728,top:568}
+  );
+  assert.deepEqual(
+    JSON.parse(evalIn(sandbox, 'JSON.stringify(chartTipPosition(600,360,240,120,1200,720,1.2))')),
+    {left:512,top:312},
+    'html zoom 下必须把鼠标和视口坐标换回布局坐标'
+  );
+});
+
+test('性能图表悬浮面板不嵌套在动画视图中', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const wrap = html.match(/<div id="physChartWrap">([\s\S]*?)<\/div>/);
+  assert.ok(wrap, '必须保留图表容器');
+  assert.doesNotMatch(wrap[1], /chartTip/, 'fixed 面板嵌在动画视图内会产生固定坐标偏移');
+  assert.equal((html.match(/id="chartTip"/g) || []).length, 1);
+});
+
 // UI-01:终态契约
 test('UI-01 部分失败和全部失败都不再显示为完成', () => {
   const { sandbox } = setup();
@@ -615,6 +685,7 @@ test('UI-03 切服要清掉图表窗口和悬浮提示', async () => {
   const switching = evalIn(sandbox, 'switchServer')('B');
   assert.equal(evalIn(sandbox, 'CHART.span'), 300, '窗口预设要回到默认,不能带着上一个服的选择');
   assert.equal(evalIn(sandbox, 'CHART.hoverIndex'), -1);
+  assert.equal(evalIn(sandbox, 'CHART.hoverTime'), null);
   assert.equal(evalIn(sandbox, "document.getElementById('chartTip').style.display"), 'none',
     '空图上不该还挂着上一个服的悬浮提示');
   assert.equal(evalIn(sandbox, "document.getElementById('chartTip').innerHTML"), '');
@@ -1182,6 +1253,37 @@ test('副本面板即使已知当前版本也必须由用户显式选择', async
   assert.equal(evalIn(sandbox, "document.getElementById('dedupeConfirm').disabled"), true);
 });
 
+test('设为主版本后等待作业完成才恢复普通预览', async () => {
+  const terminal = deferred();
+  const { sandbox } = setup();
+  sandbox.__terminal = terminal.promise;
+  evalIn(sandbox, `
+    authenticated = true;
+    SEL = {uuid:'U',name:'测试体'};
+    COPY_UUID = 'U'; COPY_VERSION = 'v1';
+    COPY_SCAN = {current_state:'known',current_version:'v1',members:1,active_members:1,incomplete:[],
+      versions:[{id:'v1',complete:true,current:true,members:1,blocks:1,active_members:1,
+        locations:[],missing_dependencies:[],copies:[]}]};
+    document.getElementById('copyBack').showModal();
+    submitJob = async () => ({job:42});
+    awaitJob = seq => { __waited = seq; return __terminal; };
+    __bodyPreviews = [];
+    loadMesh = uuid => { __bodyPreviews.push(uuid); return Promise.resolve(); };
+  `);
+
+  const pending = evalIn(sandbox, 'confirmDedupe')();
+  await tick();
+  assert.equal(evalIn(sandbox, "document.getElementById('copyBack').open"), false);
+  assert.equal(evalIn(sandbox, '__waited'), 42);
+  assert.equal(evalIn(sandbox, '__bodyPreviews.length'), 0,
+    '作业终态前不能请求仍有多份副本的普通预览');
+
+  terminal.resolve('ok');
+  await pending;
+  assert.equal(evalIn(sandbox, '__bodyPreviews.length'), 1, '作业成功后只恢复一次普通预览');
+  assert.equal(evalIn(sandbox, '__bodyPreviews[0]'), 'U');
+});
+
 // LOAD-01:加载失败不得伪装成"没有数据"
 test('LOAD-01 首次加载失败要显示加载失败,不是空列表也不是永远加载中', async () => {
   const { sandbox, state } = setup();
@@ -1463,6 +1565,24 @@ test('LOAD-01 一致性报告的等待循环失败一次不能整个放弃', asy
   await evalIn(sandbox, 'scheduleStartupConsistency')();
   assert.ok(calls > 1, '失败之后必须继续等,实际只请求了 ' + calls + ' 次');
   assert.equal(evalIn(sandbox, 'CONSISTENCY.scan_id'), 's2', '恢复之后要拿到报告');
+});
+
+test('一致性面板显示并提交失效追踪点', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    CONSISTENCY = {ready:true,scan_id:'scan-12345678',issue_count:1,
+      dangling_pointers:[],stale_forced:[],stale_paused:[],
+      stale_tracking_points:[{id:'0123456789abcdef',tracking_id:'player-id',
+        target:'minecraft:overworld/12.3.0:1',dim:'minecraft:overworld',chunk_x:415,chunk_z:98}]};
+    renderConsistency();
+    checkedValues = cls => cls==='cTracking' ? ['0123456789abcdef'] : [];
+    askModal = async () => true;
+    submitJob = async (url,opts) => { __repairUrl=url; __repairBody=JSON.parse(opts.body); return null; };
+  `);
+  assert.match(evalIn(sandbox, "document.getElementById('consistencyBody').innerHTML"), /player-id/);
+  await evalIn(sandbox, 'repairConsistency')();
+  assert.equal(evalIn(sandbox, '__repairUrl'), '/api/consistency/repair');
+  assert.equal(evalIn(sandbox, '__repairBody.tracking[0]'), '0123456789abcdef');
 });
 
 test('UI-03 旧会话的一致性等待不能在重新登录后继续', async () => {
@@ -1943,6 +2063,30 @@ test('copyVerdict 判定表:八个终态各归各位', async () => {
   assert.equal(verdict({ current_state:'known', current_version:'ghost', members:1, active_members:1,
     versions:[{id:'a',complete:true,members:1}], incomplete:[] }).kind, 'EVIDENCE_STRAY',
     'known 却不落在完整候选上不能崩,按证据不可用处理');
+  const repair = verdict({ current_state:'known', current_version:'repair', members:26, active_members:25,
+    versions:[{id:'repair',complete:false,repairable_current:true,members:25,active_members:25,
+      missing_dependencies:['stale-a','stale-b']}], incomplete:[] });
+  assert.deepEqual([repair.kind,repair.pick,repair.removed,repair.missing],
+    ['READY_REPAIR','repair',1,2], '逐成员运行证据完整的当前残缺版本进入显式修复流');
+});
+
+test('副本预览提示随 dialog 进入顶层，迁移时清掉旧提示', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    const tip = document.getElementById('hoverTip');
+    const dialog = document.getElementById('copyBack');
+    const copyHost = document.getElementById('copyPreviewHost');
+    document.body.appendChild = child => { child.parentElement = document.body; };
+    dialog.appendChild = child => { child.parentElement = dialog; };
+    copyHost.closest = selector => selector === 'dialog' ? dialog : null;
+    tip.style.display = 'block';
+    movePreviewTo('copyPreviewHost');
+  `);
+  assert.equal(evalIn(sandbox, "document.getElementById('hoverTip').parentElement.id"), 'copyBack');
+  assert.equal(evalIn(sandbox, "document.getElementById('hoverTip').style.display"), 'none');
+  evalIn(sandbox, "document.getElementById('hoverTip').style.display='block'; movePreviewTo('bodyPreviewHost')");
+  assert.equal(evalIn(sandbox, "document.getElementById('hoverTip').parentElement===document.body"), true);
+  assert.equal(evalIn(sandbox, "document.getElementById('hoverTip').style.display"), 'none');
 });
 
 test('副本对话框:未加载 → 一键唤醒 → 作业结束自动重扫并自动选中', async () => {

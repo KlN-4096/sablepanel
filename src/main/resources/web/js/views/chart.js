@@ -1,7 +1,7 @@
 'use strict';
 /* 性能图表:窗口预设 + canvas 绘制 + 悬停交互。数据始终是 /api/stats 的内存 15 分钟窗口,
    预设只决定本地裁剪多长的尾部,切预设不重新请求 */
-onServerReset(() => { CHART.span = 300; CHART.hoverIndex = -1; });
+onServerReset(() => { CHART.span = 300; CHART.hoverIndex = -1; CHART.hoverTime = null; });
 function renderChartPresets(){
   const box = document.getElementById('chartPresets');
   if (!box) return;
@@ -18,8 +18,10 @@ function updateChartControls(){
   document.getElementById('chartMeta').textContent = status ? `${status} · ${meta}` : meta;
 }
 function setChartPreset(seconds){
-  CHART.span = seconds; CHART.hoverIndex = -1;
+  CHART.span = seconds; CHART.hoverIndex = -1; CHART.hoverTime = null;
+  document.getElementById('chartTip').style.display='none';
   renderStats();
+  drawPhysChart(document.getElementById('physChart'),true);
 }
 /* R3.6 系列色对齐黄铜盘:首维度(主世界)=签名黄铜,绿/蓝/紫/铜错开保证可辨 */
 const DIM_COLORS = ['#d0a354','#5cab62','#5a8fd6','#a583d6','#d8735a','#55b5b2'];
@@ -29,7 +31,7 @@ function chartInk(){
   return {grid:cs.getPropertyValue('--chart-grid').trim(), axis:cs.getPropertyValue('--dim').trim(),
           cross:cs.getPropertyValue('--chart-cross').trim(), halo:cs.getPropertyValue('--card').trim()};
 }
-/* 按 CHART.span 裁剪出要画的尾部窗口;悬停索引与绘制共用同一份裁剪结果 */
+/* 按 CHART.span 裁剪出要画的尾部窗口;悬停时间与绘制共用同一份裁剪结果 */
 function chartData(){
   if (!STATS) return {times:[],series:[]};
   const all = (STATS.t||[]).map(Number);
@@ -51,6 +53,29 @@ function chartGeometry(cv,big,times,width,height){
   return {w,h,left,right,top,bottom,from,to:Math.max(from+1,to),plotW:Math.max(1,w-left-right),plotH:Math.max(1,h-top-bottom)};
 }
 function chartX(time,g){ return g.left+(time-g.from)/(g.to-g.from)*g.plotW; }
+function chartHoverFrame(times,target){
+  const last=times.length-1;
+  if (target<=times[0]) return {time:times[0],left:0,right:0,mix:0};
+  if (target>=times[last]) return {time:times[last],left:last,right:last,mix:0};
+  let low=1,high=last;
+  while (low<high) { const mid=Math.floor((low+high)/2); if (times[mid]<target) low=mid+1; else high=mid; }
+  const right=low,left=right-1,span=times[right]-times[left];
+  return {time:target,left,right,mix:span>0?(target-times[left])/span:0};
+}
+function chartFrameValue(frame,values){
+  const left=Number(values[frame.left]);
+  if (frame.left===frame.right) return left;
+  const right=Number(values[frame.right]);
+  return Number.isFinite(left)&&Number.isFinite(right) ? left+(right-left)*frame.mix : NaN;
+}
+function chartTipPosition(pointerX,pointerY,tipWidth,tipHeight,viewWidth,viewHeight,zoom=1){
+  const gap=12,edge=4;
+  const scale=Number.isFinite(zoom)&&zoom>0?zoom:1;
+  const x=pointerX/scale,y=pointerY/scale,w=viewWidth/scale,h=viewHeight/scale;
+  const left=x+gap+tipWidth<=w-edge ? x+gap : Math.max(edge,x-gap-tipWidth);
+  const top=y+gap+tipHeight<=h-edge ? y+gap : Math.max(edge,y-gap-tipHeight);
+  return {left,top};
+}
 function chartAxisTime(epoch){
   return new Date(epoch*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
 }
@@ -95,42 +120,40 @@ function drawPhysChart(cv,big){
     });
     ctx.strokeStyle=item.color; ctx.lineWidth=big?1.6:1.3; ctx.stroke();
   }
-  if (big&&CHART.hoverIndex>=0&&CHART.hoverIndex<times.length) {
-    const index=CHART.hoverIndex, xx=chartX(times[index],g);
+  if (big&&CHART.hoverTime!==null) {
+    const frame=chartHoverFrame(times,CHART.hoverTime), xx=chartX(frame.time,g);
     ctx.strokeStyle=ink.cross; ctx.lineWidth=1; ctx.setLineDash([3,3]);
     ctx.beginPath(); ctx.moveTo(xx,g.top); ctx.lineTo(xx,g.top+g.plotH); ctx.stroke(); ctx.setLineDash([]);
     for (const item of series) {
-      const value=item.values[index]; if (!Number.isFinite(value)) continue;
+      const value=chartFrameValue(frame,item.values); if (!Number.isFinite(value)) continue;
       ctx.fillStyle=item.color; ctx.beginPath(); ctx.arc(xx,y(value),3,0,Math.PI*2); ctx.fill();
       ctx.strokeStyle=ink.halo; ctx.stroke();
     }
   }
 }
-function nearestChartIndex(times,target){
-  let low=0,high=times.length-1;
-  while (low<high) { const mid=Math.floor((low+high)/2); if (times[mid]<target) low=mid+1; else high=mid; }
-  if (low>0&&Math.abs(times[low-1]-target)<=Math.abs(times[low]-target)) return low-1;
-  return low;
-}
 function chartMouseMove(event){
   const cv=document.getElementById('physChart'), {times,series}=chartData();
   if (!times.length) return;
-  const rect=cv.getBoundingClientRect(), g=chartGeometry(cv,true,times);
+  const rect=cv.getBoundingClientRect(), g=chartGeometry(cv,true,times,rect.width,rect.height);
   const localX=event.clientX-rect.left;
   if (localX<g.left||localX>g.left+g.plotW) { chartMouseLeave(); return; }
   const target=g.from+(localX-g.left)/g.plotW*(g.to-g.from);
-  CHART.hoverIndex=nearestChartIndex(times,target);
-  const index=CHART.hoverIndex, start=times[index];
+  const frame=chartHoverFrame(times,target);
+  CHART.hoverIndex=frame.left; CHART.hoverTime=frame.time;
   const tip=document.getElementById('chartTip');
-  tip.innerHTML=`<b>${fmtDateTime(start*1000)}</b>`+series.map(item=>
-    `<div class="ctRow"><i style="background:${item.color}"></i><span>${esc(item.name)}</span><em>${Number(item.values[index]||0).toFixed(2)} ms</em></div>`).join('');
+  tip.innerHTML=`<b>${fmtDateTime(frame.time*1000)}</b>`+series.map(item=>{
+    const value=chartFrameValue(frame,item.values);
+    return `<div class="ctRow"><i style="background:${item.color}"></i><span>${esc(item.name)}</span><em>${Number.isFinite(value)?value.toFixed(2):'--'} ms/t</em></div>`;
+  }).join('');
   tip.style.display='block';
-  tip.style.left=Math.min(g.w-tip.offsetWidth-6,Math.max(4,localX+12))+'px';
-  tip.style.top='8px';
+  const zoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1;
+  const position=chartTipPosition(event.clientX,event.clientY,tip.offsetWidth,tip.offsetHeight,
+    window.innerWidth,window.innerHeight,zoom);
+  tip.style.left=position.left+'px'; tip.style.top=position.top+'px';
   drawPhysChart(cv,true);
 }
 function chartMouseLeave(){
-  CHART.hoverIndex=-1; document.getElementById('chartTip').style.display='none';
+  CHART.hoverIndex=-1; CHART.hoverTime=null; document.getElementById('chartTip').style.display='none';
   drawPhysChart(document.getElementById('physChart'),true);
 }
 function initChartInteractions(){

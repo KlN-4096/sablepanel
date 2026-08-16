@@ -43,11 +43,13 @@ function closeConsistency(dismiss = true){
 }
 function renderConsistency(){
   const report=CONSISTENCY||{};
-  const pointers=report.dangling_pointers||[], forced=report.stale_forced||[], paused=report.stale_paused||[];
+  const pointers=report.dangling_pointers||[], tracking=report.stale_tracking_points||[],
+    forced=report.stale_forced||[], paused=report.stale_paused||[];
   const section=(title,cls,items,row)=>items.length?`<section class="consistencySection"><h4>${title}<span class="tag warn">${items.length}</span></h4>${items.map(item=>
     `<label class="consistencyRow"><input type="checkbox" class="${cls}" value="${typeof item==='string'?item:item.id}" checked>${row(item)}</label>`).join('')}</section>`:'';
   let content=`<div class="consistencySummary">
     <div class="consistencyMetric"><b>${fmt(pointers.reduce((sum,item)=>sum+(item.count||1),0))}</b><span>${T.consistencyPointers}</span></div>
+    <div class="consistencyMetric"><b>${fmt(tracking.length)}</b><span>${T.consistencyTracking}</span></div>
     <div class="consistencyMetric"><b>${fmt(forced.length)}</b><span>${T.consistencyForced}</span></div>
     <div class="consistencyMetric"><b>${fmt(paused.length)}</b><span>${T.consistencyPaused}</span></div></div>`;
   const repaired=report.last_repair;
@@ -63,6 +65,8 @@ function renderConsistency(){
   else if (!(report.issue_count||0)) content+=`<div class="empty">${T.consistencyHealthy}</div>`;
   else content+=section(T.consistencyPointers,'cPointer',pointers,item=>
       `<span class="mono">${esc(item.target)}<br><small>${esc(item.dim)} · chunk ${item.chunk_x}, ${item.chunk_z}</small></span><small>×${item.count||1}</small>`)
+    +section(T.consistencyTracking,'cTracking',tracking,item=>
+      `<span class="mono">${esc(item.tracking_id)}<br><small>${esc(item.target)} · chunk ${item.chunk_x}, ${item.chunk_z}</small></span><small>${T.consistencyMissingSlot}</small>`)
     +section(T.consistencyForced,'cForced',forced,item=>`<span class="mono">${item}</span><small>${T.consistencyMissingBody}</small>`)
     +section(T.consistencyPaused,'cPaused',paused,item=>`<span class="mono">${item}</span><small>${T.consistencyMissingBody}</small>`);
   if (report.truncated) content+=`<div class="copyWarning">${T.consistencyTruncated}</div>`;
@@ -72,13 +76,14 @@ function renderConsistency(){
 }
 async function repairConsistency(){
   if (!CONSISTENCY) return;
-  const pointers=checkedValues('cPointer'), forced=checkedValues('cForced'), paused=checkedValues('cPaused');
-  const total=pointers.length+forced.length+paused.length;
+  const pointers=checkedValues('cPointer'), tracking=checkedValues('cTracking'),
+    forced=checkedValues('cForced'), paused=checkedValues('cPaused');
+  const total=pointers.length+tracking.length+forced.length+paused.length;
   if (!total) { toast(T.consistencyNone,'bad'); return; }
   if (!await askModal(T.consistencyTitle,T.consistencyAsk(total),false)) return;
   const previous=CONSISTENCY.scan_id;
   const accepted=await submitJob('/api/consistency/repair',{method:'POST',body:JSON.stringify({
-    scan_id:previous,pointers,forced,paused})});
+    scan_id:previous,pointers,tracking,forced,paused})});
   if (!accepted) return;
   closeConsistency();
   waitForConsistencyChange(previous,true);

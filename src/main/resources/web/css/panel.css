@@ -392,14 +392,14 @@ header .hbtn.stale{border-color:var(--warn);color:var(--warn)}
   background-image:repeating-linear-gradient(0deg,var(--paper-line) 0 1px,transparent 1px 8px),
     repeating-linear-gradient(90deg,var(--paper-line) 0 1px,transparent 1px 8px)}
 #physChart{width:100%;height:100%;display:block}
-#chartTip{position:absolute;display:none;pointer-events:none;z-index:4;min-width:190px;max-width:280px;
+#chartTip{position:fixed;display:none;pointer-events:none;z-index:20;min-width:190px;max-width:min(280px,calc(100vw - 8px));box-sizing:border-box;
   padding:7px 10px;background:color-mix(in srgb,var(--card) 96%,transparent);border:1px solid var(--line2);box-shadow:var(--shadow-pop);
   font-size:11.5px;line-height:1.5;color:var(--fg2)}
 #chartTip b{display:block;color:var(--fg);font-family:var(--mono);font-size:11px;margin-bottom:3px}
 #chartTip .ctRow{display:flex;align-items:center;gap:7px;white-space:nowrap}
 #chartTip .ctRow i{width:7px;height:7px;flex:none}
-#chartTip .ctRow span{flex:1;overflow:hidden;text-overflow:ellipsis}
-#chartTip .ctRow em{font-style:normal;font-family:var(--mono);color:var(--fg)}
+#chartTip .ctRow span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+#chartTip .ctRow em{flex:none;font-style:normal;font-family:var(--mono);color:var(--fg)}
 .chartTools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:-2px 0 9px}
 .chartPresets{display:flex;gap:2px;padding:2px;background:var(--well);border:1px solid var(--line)}
 .chartPresets button{border:none;background:transparent;padding:3px 8px;font-size:11px}
@@ -772,7 +772,7 @@ button.favStar{border:none;background:none;padding:0 6px;font-size:16px;vertical
 .copyPanelFoot .status{flex:1;color:var(--dim);font-size:12px}
 .consistencyPanel{width:min(980px,94vw);height:min(720px,88vh)}
 #consistencyBody{padding:16px 18px;overflow-y:auto;min-height:0;flex:1}
-.consistencySummary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:14px}
+.consistencySummary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:14px}
 .consistencyMetric{padding:10px;border:1px solid var(--line);background:var(--well);border-radius:2px}
 .consistencyMetric b{display:block;font:400 18px var(--pixel);margin-bottom:2px}
 .consistencyMetric span{font-size:11px;color:var(--dim)}
