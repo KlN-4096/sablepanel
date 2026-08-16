@@ -92,6 +92,21 @@ class ConsistencyServiceResourceTest {
         assertTrue(error.getCause().getMessage().contains("分批选择"));
     }
 
+    @Test
+    void metadataPersistenceSavesOnlyChangedDimensions() {
+        List<String> saved = new ArrayList<>();
+
+        ConsistencyService.saveChangedMetadata(Set.of(DIMENSION), Map.of(
+                DIMENSION, () -> saved.add(DIMENSION),
+                "minecraft:the_nether", () -> saved.add("minecraft:the_nether")));
+
+        assertEquals(List.of(DIMENSION), saved);
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> ConsistencyService.saveChangedMetadata(Set.of(DIMENSION),
+                        Map.of(DIMENSION, () -> { throw new RuntimeException("disk failure"); })));
+        assertEquals("disk failure", failure.getMessage());
+    }
+
     private static void writePointerFile(Path file, int count) throws Exception {
         writePointerFile(file, IntStream.range(0, count).toArray());
     }

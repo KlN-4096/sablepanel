@@ -21,6 +21,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -70,9 +71,10 @@ public final class TrackingPointService {
         return points;
     }
 
-    public static void removeOnMain(MinecraftServer server, Collection<Issue> selected,
-                                    Set<DiskScanner.EntryKey> occupied, Set<String> skipped) {
+    public static Set<String> removeOnMain(MinecraftServer server, Collection<Issue> selected,
+                                           Set<DiskScanner.EntryKey> occupied, Set<String> skipped) {
         Map<String, Map<String, Issue>> byDimension = new LinkedHashMap<>();
+        Set<String> changedDimensions = new LinkedHashSet<>();
         for (Issue issue : selected) {
             byDimension.computeIfAbsent(issue.key.dim(), ignored -> new LinkedHashMap<>())
                     .put(issue.id, issue);
@@ -88,12 +90,14 @@ public final class TrackingPointService {
                     skipped.add("tracking:" + issue.id);
                 } else {
                     data.removeTrackingPoint(issue.trackingId);
+                    changedDimensions.add(issue.key.dim());
                 }
             }
         }
         for (Map<String, Issue> missing : byDimension.values()) {
             for (Issue issue : missing.values()) skipped.add("tracking:" + issue.id);
         }
+        return Set.copyOf(changedDimensions);
     }
 
     static Map<UUID, String> detachDeletedOnMain(

@@ -223,16 +223,38 @@ public final class ConsistencyService {
         List<PointerIssue> dangling = stillDangling(dimensions, pointers, skipped);
         Set<DiskScanner.EntryKey> occupiedTracking = DiskScanner.occupiedEntrySlots(
                 dimensions, tracking.stream().map(TrackingPointService.Issue::key).toList());
+        Set<String> changedMetadata = new LinkedHashSet<>();
         String error = null;
         try {
             repairPointersOnMain(dangling);
-            TrackingPointService.removeOnMain(this.server, tracking, occupiedTracking, skipped);
-            for (UUID uuid : forced) ForceLoadService.removeOnMain(this.server, uuid);
+            changedMetadata.addAll(TrackingPointService.removeOnMain(
+                    this.server, tracking, occupiedTracking, skipped));
+            for (UUID uuid : forced) changedMetadata.addAll(ForceLoadService.removeOnMain(this.server, uuid));
             if (!paused.isEmpty()) PauseService.applyOnMain(this.server, paused, false);
         } catch (Exception failure) {
             error = messageOf(failure);
         }
+        try {
+            Map<String, Runnable> saves = new LinkedHashMap<>();
+            for (ServerLevel level : this.server.getAllLevels()) {
+                saves.put(level.dimension().location().toString(), level.getDataStorage()::save);
+            }
+            saveChangedMetadata(changedMetadata, saves);
+        } catch (Exception failure) {
+            tracking.forEach(issue -> skipped.add("tracking:" + issue.id()));
+            forced.forEach(uuid -> skipped.add("forced:" + uuid));
+            String saveError = "保存修复元数据失败: " + messageOf(failure);
+            error = error == null ? saveError : error + "; " + saveError;
+        }
         return new RepairAttempt(Set.copyOf(skipped), error);
+    }
+
+    static void saveChangedMetadata(Set<String> changedDimensions, Map<String, Runnable> saves) {
+        for (String dimension : changedDimensions) {
+            Runnable save = saves.get(dimension);
+            if (save == null) throw new IllegalStateException("找不到待保存维度: " + dimension);
+            save.run();
+        }
     }
 
     private static List<PointerIssue> stillDangling(Map<String, Path> dimensions,

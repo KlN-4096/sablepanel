@@ -111,22 +111,54 @@ public final class ForceLoadService {
      * 但 {@code info.tickets()} 返回内部集合引用,可安全移除。留下的空 info 无害:
      * 加载时 {@code if (!tickets.isEmpty())} 才登记,存档读回时空条目直接被跳过。
      */
-    public static void removeOnMain(MinecraftServer server, UUID uuid) {
+    public static Set<String> removeOnMain(MinecraftServer server, UUID uuid) {
+        Set<String> changedDimensions = new HashSet<>();
         for (ServerLevel level : server.getAllLevels()) {
             try {
                 ServerSubLevelContainer c = container(level);
                 if (c == null) continue;
+                SubLevelTicketInfo info = c.getAllTickets().get(uuid);
+                boolean hadPanelTicket = info != null && info.tickets().stream()
+                        .anyMatch(ForceLoadService::isPanelTicket);
                 ServerSubLevel sl = OpKit.loadedBody(c, uuid);
                 if (sl != null) {
                     c.removeForceLoadTicket(sl, PANEL_FORCED, Unit.INSTANCE);
+                    if (hadPanelTicket) changedDimensions.add(level.dimension().location().toString());
                     continue;
                 }
-                SubLevelTicketInfo info = c.getAllTickets().get(uuid);
                 if (info != null && info.tickets().removeIf(ForceLoadService::isPanelTicket)) {
                     SubLevelTicketsSavedData.getOrLoad(level).setDirty();
+                    changedDimensions.add(level.dimension().location().toString());
                 }
             } catch (Throwable t) {
                 SablePanel.LOGGER.warn("sablepanel: clearing force-load ticket {} failed", uuid, t);
+            }
+        }
+        MIRROR.remove(uuid);
+        FAILED.remove(uuid);
+        return Set.copyOf(changedDimensions);
+    }
+
+    /** 主线程:事务回滚专用。任一维度摘票失败或摘后仍残留都抛错，不得提前清镜像。 */
+    public static void removeStrictOnMain(MinecraftServer server, UUID uuid) {
+        for (ServerLevel level : server.getAllLevels()) {
+            ServerSubLevelContainer c = SubLevelContainer.getContainer(level);
+            if (c == null) continue;
+            SubLevelTicketInfo info = c.getAllTickets().get(uuid);
+            boolean hadPanelTicket = info != null && info.tickets().stream()
+                    .anyMatch(ForceLoadService::isPanelTicket);
+            if (!hadPanelTicket) continue;
+            ServerSubLevel sl = OpKit.loadedBody(c, uuid);
+            if (sl != null) {
+                c.removeForceLoadTicket(sl, PANEL_FORCED, Unit.INSTANCE);
+            } else {
+                info.tickets().removeIf(ForceLoadService::isPanelTicket);
+                SubLevelTicketsSavedData.getOrLoad(level).setDirty();
+            }
+            SubLevelTicketInfo remaining = c.getAllTickets().get(uuid);
+            if (remaining != null && remaining.tickets().stream().anyMatch(ForceLoadService::isPanelTicket)) {
+                throw new IllegalStateException("常驻票删除后仍残留: " + uuid + " @ "
+                        + level.dimension().location());
             }
         }
         MIRROR.remove(uuid);
