@@ -168,7 +168,17 @@ async function doFreezeCurrent(){
 }
 async function doFreezeSelected(frozen){
   const uuids = [...SELECTED].filter(u => frozen !== FROZEN.has(u));
-  if (!frozen && uuids.length && !await askModal(T.thawT, T.thawSelMsg(uuids.length), false)) return;
+  if (!frozen && uuids.length) {
+    const impacted = new Map();
+    for (const u of uuids) {
+      const body = BODY_BY_UUID.get(u), group = body?.g;
+      impacted.set(group ? `g:${group.gid}` : `u:${u}`,
+        group || {members:1,blocks:body?.b?.blocks || 0});
+    }
+    const members = [...impacted.values()].reduce((sum,g)=>sum+g.members,0);
+    const blocks = [...impacted.values()].reduce((sum,g)=>sum+g.blocks,0);
+    if (!await askModal(T.thawT, T.thawSelMsg(uuids.length,members,blocks), false)) return;
+  }
   setFrozenBodies(uuids, frozen);
 }
 /* 常驻加载(sable force-load ticket):开启时后端会先把体加载出来,大体可能耗时数分钟;

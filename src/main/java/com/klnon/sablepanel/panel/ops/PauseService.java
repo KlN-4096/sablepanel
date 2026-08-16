@@ -3,9 +3,13 @@ package com.klnon.sablepanel.panel.ops;
 import com.klnon.sablepanel.SablePanel;
 import dev.ryanhcode.sable.api.physics.constraint.FixedConstraintConfiguration;
 import dev.ryanhcode.sable.api.physics.constraint.PhysicsConstraintHandle;
+import dev.ryanhcode.sable.companion.math.Pose3dc;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import org.joml.Quaterniond;
+import org.joml.Vector3d;
 
 import java.util.Collection;
 import java.util.HashMap;
@@ -13,10 +17,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * 单体物理暂停 = 引擎级固定约束(与机械动力航空学"创造模式物理手杖"的锁定同机制):
- * {@code pipeline.addConstraint(null, body, FixedConstraintConfiguration(position, rotationPoint, orientation))}
+ * 固定约束的本体锚点必须取自当前 plot，再换算出对应世界锚点；存档里的 rotationPoint
+ * 可能仍属于旧 plot，Sable 会拒绝这种约束。
  * 把结构与世界锁死,恢复时 {@code handle.remove()}。无逐 tick 干预,无网络同步噪声。
  * <p>
  * 暂停意图按 uuid 持久化到 {@code config/sablepanel/paused.json},重启后由
@@ -52,13 +59,13 @@ public final class PauseService {
     }
 
     /** 主线程:冻结集合变化后重挂/解开约束(FreezeService 改完意图就调) */
-    public static void refreshOnMain(net.minecraft.server.MinecraftServer server, Collection<UUID> uuids) {
+    public static Set<UUID> refreshOnMain(net.minecraft.server.MinecraftServer server, Collection<UUID> uuids) {
         Set<UUID> toLock = new java.util.HashSet<>();
         for (UUID uuid : uuids) {
             if (shouldHold(uuid)) toLock.add(uuid);
             else unlock(uuid);
         }
-        if (toLock.isEmpty()) return;
+        if (toLock.isEmpty()) return Set.of();
         Map<UUID, ServerSubLevel> loaded = new HashMap<>();
         for (ServerLevel level : server.getAllLevels()) {
             try {
@@ -70,10 +77,12 @@ public final class PauseService {
             } catch (Throwable ignored) {
             }
         }
+        Set<UUID> failed = new java.util.HashSet<>();
         for (UUID uuid : toLock) {
             ServerSubLevel body = loaded.get(uuid);
-            if (body != null) lock(body);
+            if (body != null && !lock(body)) failed.add(uuid);
         }
+        return Set.copyOf(failed);
     }
 
     /** 当前暂停集合快照(HTTP 线程 /api/bodies 输出用) */
@@ -83,14 +92,21 @@ public final class PauseService {
 
     /** 主线程:登记/解除暂停,并对已加载体立即挂/拆约束;调用方离开主线程后再 {@link #persist()} */
     public static void applyOnMain(net.minecraft.server.MinecraftServer server, Collection<UUID> uuids, boolean paused) {
-        if (paused) REQUESTED.addAll(uuids);
-        else uuids.forEach(REQUESTED::remove);
-        refreshOnMain(server, uuids);
+        Set<UUID> added = new java.util.HashSet<>();
+        if (paused) {
+            for (UUID uuid : uuids) if (REQUESTED.add(uuid)) added.add(uuid);
+        } else uuids.forEach(REQUESTED::remove);
+        Set<UUID> failed = refreshOnMain(server, uuids);
+        if (paused && !failed.isEmpty()) {
+            REQUESTED.removeAll(added);
+            refreshOnMain(server, added);
+            throw new IllegalStateException("固定物理失败: " + failed);
+        }
     }
 
     /** 主线程(PanelObserver 体加载回调):有暂停或冻结意图的体重新锁定 */
-    public static void onBodyLoaded(ServerSubLevel sl) {
-        if (shouldHold(sl.getUniqueId())) lock(sl);
+    public static boolean onBodyLoaded(ServerSubLevel sl) {
+        return !shouldHold(sl.getUniqueId()) || lock(sl);
     }
 
     /** 主线程(PanelObserver 体卸载/移除回调):约束随体消亡,只丢弃句柄,意图保留 */
@@ -100,26 +116,71 @@ public final class PauseService {
 
     /** 主线程(面板传送暂停体后):在新位置重新锁定 */
     public static void reanchor(ServerSubLevel sl) {
-        if (!REQUESTED.contains(sl.getUniqueId())) return;
-        unlock(sl.getUniqueId());
-        lock(sl);
+        if (!shouldHold(sl.getUniqueId())) return;
+        try {
+            replaceConstraint(sl.getUniqueId(), () -> createConstraint(sl));
+        } catch (Throwable t) {
+            SablePanel.LOGGER.warn("sablepanel: reanchoring body {} failed", sl.getUniqueId(), t);
+            throw new IllegalStateException("传送后固定物理失败: " + sl.getUniqueId(), t);
+        }
     }
 
-    private static void lock(ServerSubLevel sl) {
-        if (HANDLES.containsKey(sl.getUniqueId())) return;
+    private static boolean lock(ServerSubLevel sl) {
+        if (HANDLES.containsKey(sl.getUniqueId())) return true;
         try {
-            var pipeline = SubLevelPhysicsSystem.get(sl.getLevel()).getPipeline();
-            var pose = sl.logicalPose();
-            PhysicsConstraintHandle handle = pipeline.addConstraint(null, sl,
-                    new FixedConstraintConfiguration(pose.position(), pose.rotationPoint(), pose.orientation()));
-            HANDLES.put(sl.getUniqueId(), handle);
+            replaceConstraint(sl.getUniqueId(), () -> createConstraint(sl));
+            return true;
         } catch (Throwable t) {
             SablePanel.LOGGER.warn("sablepanel: locking paused body {} failed", sl.getUniqueId(), t);
+            return false;
         }
+    }
+
+    private static PhysicsConstraintHandle createConstraint(ServerSubLevel sl) {
+        var pipeline = SubLevelPhysicsSystem.get(sl.getLevel()).getPipeline();
+        return pipeline.addConstraint(null, sl, fixedConstraint(sl.logicalPose(), sl.getPlot().getCenterBlock()));
+    }
+
+    static FixedConstraintConfiguration fixedConstraint(Pose3dc pose, BlockPos plotAnchor) {
+        Vector3d localAnchor = plotAnchor(plotAnchor);
+        return new FixedConstraintConfiguration(pose.transformPosition(localAnchor, new Vector3d()), localAnchor,
+                new Quaterniond(pose.orientation()));
+    }
+
+    static Vector3d plotAnchor(BlockPos block) {
+        return new Vector3d(block.getX() + 0.5, block.getY() + 0.5, block.getZ() + 0.5);
+    }
+
+    static void replaceConstraint(UUID uuid, Supplier<PhysicsConstraintHandle> factory) {
+        PhysicsConstraintHandle previous = HANDLES.get(uuid);
+        PhysicsConstraintHandle replacement = createBeforeRemoving(previous, factory,
+                PhysicsConstraintHandle::remove, PhysicsConstraintHandle::remove);
+        HANDLES.put(uuid, replacement);
+    }
+
+    static <T> T createBeforeRemoving(T previous, Supplier<? extends T> factory,
+                                      Consumer<T> removePrevious, Consumer<T> removeReplacement) {
+        T replacement = java.util.Objects.requireNonNull(factory.get(), "replacement");
+        if (previous == null) return replacement;
+        try {
+            removePrevious.accept(previous);
+        } catch (Throwable removalFailure) {
+            try {
+                removeReplacement.accept(replacement);
+            } catch (Throwable rollbackFailure) {
+                removalFailure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException("旧约束移除失败", removalFailure);
+        }
+        return replacement;
     }
 
     private static void unlock(UUID uuid) {
         PhysicsConstraintHandle handle = HANDLES.remove(uuid);
+        removeHandle(uuid, handle);
+    }
+
+    private static void removeHandle(UUID uuid, PhysicsConstraintHandle handle) {
         if (handle == null) return;
         try {
             handle.remove();

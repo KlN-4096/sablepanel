@@ -6,8 +6,10 @@ import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.server.level.ServerLevel;
 import org.joml.Vector3d;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /** 运行态操作:传送/暂停/常驻加载/在线玩家交互。sable 交互全部主线程执行。 */
@@ -37,10 +39,9 @@ public final class TeleportOps {
             } catch (Throwable ignored) {
             }
             sl.logicalPose().position().set(target.x, target.y, target.z);
-            phys.getPipeline().teleport(sl, target, sl.logicalPose().orientation());
-            sl.updateLastPose();
-            // 暂停(约束锁定)中的体传送后在新位置重挂约束
-            com.klnon.sablepanel.panel.ops.PauseService.reanchor(sl);
+            var pipeline = phys.getPipeline();
+            finishTeleport(() -> pipeline.teleport(sl, target, sl.logicalPose().orientation()),
+                    () -> pipeline.resetVelocity(sl), sl::updateLastPose, () -> PauseService.reanchor(sl));
             this.kit.audit("teleport", uuid, sl.getName(), x + "," + y + "," + z);
             String dim = level.dimension().location().toString();
             this.kit.index.updateRuntimePosition(uuid, dim, new double[]{x, y, z});
@@ -81,11 +82,8 @@ public final class TeleportOps {
         // 2026-08-08 实测给 192 体组里的一个成员挂票,体加载出来 827 毫秒后照样 remove UNLOADED,
         // 而作业还报 ok。挂票和摘票必须保持相同的整组语义。
         List<UUID> uuids = this.kit.expandToDependencyGroups(requested);
-        // 挂票前先冻结:整组留在内存里 tick,物理和方块实体两头都会压垮主线程(实测 40 秒 / 5 分钟)。
-        // 冻结连带锁物理(PauseService.shouldHold),用户可事后自行解冻。
-        if (forced) {
-            FreezeService.applyOnMain(uuids, true);
-        }
+        Set<UUID> newlyFrozen = new HashSet<>();
+        if (forced) for (UUID uuid : uuids) if (!FreezeService.isFrozen(uuid)) newlyFrozen.add(uuid);
         // 整批一次建链:多选往往是同一个依赖组的成员,分层 BFS 会把它们一趟解完。
         // 逐个建链会把同一批 .slvls 解压 N 遍 —— 全选 178 体的绳链时就是 178 遍。
         Map<UUID, OpKit.MemberPlan> chain = Map.of();
@@ -100,7 +98,9 @@ public final class TeleportOps {
         JobService.Job job = JobService.current();
         JsonObject out = this.kit.onMainUntilComplete(() -> {
             JsonArray failed = new JsonArray();
+            Set<UUID> newlyTicketed = new HashSet<>();
             int done = 0;
+            if (forced) FreezeService.applyOnMain(uuids, true);
             for (UUID uuid : uuids) {
                 if (job != null) job.phase(forced ? "挂常驻票" : "摘常驻票");
                 if (!forced) {
@@ -109,8 +109,12 @@ public final class TeleportOps {
                     continue;
                 }
                 try {
+                    boolean alreadyForced = ForceLoadService.isForcedOnMain(this.kit.server, uuid);
                     ServerSubLevel body = this.kit.ensureLoaded(uuid, plans);
-                    PauseService.onBodyLoaded(body);  // 冻结意图已登记,加载出来立刻锁物理
+                    if (!PauseService.onBodyLoaded(body)) {
+                        throw new IllegalStateException("固定物理失败");
+                    }
+                    if (!alreadyForced) newlyTicketed.add(uuid);
                     ForceLoadService.addOnMain(body);
                     done++;
                 } catch (Throwable t) {
@@ -119,6 +123,19 @@ public final class TeleportOps {
                     f.addProperty("error", String.valueOf(t.getMessage()));
                     failed.add(f);
                 }
+            }
+            if (!failed.isEmpty()) {
+                IllegalStateException operationFailure = new IllegalStateException("常驻加载失败: " + failed);
+                for (UUID uuid : newlyTicketed) {
+                    try {
+                        ForceLoadService.removeStrictOnMain(this.kit.server, uuid);
+                    } catch (Throwable rollbackFailure) {
+                        operationFailure.addSuppressed(rollbackFailure);
+                    }
+                }
+                FreezeService.applyOnMain(newlyFrozen, false);
+                PauseService.refreshOnMain(this.kit.server, newlyFrozen);
+                throw operationFailure;
             }
             JsonObject o = new JsonObject();
             o.addProperty("ok", true);
@@ -147,9 +164,16 @@ public final class TeleportOps {
      */
     public JsonObject setFrozen(List<UUID> requested, boolean frozen) throws Exception {
         List<UUID> uuids = this.kit.expandToDependencyGroups(requested);
-        FreezeService.applyOnMain(uuids, frozen);
+        Set<UUID> changed = new HashSet<>();
+        for (UUID uuid : uuids) if (FreezeService.isFrozen(uuid) != frozen) changed.add(uuid);
         this.kit.onMain(() -> {
-            PauseService.refreshOnMain(this.kit.server, uuids);
+            FreezeService.applyOnMain(uuids, frozen);
+            Set<UUID> failed = PauseService.refreshOnMain(this.kit.server, uuids);
+            if (!failed.isEmpty()) {
+                FreezeService.applyOnMain(changed, !frozen);
+                PauseService.refreshOnMain(this.kit.server, changed);
+                throw new IllegalStateException("固定物理失败: " + failed);
+            }
             return null;
         });
         for (UUID uuid : requested) this.kit.audit(frozen ? "freeze" : "thaw", uuid, null, null);
@@ -158,6 +182,13 @@ public final class TeleportOps {
         out.addProperty("frozen", frozen);
         out.addProperty("count", uuids.size());
         return out;
+    }
+
+    static void finishTeleport(Runnable teleport, Runnable resetVelocity, Runnable updateLastPose, Runnable reanchor) {
+        teleport.run();
+        resetVelocity.run();
+        updateLastPose.run();
+        reanchor.run();
     }
 
     /**

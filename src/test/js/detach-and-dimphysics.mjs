@@ -111,6 +111,24 @@ test('DET-02 主体位置不存疑就不加警告', async () => {
   assert.doesNotMatch(asks[0].msg, /多份位置不同的存盘条目/, '不存疑时不能喊狼来了');
 });
 
+test('恢复 tick 批量确认显示依赖组去重后的实际影响', async () => {
+  const ctx = makeContext({ fetch: async () => ({ ok: true, status: 200, json: async () => ({ ok: true }) }) });
+  evalIn(ctx, `
+    const g1={gid:'g1',members:3,blocks:100}, g2={gid:'g2',members:2,blocks:20};
+    BODY_BY_UUID=new Map([
+      ['a',{g:g1}],['b',{g:g1}],['c',{g:g2}]
+    ]);
+    SELECTED=new Set(['a','b','c','missing']);
+    FROZEN=new Set(['a','b','c','missing']);
+    __askAnswer=false;
+  `);
+
+  await evalIn(ctx, 'doFreezeSelected')(false);
+  const message = evalIn(ctx, '__asks[0].msg');
+  assert.match(message, /所选 4 个物理体/);
+  assert.match(message, /实际影响 6 个物理体、共 120 块/);
+});
+
 /* ---------- 整维度物理开关 ---------- */
 
 function captureFetch() {
