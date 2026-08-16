@@ -130,6 +130,74 @@ class CopyVersionScannerTest {
     }
 
     @Test
+    void fullyActiveVersionWithOnlyMissingDependenciesIsRepairable() {
+        UUID root = UUID.randomUUID();
+        UUID dependency = UUID.randomUUID();
+        UUID missing = UUID.randomUUID();
+        var rootCopy = copy(root, 0, tag(root, dependency, missing), 0, 0);
+        var dependencyCopy = copy(dependency, 1, tag(dependency), 0, 0);
+
+        CopyVersionScanner.Scan scan = CopyVersionScanner.assemble(root, Set.of(root, dependency),
+                List.of(rootCopy, dependencyCopy),
+                Map.of(root, rootCopy.key().id(), dependency, dependencyCopy.key().id()));
+
+        CopyVersionScanner.Version version = scan.versions().get(0);
+        assertFalse(version.complete());
+        assertTrue(CopyVersionScanner.repairableCurrent(scan, version));
+        assertEquals(version.id(), scan.currentVersion());
+        assertEquals(CopyVersionScanner.CurrentState.KNOWN, scan.currentState());
+        assertTrue(scan.incomplete().isEmpty(), "可修复版本必须按组备份，不能拆成残缺条目");
+    }
+
+    @Test
+    void activeUnassignedResidualDoesNotHideTheFullyActiveCurrentVersion() {
+        UUID root = UUID.randomUUID();
+        UUID dependency = UUID.randomUUID();
+        UUID residual = UUID.randomUUID();
+        UUID missing = UUID.randomUUID();
+        var rootCopy = copy(root, 0, tag(root, dependency, missing), 0, 0);
+        var dependencyCopy = copy(dependency, 1, tag(dependency), 0, 0);
+        var residualCopy = copy(residual, 2, tag(residual, root), 1, 0);
+
+        CopyVersionScanner.Scan scan = CopyVersionScanner.assemble(root, Set.of(root, dependency, residual),
+                List.of(rootCopy, dependencyCopy, residualCopy), Map.of(
+                        root, rootCopy.key().id(),
+                        dependency, dependencyCopy.key().id(),
+                        residual, residualCopy.key().id()));
+
+        CopyVersionScanner.Version current = scan.versions().stream()
+                .filter(version -> version.id().equals(scan.currentVersion())).findFirst().orElseThrow();
+        assertEquals(3, scan.activeMembers());
+        assertEquals(2, current.activeMembers());
+        assertTrue(CopyVersionScanner.repairableCurrent(scan, current));
+        assertEquals(List.of(residualCopy), scan.incomplete());
+    }
+
+    @Test
+    void activityInsideAnotherCandidateStillBlocksRepairableCurrentSelection() {
+        UUID root = UUID.randomUUID();
+        UUID dependency = UUID.randomUUID();
+        UUID residual = UUID.randomUUID();
+        UUID missing = UUID.randomUUID();
+        var rootCurrent = copy(root, 0, tag(root, dependency, missing), 0, 0);
+        var dependencyCurrent = copy(dependency, 1, tag(dependency), 0, 0);
+        var rootOther = copy(root, 2, tag(root, residual), 1, 0);
+        var residualOther = copy(residual, 3, tag(residual, root), 1, 0);
+
+        CopyVersionScanner.Scan scan = CopyVersionScanner.assemble(root, Set.of(root, dependency, residual),
+                List.of(rootCurrent, dependencyCurrent, rootOther, residualOther), Map.of(
+                        root, rootCurrent.key().id(),
+                        dependency, dependencyCurrent.key().id(),
+                        residual, residualOther.key().id()));
+
+        CopyVersionScanner.Version competing = scan.versions().stream()
+                .filter(version -> entries(version).contains(rootOther.key().id())).findFirst().orElseThrow();
+        assertTrue(competing.active(), "反例必须确实包含另一个候选的活动证据");
+        assertNull(scan.currentVersion());
+        assertEquals(CopyVersionScanner.CurrentState.UNKNOWN, scan.currentState());
+    }
+
+    @Test
     void provenMixedEvidenceWinsOverAnAdditionalStaleEntry() {
         UUID root = UUID.randomUUID();
         UUID dependency = UUID.randomUUID();

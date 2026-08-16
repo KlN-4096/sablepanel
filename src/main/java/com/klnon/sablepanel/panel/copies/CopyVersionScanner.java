@@ -122,16 +122,16 @@ public final class CopyVersionScanner {
                 .sorted(Comparator.comparing((Version version) -> !version.active())
                         .thenComparing((Version version) -> !version.complete())
                         .thenComparing(Version::id)).toList();
+        Current current = resolveCurrent(result, activeEntries);
         Set<DiskScanner.EntryKey> assigned = new LinkedHashSet<>();
         for (Version version : result) {
-            if (version.complete()) {
+            if (version.complete() || repairableCurrent(version, current)) {
                 version.copies().forEach(copy -> assigned.add(copy.key()));
                 version.redundant().forEach(copy -> assigned.add(copy.key()));
             }
         }
         List<Copy> incomplete = copies.stream().filter(copy -> !assigned.contains(copy.key()))
                 .sorted(Comparator.comparing(copy -> copy.key().id())).toList();
-        Current current = resolveCurrent(result, activeEntries);
         return new Scan(target, Set.copyOf(members), result, incomplete, current.version(), current.state(),
                 activeEntries.size());
     }
@@ -196,6 +196,16 @@ public final class CopyVersionScanner {
 
     private static Current resolveCurrent(List<Version> versions, Map<UUID, String> activeEntries) {
         if (activeEntries.isEmpty()) return new Current(null, CurrentState.UNKNOWN);
+        List<Version> fullyActive = versions.stream()
+                .filter(version -> (version.complete() || repairableShape(version))
+                        && version.activeMembers() == version.copies().size()).toList();
+        if (fullyActive.size() == 1) {
+            Version candidate = fullyActive.get(0);
+            boolean competingEvidence = versions.stream()
+                    .anyMatch(version -> !version.id().equals(candidate.id()) && version.active());
+            if (!competingEvidence) return new Current(candidate.id(), CurrentState.KNOWN);
+        }
+
         List<Version> complete = versions.stream().filter(Version::complete).toList();
         Set<String> compatible = null;
         boolean unmatched = false;
@@ -215,6 +225,21 @@ public final class CopyVersionScanner {
             return new Current(compatible.iterator().next(), CurrentState.KNOWN);
         }
         return new Current(null, CurrentState.UNKNOWN);
+    }
+
+    public static boolean repairableCurrent(Scan scan, Version version) {
+        return repairableCurrent(version, new Current(scan.currentVersion(), scan.currentState()));
+    }
+
+    private static boolean repairableCurrent(Version version, Current current) {
+        return current.state() == CurrentState.KNOWN && version.id().equals(current.version())
+                && repairableShape(version);
+    }
+
+    private static boolean repairableShape(Version version) {
+        if (version.complete() || version.missingDependencies().isEmpty()
+                || version.activeMembers() != version.copies().size()) return false;
+        return version.copies().stream().map(Copy::uuid).distinct().count() == version.copies().size();
     }
 
     private static boolean containsEntry(Version version, UUID uuid, String entryId) {

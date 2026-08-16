@@ -71,7 +71,7 @@ public final class DeleteOps {
             for (DeleteTx.DeleteStatus status : statuses.values()) status.fail(message);
             SablePanel.LOGGER.warn("sablepanel: batch delete transaction failed", e);
         }
-        this.tx.verifyDeletedTargets(statuses, warnings);
+        this.tx.verifyPermanentDeletion(components, statuses, warnings);
         finalizeDeleteBackups(components, statuses, warnings);
         for (DeleteTx.DeleteStatus status : statuses.values()) {
             if (!status.ok) this.kit.audit("delete_failed", status.uuid, null, String.join("; ", status.errors));

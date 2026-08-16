@@ -246,12 +246,21 @@ public final class PanelApiService {
                     pointers.add(text);
                 }
             }
+            Set<String> tracking = new LinkedHashSet<>();
+            JsonArray trackingValues = body.getAsJsonArray("tracking");
+            if (trackingValues != null) {
+                for (var value : trackingValues) {
+                    String text = value.getAsString();
+                    if (!text.matches("[0-9a-f]{16}")) throw new IllegalArgumentException("tracking 含无效值");
+                    tracking.add(text);
+                }
+            }
             Set<UUID> forced = readUuidSet(body, "forced");
             Set<UUID> paused = readUuidSet(body, "paused");
-            int total = pointers.size() + forced.size() + paused.size();
+            int total = pointers.size() + tracking.size() + forced.size() + paused.size();
             if (total == 0 || total > 10_000) throw new IllegalArgumentException("修复项数量无效");
             return enqueue("一致性修复", List.of(), total + " 项",
-                    () -> this.ops.consistency().repair(scanId, pointers, forced, paused));
+                    () -> this.ops.consistency().repair(scanId, pointers, tracking, forced, paused));
         });
     }
 

@@ -3,6 +3,8 @@ package com.klnon.sablepanel.panel.ops;
 import com.klnon.sablepanel.panel.copies.CopyVersionScanner;
 import com.klnon.sablepanel.panel.storage.DiskScanner;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtUtils;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -10,7 +12,9 @@ import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CopyOpsResolutionTest {
     private final UUID target = UUID.randomUUID();
@@ -58,6 +62,41 @@ class CopyOpsResolutionTest {
 
         assertEquals("second", plan.selected().id());
         assertEquals("first", plan.rollback().id());
+    }
+
+    @Test
+    void fullyProvenRepairableCurrentVersionCanBeTheRollbackAndSelection() {
+        CopyVersionScanner.Version repairable = new CopyVersionScanner.Version("repairable", false, 1,
+                this.first.copies(), List.of(), List.of(), Set.of(UUID.randomUUID()));
+        CopyVersionScanner.Scan scan = new CopyVersionScanner.Scan(this.target, Set.of(this.target),
+                List.of(repairable, this.second), List.of(), "repairable",
+                CopyVersionScanner.CurrentState.KNOWN, 1);
+
+        CopyOps.CopyResolutionPlan plan = CopyOps.requireCopyResolution(scan, "repairable", true);
+
+        assertFalse(CopyOps.preSaveAllowed(scan), "可修复路径不能触发任何删除前 saveAll");
+        assertEquals("repairable", plan.selected().id());
+        assertEquals("repairable", plan.rollback().id());
+    }
+
+    @Test
+    void dependencyRepairKeepsOnlySelectedMembersWithoutMutatingTheBackup() {
+        UUID missing = UUID.randomUUID();
+        CompoundTag source = new CompoundTag();
+        ListTag dependencies = new ListTag();
+        dependencies.add(NbtUtils.createUUID(this.target));
+        dependencies.add(NbtUtils.createUUID(missing));
+        source.put("loading_dependencies", dependencies);
+
+        CompoundTag repaired = CopyOps.retainDependencies(source, Set.of(this.target));
+
+        assertEquals(List.of(this.target), DiskScanner.dependencies(repaired));
+        assertEquals(List.of(this.target, missing), DiskScanner.dependencies(source));
+    }
+
+    @Test
+    void completeCurrentVersionStillUsesTheNormalPreSavePath() {
+        assertTrue(CopyOps.preSaveAllowed(scan("first", CopyVersionScanner.CurrentState.KNOWN)));
     }
 
     private static DiskScanner.EntryKey key(int slot) {

@@ -79,6 +79,7 @@ final class DeleteTx {
         final UUID uuid;
         final Set<String> errors = new LinkedHashSet<>();
         final Set<DiskScanner.EntryKey> entryKeys = new LinkedHashSet<>();
+        final Map<DiskScanner.EntryKey, CompoundTag> entryTags = new LinkedHashMap<>();
         String recycleGroup;
         boolean removed;
         boolean alreadyAbsent;
@@ -185,6 +186,7 @@ final class DeleteTx {
         for (UUID uuid : component.targets) {
             for (DeleteCopy copy : component.copies.getOrDefault(uuid, List.of())) {
                 statuses.get(uuid).entryKeys.add(copy.key());
+                statuses.get(uuid).entryTags.put(copy.key(), copy.tag());
             }
         }
         if (componentHasErrors(component, statuses)) return;
@@ -536,7 +538,18 @@ final class DeleteTx {
     }
 
     void verifyDeletedTargets(Map<UUID, DeleteStatus> statuses, List<String> warnings,
-                                      boolean triggerRescan) {
+                              boolean triggerRescan) {
+        verifyDeletedTargets(List.of(), statuses, warnings, triggerRescan, false);
+    }
+
+    void verifyPermanentDeletion(List<DeleteComponent> components, Map<UUID, DeleteStatus> statuses,
+                                 List<String> warnings) {
+        verifyDeletedTargets(components, statuses, warnings, true, true);
+    }
+
+    private void verifyDeletedTargets(List<DeleteComponent> components,
+                                      Map<UUID, DeleteStatus> statuses, List<String> warnings,
+                                      boolean triggerRescan, boolean detachTracking) {
         DiskVerification disk;
         JsonObject runtime;
         try {
@@ -567,9 +580,49 @@ final class DeleteTx {
             if (paused) status.fail("暂停状态仍存在");
             if (forced) status.fail("常驻加载票仍存在");
             if (!status.removed && !status.alreadyAbsent) status.fail("未执行删除");
+        }
+
+        Map<UUID, String> trackingErrors = Map.of();
+        if (detachTracking) {
+            try {
+                trackingErrors = detachDeletedTrackingPoints(components, statuses);
+            } catch (Exception error) {
+                String message = "删除后追踪点验收失败: " + messageOf(error);
+                for (DeleteStatus status : statuses.values()) status.fail(message);
+            }
+        }
+        for (DeleteStatus status : statuses.values()) {
+            if (trackingErrors.containsKey(status.uuid)) status.fail(trackingErrors.get(status.uuid));
             status.ok = status.errors.isEmpty();
         }
         if (triggerRescan) this.kit.rescan.run();
+    }
+
+    private Map<UUID, String> detachDeletedTrackingPoints(List<DeleteComponent> components,
+                                                          Map<UUID, DeleteStatus> statuses) throws Exception {
+        List<Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>>> deletedGroups = new ArrayList<>();
+        for (DeleteComponent component : components) {
+            boolean eligible = component.targets.stream()
+                    .map(statuses::get)
+                    .allMatch(status -> status != null && status.errors.isEmpty()
+                            && (status.removed || status.alreadyAbsent));
+            if (!eligible) continue;
+            Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>> deleted = new LinkedHashMap<>();
+            for (UUID uuid : component.targets) {
+                DeleteStatus status = statuses.get(uuid);
+                if (status.removed) deleted.put(uuid, Map.copyOf(status.entryTags));
+            }
+            if (!deleted.isEmpty()) deletedGroups.add(Map.copyOf(deleted));
+        }
+        if (deletedGroups.isEmpty()) return Map.of();
+        Map<UUID, String> errors = new LinkedHashMap<>();
+        this.kit.onMain(() -> {
+            for (Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>> deleted : deletedGroups) {
+                errors.putAll(TrackingPointService.detachDeletedOnMain(this.kit.server, deleted));
+            }
+            return new JsonObject();
+        });
+        return Map.copyOf(errors);
     }
 
     DiskVerification scanRemainingEntries(Map<UUID, DeleteStatus> statuses, List<String> warnings)
@@ -598,8 +651,13 @@ final class DeleteTx {
 
     DeleteComponent prepareExactDeleteComponent(Set<UUID> targets, List<String> warnings)
             throws Exception {
+        return prepareExactDeleteComponent(targets, warnings, true);
+    }
+
+    DeleteComponent prepareExactDeleteComponent(Set<UUID> targets, List<String> warnings,
+                                                 boolean allowPreSave) throws Exception {
         ScanSession scan = this.kit.strictScan(warnings);
-        if (this.kit.flushUnsavedTargets(new ArrayList<>(targets), scan.meta())) {
+        if (allowPreSave && this.kit.flushUnsavedTargets(new ArrayList<>(targets), scan.meta())) {
             scan = this.kit.strictScan(warnings);
         }
         Map<UUID, List<DeleteCopy>> prepared = readDeleteCopies(scan, targets, warnings);

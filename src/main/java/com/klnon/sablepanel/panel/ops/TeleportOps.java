@@ -79,8 +79,8 @@ public final class TeleportOps {
     public JsonObject setForced(List<UUID> requested, boolean forced) throws Exception {
         // 常驻加载必须整组。只钉一部分是无效操作:PhysicsChunkTicketManager 按整条依赖链判定卸载,
         // 2026-08-08 实测给 192 体组里的一个成员挂票,体加载出来 827 毫秒后照样 remove UNLOADED,
-        // 而作业还报 ok。摘票不受此限 —— 摘一部分是合法意图。
-        List<UUID> uuids = forced ? this.kit.expandToDependencyGroups(requested) : requested;
+        // 而作业还报 ok。挂票和摘票必须保持相同的整组语义。
+        List<UUID> uuids = this.kit.expandToDependencyGroups(requested);
         // 挂票前先冻结:整组留在内存里 tick,物理和方块实体两头都会压垮主线程(实测 40 秒 / 5 分钟)。
         // 冻结连带锁物理(PauseService.shouldHold),用户可事后自行解冻。
         if (forced) {

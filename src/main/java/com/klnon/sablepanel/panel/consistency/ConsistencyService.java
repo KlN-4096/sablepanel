@@ -43,6 +43,7 @@ import com.klnon.sablepanel.panel.MainThread;
 import com.klnon.sablepanel.panel.ops.ForceLoadService;
 import com.klnon.sablepanel.panel.ops.JobService;
 import com.klnon.sablepanel.panel.ops.PauseService;
+import com.klnon.sablepanel.panel.ops.TrackingPointService;
 import com.klnon.sablepanel.panel.storage.ScanSession;
 
 /** Standalone, removable consistency audit and explicit repair for Sable 2.0.3 metadata. */
@@ -105,17 +106,17 @@ public final class ConsistencyService {
         return this.report.toJson();
     }
 
-    public JsonObject repair(String scanId, Set<String> pointerIds,
+    public JsonObject repair(String scanId, Set<String> pointerIds, Set<String> trackingIds,
                              Set<UUID> forced, Set<UUID> paused) throws Exception {
         synchronized (this.opLock) {
-            JsonObject out = repairExclusive(scanId, pointerIds, forced, paused);
+            JsonObject out = repairExclusive(scanId, pointerIds, trackingIds, forced, paused);
             // 修复落盘后触发一次重扫(原 OpsService 包装的职责);修复抛错则不扫
             this.rescan.run();
             return out;
         }
     }
 
-    private JsonObject repairExclusive(String scanId, Set<String> pointerIds,
+    private JsonObject repairExclusive(String scanId, Set<String> pointerIds, Set<String> trackingIds,
                                        Set<UUID> forced, Set<UUID> paused) throws Exception {
         Report shown = this.report;
         if (!shown.ready || !shown.id.equals(scanId)) throw new IllegalStateException("一致性结果已变化，请重新扫描");
@@ -124,15 +125,19 @@ public final class ConsistencyService {
         Map<String, PointerIssue> pointerById = new LinkedHashMap<>();
         for (PointerIssue issue : current.pointers) pointerById.put(issue.id, issue);
         List<PointerIssue> selectedPointers = pointerIds.stream().map(pointerById::get).toList();
+        Map<String, TrackingPointService.Issue> trackingById = new LinkedHashMap<>();
+        for (TrackingPointService.Issue issue : current.tracking) trackingById.put(issue.id(), issue);
+        List<TrackingPointService.Issue> selectedTracking = trackingIds.stream().map(trackingById::get).toList();
         if (selectedPointers.stream().anyMatch(java.util.Objects::isNull)
+                || selectedTracking.stream().anyMatch(java.util.Objects::isNull)
                 || !current.forced.containsAll(forced) || !current.paused.containsAll(paused)) {
             this.report = current;
             throw new IllegalStateException("一致性结果已变化，请查看最新扫描");
         }
-        if (selectedPointers.isEmpty() && forced.isEmpty() && paused.isEmpty()) {
+        if (selectedPointers.isEmpty() && selectedTracking.isEmpty() && forced.isEmpty() && paused.isEmpty()) {
             throw new IllegalArgumentException("没有选择修复项");
         }
-        requirePointerRepairBounded(selectedPointers);
+        requireRepairBounded(selectedPointers, selectedTracking);
 
         RepairAttempt attempt = null;
         Path backup = null;
@@ -144,11 +149,11 @@ public final class ConsistencyService {
             Set<UUID> backupPaused = onMain(() -> eligibleStates(
                     paused, collected.diskUuids, false, skipped));
             Set<Path> backupFiles = onMain(() -> backupFiles(
-                    collected.dimensions, selectedPointers, backupForced, backupPaused));
+                    collected.dimensions, selectedPointers, selectedTracking, backupForced, backupPaused));
             backup = backupMetadata(current.id, backupFiles);
             Set<String> initialSkipped = Set.copyOf(skipped);
             attempt = onMain(() -> repairOnMain(collected.dimensions, selectedPointers,
-                    backupForced, backupPaused, collected.diskUuids, initialSkipped));
+                    selectedTracking, backupForced, backupPaused, collected.diskUuids, initialSkipped));
             operationError = attempt.error;
         } catch (Exception error) {
             operationError = messageOf(error);
@@ -165,25 +170,31 @@ public final class ConsistencyService {
         }
         Set<String> remainingPointers = new LinkedHashSet<>();
         for (PointerIssue issue : verified.pointers) remainingPointers.add(issue.id);
+        Set<String> remainingTracking = new LinkedHashSet<>();
+        for (TrackingPointService.Issue issue : verified.tracking) remainingTracking.add(issue.id());
         Set<String> failedItems = new LinkedHashSet<>();
         if (attempt != null) failedItems.addAll(attempt.skipped);
         if (attempt == null && operationError != null) {
             pointerIds.forEach(id -> failedItems.add("pointer:" + id));
+            trackingIds.forEach(id -> failedItems.add("tracking:" + id));
             forced.forEach(uuid -> failedItems.add("forced:" + uuid));
             paused.forEach(uuid -> failedItems.add("paused:" + uuid));
         }
         for (String id : pointerIds) if (remainingPointers.contains(id)) failedItems.add("pointer:" + id);
+        for (String id : trackingIds) if (remainingTracking.contains(id)) failedItems.add("tracking:" + id);
         for (UUID uuid : forced) if (verified.forced.contains(uuid)) failedItems.add("forced:" + uuid);
         for (UUID uuid : paused) if (verified.paused.contains(uuid)) failedItems.add("paused:" + uuid);
         JsonArray failed = new JsonArray();
         failedItems.forEach(failed::add);
-        int total = pointerIds.size() + forced.size() + paused.size();
+        int total = pointerIds.size() + trackingIds.size() + forced.size() + paused.size();
         int succeeded = total - failed.size();
         JsonObject out = new JsonObject();
         out.addProperty("ok", succeeded);
         out.addProperty("total", total);
         out.addProperty("pointers", selectedPointers.stream()
                 .filter(issue -> !failedItems.contains("pointer:" + issue.id)).mapToInt(PointerIssue::count).sum());
+        out.addProperty("tracking", trackingIds.stream()
+                .filter(id -> !failedItems.contains("tracking:" + id)).count());
         out.addProperty("forced", forced.stream()
                 .filter(uuid -> !failedItems.contains("forced:" + uuid)).count());
         out.addProperty("paused", paused.stream()
@@ -203,15 +214,19 @@ public final class ConsistencyService {
     }
 
     private RepairAttempt repairOnMain(Map<String, Path> dimensions, List<PointerIssue> pointers,
+                                       List<TrackingPointService.Issue> tracking,
                                        Set<UUID> requestedForced, Set<UUID> requestedPaused, Set<UUID> diskUuids,
                                        Set<String> initialSkipped) throws Exception {
         Set<String> skipped = new LinkedHashSet<>(initialSkipped);
         Set<UUID> forced = eligibleStates(requestedForced, diskUuids, true, skipped);
         Set<UUID> paused = eligibleStates(requestedPaused, diskUuids, false, skipped);
         List<PointerIssue> dangling = stillDangling(dimensions, pointers, skipped);
+        Set<DiskScanner.EntryKey> occupiedTracking = DiskScanner.occupiedEntrySlots(
+                dimensions, tracking.stream().map(TrackingPointService.Issue::key).toList());
         String error = null;
         try {
             repairPointersOnMain(dangling);
+            TrackingPointService.removeOnMain(this.server, tracking, occupiedTracking, skipped);
             for (UUID uuid : forced) ForceLoadService.removeOnMain(this.server, uuid);
             if (!paused.isEmpty()) PauseService.applyOnMain(this.server, paused, false);
         } catch (Exception failure) {
@@ -234,9 +249,18 @@ public final class ConsistencyService {
     }
 
     private static void requirePointerRepairBounded(List<PointerIssue> pointers) {
+        requireRepairBounded(pointers, List.of());
+    }
+
+    private static void requireRepairBounded(List<PointerIssue> pointers,
+                                             List<TrackingPointService.Issue> tracking) {
         Set<EntryFileKey> files = new LinkedHashSet<>();
         for (PointerIssue pointer : pointers) {
             DiskScanner.EntryKey key = pointer.key;
+            files.add(new EntryFileKey(key.dim(), key.rx(), key.rz(), key.storage()));
+        }
+        for (TrackingPointService.Issue issue : tracking) {
+            DiskScanner.EntryKey key = issue.key();
             files.add(new EntryFileKey(key.dim(), key.rx(), key.rz(), key.storage()));
         }
         if (files.size() > MAX_FINAL_CHECK_FILES) {
@@ -293,14 +317,17 @@ public final class ConsistencyService {
             Set<UUID> operational = new LinkedHashSet<>(forced);
             operational.addAll(PauseService.snapshot());
             for (UUID uuid : operational) if (runtimeExistsOnMain(uuid)) loaded.add(uuid);
-            return new RuntimeState(loaded, forced);
+            return new RuntimeState(loaded, forced, TrackingPointService.snapshotsOnMain(this.server));
         });
         Set<UUID> existing = new LinkedHashSet<>(scan.meta().keySet());
         existing.addAll(runtime.loaded);
         List<UUID> staleForced = runtime.forced.stream().filter(uuid -> !existing.contains(uuid)).sorted().toList();
         List<UUID> stalePaused = PauseService.snapshot().stream().filter(uuid -> !existing.contains(uuid)).sorted().toList();
-        boolean truncated = allPointers.size() > pointers.size();
-        Report report = new Report(scanId(), true, System.currentTimeMillis(), pointers,
+        List<TrackingPointService.Issue> allTracking = TrackingPointService.stale(runtime.tracking, payloads);
+        int trackingLimit = Math.max(0, MAX_ISSUES - pointers.size());
+        List<TrackingPointService.Issue> tracking = allTracking.stream().limit(trackingLimit).toList();
+        boolean truncated = allPointers.size() > pointers.size() || allTracking.size() > tracking.size();
+        Report report = new Report(scanId(), true, System.currentTimeMillis(), pointers, tracking,
                 staleForced, stalePaused, List.copyOf(new LinkedHashSet<>(warnings)), truncated, null, null);
         return new Collected(report, Map.copyOf(scan.dims()), Set.copyOf(scan.meta().keySet()));
     }
@@ -335,12 +362,17 @@ public final class ConsistencyService {
     }
 
     private Set<Path> backupFiles(Map<String, Path> dimensions, List<PointerIssue> pointers,
+                                  List<TrackingPointService.Issue> tracking,
                                   Set<UUID> forced, Set<UUID> paused) throws IOException {
         Set<Path> files = new LinkedHashSet<>();
         for (PointerIssue issue : pointers) {
             Path directory = dimensions.get(issue.key.dim());
             if (directory != null) files.add(directory.resolve("r." + Math.floorDiv(issue.chunkX, 32)
                     + "." + Math.floorDiv(issue.chunkZ, 32) + ".slvlr"));
+        }
+        for (TrackingPointService.Issue issue : tracking) {
+            ServerLevel level = levelOf(issue.key().dim());
+            if (level != null) files.add(TrackingPointService.dataFile(this.server, level));
         }
         if (!paused.isEmpty()) files.add(FMLPaths.CONFIGDIR.get().resolve("sablepanel").resolve("paused.json"));
         if (!forced.isEmpty()) {
@@ -450,7 +482,8 @@ public final class ConsistencyService {
         }
     }
 
-    private record RuntimeState(Set<UUID> loaded, Set<UUID> forced) {
+    private record RuntimeState(Set<UUID> loaded, Set<UUID> forced,
+                                List<TrackingPointService.Snapshot> tracking) {
     }
 
     private record EntryFileKey(String dimension, int rx, int rz, int storage) {
@@ -490,19 +523,20 @@ public final class ConsistencyService {
     }
 
     private record Report(String id, boolean ready, long scannedAt,
-                          List<PointerIssue> pointers, List<UUID> forced, List<UUID> paused,
+                          List<PointerIssue> pointers, List<TrackingPointService.Issue> tracking,
+                          List<UUID> forced, List<UUID> paused,
                           List<String> warnings, boolean truncated, String error, JsonObject repair) {
         static Report pending() {
-            return new Report("", false, 0, List.of(), List.of(), List.of(), List.of(), false, null, null);
+            return new Report("", false, 0, List.of(), List.of(), List.of(), List.of(), List.of(), false, null, null);
         }
 
         static Report failed(String error) {
-            return new Report(scanId(), true, System.currentTimeMillis(), List.of(), List.of(),
+            return new Report(scanId(), true, System.currentTimeMillis(), List.of(), List.of(), List.of(),
                     List.of(), List.of(), false, error == null ? "一致性扫描失败" : error, null);
         }
 
         Report withRepair(JsonObject value) {
-            return new Report(this.id, this.ready, this.scannedAt, this.pointers, this.forced,
+            return new Report(this.id, this.ready, this.scannedAt, this.pointers, this.tracking, this.forced,
                     this.paused, this.warnings, this.truncated, this.error, value.deepCopy());
         }
 
@@ -514,6 +548,19 @@ public final class ConsistencyService {
             JsonArray pointerArray = new JsonArray();
             this.pointers.forEach(issue -> pointerArray.add(issue.toJson()));
             out.add("dangling_pointers", pointerArray);
+            JsonArray trackingArray = new JsonArray();
+            for (TrackingPointService.Issue issue : this.tracking) {
+                JsonObject item = new JsonObject();
+                item.addProperty("id", issue.id());
+                item.addProperty("tracking_id", issue.trackingId().toString());
+                if (issue.body() != null) item.addProperty("body", issue.body().toString());
+                item.addProperty("target", issue.key().id());
+                item.addProperty("dim", issue.key().dim());
+                item.addProperty("chunk_x", issue.chunkX());
+                item.addProperty("chunk_z", issue.chunkZ());
+                trackingArray.add(item);
+            }
+            out.add("stale_tracking_points", trackingArray);
             JsonArray forcedArray = new JsonArray();
             this.forced.forEach(uuid -> forcedArray.add(uuid.toString()));
             out.add("stale_forced", forcedArray);
@@ -521,7 +568,7 @@ public final class ConsistencyService {
             this.paused.forEach(uuid -> pausedArray.add(uuid.toString()));
             out.add("stale_paused", pausedArray);
             out.addProperty("issue_count", this.pointers.stream().mapToInt(PointerIssue::count).sum()
-                    + this.forced.size() + this.paused.size());
+                    + this.tracking.size() + this.forced.size() + this.paused.size());
             out.addProperty("truncated", this.truncated);
             JsonArray warningArray = new JsonArray();
             this.warnings.forEach(warningArray::add);
