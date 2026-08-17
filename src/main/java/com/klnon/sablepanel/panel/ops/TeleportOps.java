@@ -3,6 +3,7 @@ package com.klnon.sablepanel.panel.ops;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.panel.storage.DiskScanner;
+import com.klnon.sablepanel.panel.storage.ScanSession;
 import dev.ryanhcode.sable.api.SubLevelHelper;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
@@ -35,7 +36,42 @@ import java.util.function.LongSupplier;
 /** 运行态操作:传送/暂停/常驻加载/在线玩家交互。sable 交互全部主线程执行。 */
 public final class TeleportOps {
     private static final double POSITION_EPSILON = 0.1;
+    private static final int FORCE_LOAD_QUIET_TICKS = 5;
+    private static final int FORCE_LOAD_MAX_OBSERVED_TICKS = 100;
+    private static final long FORCE_LOAD_POLL_MILLIS = 50;
     private final OpKit kit;
+
+    record ForceTicketPlan(Set<UUID> keep, Set<UUID> release) {
+    }
+
+    private record ForceEnableResult(JsonObject response, List<UUID> members) {
+    }
+
+    record TicketRef(UUID uuid, String dimension) {
+    }
+
+    record RuntimeObservation(int tick, Set<UUID> members) {
+    }
+
+    @FunctionalInterface
+    interface RuntimeSampler {
+        RuntimeObservation sample() throws Exception;
+    }
+
+    @FunctionalInterface
+    interface WaitStep {
+        void await() throws InterruptedException;
+    }
+
+    @FunctionalInterface
+    interface TicketOperation {
+        void apply(TicketRef ticket) throws Exception;
+    }
+
+    @FunctionalInterface
+    interface TicketCheck {
+        boolean test(TicketRef ticket) throws Exception;
+    }
 
     TeleportOps(OpKit kit) {
         this.kit = kit;
@@ -90,7 +126,7 @@ public final class TeleportOps {
         List<UUID> uuids = selection.members();
         try {
             this.kit.onMain(() -> {
-                this.kit.requirePreparedDependencyGroupsOnMain(selection.components());
+                this.kit.requirePreparedDependencyGroupsOnMain(selection);
                 if (paused) {
                     List<ServerSubLevel> bodies = requireLoadedGroup(uuids);
                     pauseGroupAndStop(uuids, bodies);
@@ -116,18 +152,34 @@ public final class TeleportOps {
      * 加载可能触发区块同步生成,故走不设超时的 {@link OpKit#onMainUntilComplete}。
      */
     public JsonObject setForced(List<UUID> requested, boolean forced) throws Exception {
+        synchronized (this.kit.lock) {
+            return setForcedExclusive(requested, forced);
+        }
+    }
+
+    private JsonObject setForcedExclusive(List<UUID> requested, boolean forced) throws Exception {
         // 常驻加载必须整组。只钉一部分是无效操作:PhysicsChunkTicketManager 按整条依赖链判定卸载,
         // 2026-08-08 实测给 192 体组里的一个成员挂票,体加载出来 827 毫秒后照样 remove UNLOADED,
         // 而作业还报 ok。挂票和摘票必须保持相同的整组语义。
-        OpKit.DependencySelection selection = this.kit.dependencyGroups(requested);
-        List<UUID> uuids = selection.members();
-        JsonObject out = forced ? enableForceLoad(selection) : disableForceLoad(selection);
+        OpKit.DependencySelection selection = forced
+                ? this.kit.forceLoadCandidates(requested)
+                : this.kit.dependencyGroups(requested);
+        List<UUID> uuids;
+        JsonObject out;
+        if (forced) {
+            ForceEnableResult result = enableForceLoad(selection);
+            uuids = result.members();
+            out = result.response();
+        } else {
+            uuids = selection.members();
+            out = disableForceLoad(selection);
+        }
         out.addProperty("requested", requested.size());
         for (UUID uuid : uuids) this.kit.audit(forced ? "force_load" : "force_unload", uuid, null, null);
         return out;
     }
 
-    private JsonObject enableForceLoad(OpKit.DependencySelection selection) throws Exception {
+    private ForceEnableResult enableForceLoad(OpKit.DependencySelection selection) throws Exception {
         List<UUID> uuids = selection.members();
         // 整批一次建链:多选往往是同一个依赖组的成员,分层 BFS 会把它们一趟解完。
         // 逐个建链会把同一批 .slvls 解压 N 遍 —— 全选 178 体的绳链时就是 178 遍。
@@ -139,58 +191,161 @@ public final class TeleportOps {
         Map<UUID, OpKit.MemberPlan> plans = chain;
         // ThreadLocal 到不了主线程,先在作业线程上取出来捕获进 lambda
         JobService.Job job = JobService.current();
-        return this.kit.onMainUntilComplete(() -> {
-            JsonArray failed = new JsonArray();
-            List<ServerSubLevel> newlyTicketed = new ArrayList<>();
-            int done = 0;
-            for (UUID uuid : uuids) {
-                if (job != null) job.phase("挂常驻票");
-                try {
-                    ServerSubLevel body = this.kit.ensureLoaded(uuid, plans);
-                    boolean alreadyForced = ForceLoadService.isForcedOnMain(body);
-                    ForceLoadService.addOnMain(body);
-                    if (!alreadyForced) newlyTicketed.add(body);
-                    done++;
-                } catch (Throwable t) {
-                    JsonObject f = new JsonObject();
-                    f.addProperty("uuid", uuid.toString());
-                    f.addProperty("error", String.valueOf(t.getMessage()));
-                    failed.add(f);
-                }
-            }
-            if (!failed.isEmpty()) {
-                IllegalStateException operationFailure = new IllegalStateException("常驻加载失败: " + failed);
-                for (ServerSubLevel body : newlyTicketed) {
+        List<TicketRef> newlyTicketed = new ArrayList<>();
+        try {
+            this.kit.onMainUntilComplete(() -> {
+                JsonArray failed = new JsonArray();
+                for (UUID uuid : forceLoadAnchors(selection)) {
+                    if (job != null) job.phase("挂常驻票");
                     try {
-                        ForceLoadService.removeStrictOnMain(this.kit.server, body);
-                    } catch (Throwable rollbackFailure) {
-                        operationFailure.addSuppressed(rollbackFailure);
+                        ServerSubLevel body = this.kit.ensureLoaded(uuid, plans);
+                        boolean alreadyForced = ForceLoadService.isForcedOnMain(body);
+                        ForceLoadService.addOnMain(body);
+                        if (!alreadyForced) newlyTicketed.add(ticketRef(body));
+                    } catch (Throwable t) {
+                        JsonObject f = new JsonObject();
+                        f.addProperty("uuid", uuid.toString());
+                        f.addProperty("error", String.valueOf(t.getMessage()));
+                        failed.add(f);
                     }
                 }
-                throw operationFailure;
+                if (!failed.isEmpty()) throw new IllegalStateException("常驻加载失败: " + failed);
+                return null;
+            });
+
+            if (job != null) {
+                job.phase("确认当前运行组");
+                job.detail("等待依赖关系稳定");
+            }
+            Set<UUID> observedMembers = awaitSettledRuntimeMembers(
+                    () -> this.kit.onMainUntilComplete(
+                            () -> new RuntimeObservation(this.kit.server.getTickCount(),
+                                    this.kit.loadedDependencyMembersOnMain(selection.roots()))),
+                    () -> Thread.sleep(FORCE_LOAD_POLL_MILLIS),
+                    FORCE_LOAD_QUIET_TICKS, FORCE_LOAD_MAX_OBSERVED_TICKS);
+
+            Set<UUID> activeMembers = this.kit.onMainUntilComplete(() -> {
+                Set<UUID> keep = new LinkedHashSet<>(observedMembers);
+                keep.addAll(this.kit.loadedDependencyMembersOnMain(selection.roots()));
+                ForceTicketPlan plan = forceTicketPlan(
+                        newlyTicketed.stream().map(TicketRef::uuid).toList(), keep);
+                for (UUID uuid : plan.keep()) {
+                    ServerSubLevel body = this.kit.resolveLoaded(uuid);
+                    if (body == null) throw new IllegalStateException("当前运行组成员已卸载: " + uuid);
+                    if (!ForceLoadService.isForcedOnMain(body)) {
+                        ForceLoadService.addOnMain(body);
+                        newlyTicketed.add(ticketRef(body));
+                    }
+                }
+                for (var iterator = newlyTicketed.iterator(); iterator.hasNext();) {
+                    TicketRef ticket = iterator.next();
+                    if (!plan.release().contains(ticket.uuid())) continue;
+                    ForceLoadService.removeStrictOnMain(
+                            this.kit.server, ticket.dimension(), ticket.uuid());
+                    iterator.remove();
+                }
+                Set<UUID> verified = this.kit.loadedDependencyMembersOnMain(selection.roots());
+                if (!keep.containsAll(verified)) {
+                    throw new IllegalStateException("常驻票收敛后出现未观察到的运行成员");
+                }
+                return Set.copyOf(keep);
+            });
+            JsonObject response = new JsonObject();
+            response.addProperty("ok", true);
+            response.addProperty("forced", true);
+            response.addProperty("count", activeMembers.size());
+            return new ForceEnableResult(response, List.copyOf(activeMembers));
+        } catch (Exception | Error failure) {
+            try {
+                this.kit.onMainUntilComplete(() -> {
+                    rollbackNewTickets(List.copyOf(newlyTicketed),
+                            ticket -> ForceLoadService.removeStrictOnMain(
+                                    this.kit.server, ticket.dimension(), ticket.uuid()),
+                            ticket -> ForceLoadService.isForcedOnMain(
+                                    this.kit.server, ticket.dimension(), ticket.uuid()));
+                    newlyTicketed.clear();
+                    return null;
+                });
+            } catch (Throwable rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        }
+    }
+
+    static List<UUID> forceLoadAnchors(OpKit.DependencySelection selection) {
+        List<UUID> anchors = new ArrayList<>();
+        for (Set<UUID> component : selection.components()) {
+            UUID anchor = selection.roots().stream().filter(component::contains).findFirst()
+                    .orElseGet(() -> component.stream().min(UUID::compareTo).orElseThrow());
+            anchors.add(anchor);
+        }
+        return List.copyOf(anchors);
+    }
+
+    static ForceTicketPlan forceTicketPlan(Collection<UUID> provisional, Collection<UUID> runtime) {
+        Set<UUID> keep = Set.copyOf(runtime);
+        if (keep.isEmpty()) throw new IllegalStateException("当前运行依赖组为空");
+        Set<UUID> release = new LinkedHashSet<>(provisional);
+        release.removeAll(keep);
+        return new ForceTicketPlan(keep, Set.copyOf(release));
+    }
+
+    static Set<UUID> awaitSettledRuntimeMembers(RuntimeSampler sampler, WaitStep waitStep,
+                                                int quietTicks, int maxObservedTicks) throws Exception {
+        Set<UUID> observed = new LinkedHashSet<>();
+        int lastTick = Integer.MIN_VALUE;
+        int ticksWithoutNewMembers = 0;
+        int observedTicks = 0;
+        while (true) {
+            RuntimeObservation current = sampler.sample();
+            if (current.tick() != lastTick) {
+                lastTick = current.tick();
+                observedTicks++;
+                if (observed.addAll(current.members())) ticksWithoutNewMembers = 0;
+                else ticksWithoutNewMembers++;
+                if (ticksWithoutNewMembers >= quietTicks) return Set.copyOf(observed);
+                if (observedTicks >= maxObservedTicks) {
+                    throw new IllegalStateException("当前运行依赖组在观察上限内仍出现新成员，未挂常驻票");
+                }
             }
             try {
-                for (Set<UUID> component : selection.components()) {
-                    this.kit.requireLoadedDependencyGroupOnMain(component);
-                }
-            } catch (Throwable groupFailure) {
-                IllegalStateException operationFailure = new IllegalStateException(
-                        "常驻加载后的运行依赖组与准备结果不一致", groupFailure);
-                for (ServerSubLevel body : newlyTicketed) {
-                    try {
-                        ForceLoadService.removeStrictOnMain(this.kit.server, body);
-                    } catch (Throwable rollbackFailure) {
-                        operationFailure.addSuppressed(rollbackFailure);
-                    }
-                }
-                throw operationFailure;
+                waitStep.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
             }
-            JsonObject o = new JsonObject();
-            o.addProperty("ok", true);
-            o.addProperty("forced", true);
-            o.addProperty("count", done);
-            return o;
-        });
+        }
+    }
+
+    static void rollbackNewTickets(Collection<TicketRef> tickets, TicketOperation remove,
+                                   TicketCheck remains) throws Exception {
+        List<Throwable> failures = new ArrayList<>();
+        for (TicketRef ticket : tickets) {
+            try {
+                remove.apply(ticket);
+            } catch (Throwable failure) {
+                failures.add(failure);
+            }
+        }
+        Set<TicketRef> residual = new LinkedHashSet<>();
+        for (TicketRef ticket : tickets) {
+            try {
+                if (remains.test(ticket)) residual.add(ticket);
+            } catch (Throwable failure) {
+                failures.add(failure);
+                residual.add(ticket);
+            }
+        }
+        if (failures.isEmpty() && residual.isEmpty()) return;
+        IllegalStateException rollbackFailure = new IllegalStateException(
+                "常驻加载失败后的新增票回滚不完整: " + residual);
+        failures.forEach(rollbackFailure::addSuppressed);
+        throw rollbackFailure;
+    }
+
+    private static TicketRef ticketRef(ServerSubLevel body) {
+        return new TicketRef(body.getUniqueId(), body.getLevel().dimension().location().toString());
     }
 
     private JsonObject disableForceLoad(OpKit.DependencySelection selection) throws Exception {
@@ -213,7 +368,7 @@ public final class TeleportOps {
                 finishUnforce(new UnforceActions(
                         () -> {
                             if (job != null) job.phase("清除运行状态");
-                            this.kit.requirePreparedDependencyGroupsOnMain(selection.components());
+                            this.kit.requirePreparedDependencyGroupsOnMain(selection);
                             Set<UUID> otherTickets = new LinkedHashSet<>();
                             for (UUID uuid : uuids) {
                                 if (ForceLoadService.hasOtherTicketOnMain(this.kit.server, uuid)) {
@@ -273,14 +428,14 @@ public final class TeleportOps {
 
     private void verifyStoredAfterUnforce(Collection<UUID> uuids,
                                           Map<UUID, StoredSnapshot> expectedStored,
-                                          Map<UUID, DiskScanner.EntryKey> savedEntries) {
-        DiskScanner.invalidateCache();
-        Map<String, java.nio.file.Path> dimensions = DiskScanner.sublevelDirs(this.kit.server);
+                                          Map<UUID, DiskScanner.EntryKey> savedEntries) throws Exception {
+        ScanSession scan = this.kit.freshScan(new ArrayList<>());
         Set<UUID> mismatched = new LinkedHashSet<>();
         for (var entry : expectedStored.entrySet()) {
-            DiskScanner.EntryKey key = savedEntries.get(entry.getKey());
-            CompoundTag actual = key == null ? null : OpKit.readVerified(dimensions, entry.getKey(), key);
-            if (!entry.getValue().tag().equals(actual)) mismatched.add(entry.getKey());
+            DiskScanner.EntryKey key = matchingStoredEntry(
+                    scan, entry.getKey(), entry.getValue().storedTag(), savedEntries.get(entry.getKey()));
+            if (key == null) mismatched.add(entry.getKey());
+            else savedEntries.put(entry.getKey(), key);
         }
         Set<UUID> alreadyStored = new LinkedHashSet<>(uuids);
         alreadyStored.removeAll(expectedStored.keySet());
@@ -292,6 +447,44 @@ public final class TeleportOps {
         if (!mismatched.isEmpty()) throw new IllegalStateException("取消常驻后磁盘复核失败: " + mismatched);
     }
 
+    private static DiskScanner.EntryKey matchingStoredEntry(
+            ScanSession scan, UUID uuid, CompoundTag expected, DiskScanner.EntryKey preferred) {
+        Map<DiskScanner.EntryKey, CompoundTag> entries = new LinkedHashMap<>();
+        for (DiskScanner.EntryMeta entry : scan.entriesOf(uuid)) {
+            entries.put(entry.key(), OpKit.readVerified(scan.dims(), uuid, entry.key()));
+        }
+        return selectStoredEntry(expected, entries, preferred);
+    }
+
+    static DiskScanner.EntryKey selectStoredEntry(CompoundTag expected,
+                                                   Map<DiskScanner.EntryKey, CompoundTag> entries,
+                                                   DiskScanner.EntryKey preferred) {
+        if (entries.isEmpty()) return null;
+        List<DiskScanner.EntryKey> conflicts = entries.entrySet().stream()
+                .filter(entry -> !storedEntryMatches(expected, entry.getValue()))
+                .map(Map.Entry::getKey).toList();
+        if (!conflicts.isEmpty()) {
+            throw new IllegalStateException("取消常驻后存在内容冲突副本: "
+                    + conflicts.stream().map(DiskScanner.EntryKey::id).toList());
+        }
+        if (preferred != null && entries.containsKey(preferred)) return preferred;
+        return entries.keySet().stream()
+                .min(java.util.Comparator.comparing(DiskScanner.EntryKey::id)).orElse(null);
+    }
+
+    static boolean storedEntryMatches(CompoundTag expected, CompoundTag actual) {
+        if (expected == null || actual == null
+                || !java.util.Objects.equals(OpKit.tagUuid(expected), OpKit.tagUuid(actual))) return false;
+        if (!new LinkedHashSet<>(DiskScanner.dependencies(expected))
+                .equals(new LinkedHashSet<>(DiskScanner.dependencies(actual)))) return false;
+        CompoundTag expectedPlot = expected.getCompound("plot");
+        CompoundTag actualPlot = actual.getCompound("plot");
+        if (expectedPlot.getInt("plot_x") != actualPlot.getInt("plot_x")
+                || expectedPlot.getInt("plot_z") != actualPlot.getInt("plot_z")) return false;
+        return DiskScanner.countBlocks(expectedPlot, null)
+                == DiskScanner.countBlocks(actualPlot, null);
+    }
+
     /**
      * 用户可解冻单个组恢复它的 tick。会崩是常态,所以调用方(前端)必须先弹警告 ——
      * 后端只按体量给出 {@code heavy} 标记,拦不拦由用户决定(不设闸门是既定约定)。
@@ -300,7 +493,7 @@ public final class TeleportOps {
         OpKit.DependencySelection selection = this.kit.dependencyGroups(requested);
         List<UUID> uuids = selection.members();
         this.kit.onMain(() -> {
-            this.kit.requirePreparedDependencyGroupsOnMain(selection.components());
+            this.kit.requirePreparedDependencyGroupsOnMain(selection);
             if (frozen) {
                 requireLoadedGroup(uuids);
             }
@@ -329,7 +522,7 @@ public final class TeleportOps {
                 JsonObject migration = this.kit.onMain(() -> {
                     boolean applied = applyMigrationIfUnchanged(
                             current.revision(), PauseService::revision, () -> {
-                            this.kit.requirePreparedDependencyGroupsOnMain(selection.components());
+                            this.kit.requirePreparedDependencyGroupsOnMain(selection);
                             PauseService.applyOnMain(this.kit.server, expanded, true);
                             for (UUID uuid : expanded) {
                                 ServerSubLevel body = this.kit.resolveLoaded(uuid);
@@ -429,19 +622,22 @@ public final class TeleportOps {
             ChunkPos holdingChunk = new ChunkPos(BlockPos.containing(position.x, position.y, position.z));
             List<UUID> chainUuids = chain.stream().map(ServerSubLevel::getUniqueId).toList();
             for (ServerSubLevel body : chain) {
+                CompoundTag captured = SubLevelSerializer.toData(body, chainUuids).fullTag().copy();
                 expectedStored.put(body.getUniqueId(), new StoredSnapshot(
                         level.dimension().location().toString(), holdingChunk,
-                        body.getLastSerializationPointer(),
-                        SubLevelSerializer.toData(body, chainUuids).fullTag().copy()));
+                        body.getLastSerializationPointer(), captured, captured));
             }
             container.getHoldingChunkMap().moveToUnloaded(anchor, holdingChunk);
             for (ServerSubLevel body : chain) {
                 var holding = container.getHoldingChunkMap().getHoldingSubLevel(body.getUniqueId());
                 if (holding == null) throw new IllegalStateException("物理体卸载后未进入存档队列: "
                         + body.getUniqueId());
-                if (!expectedStored.get(body.getUniqueId()).tag().equals(holding.data().fullTag())) {
+                CompoundTag storedTag = holding.data().fullTag().copy();
+                if (!unloadedSnapshotMatches(body.getUniqueId(), chainUuids, storedTag)) {
                     throw new IllegalStateException("物理体卸载快照不一致: " + body.getUniqueId());
                 }
+                expectedStored.computeIfPresent(body.getUniqueId(),
+                        (ignored, snapshot) -> snapshot.withStoredTag(storedTag));
             }
             touched.add(level);
         }
@@ -467,6 +663,14 @@ public final class TeleportOps {
                 GlobalSavedSubLevelPointer pointer = savedPointer(
                         holding == null ? null : holding.pointer(),
                         loaded == null ? null : loaded.getLastSerializationPointer());
+                if (loaded != null) {
+                    StoredSnapshot snapshot = entry.getValue();
+                    SubLevelData data = SubLevelSerializer.fromData(snapshot.storedTag());
+                    if (data == null) throw new IllegalStateException("无法解析卸载存档: " + uuid);
+                    CompoundTag refreshed = SubLevelSerializer.toData(
+                            loaded, data.dependencies()).fullTag().copy();
+                    expectedStored.put(uuid, snapshot.withStoredTag(refreshed));
+                }
                 if (pointer != null) {
                     savedEntries.put(uuid, OpKit.entryKey(dimension, pointer));
                 }
@@ -546,7 +750,7 @@ public final class TeleportOps {
             GlobalSavedSubLevelPointer pointer = saved == null ? snapshot.pointer()
                     : new GlobalSavedSubLevelPointer(snapshot.holdingChunk(),
                     (short) saved.storage(), (short) saved.index());
-            restoreExactSnapshot(snapshot.tag(), tag -> {
+            restoreExactSnapshot(snapshot.rollbackTag(), tag -> {
                 SubLevelData data = SubLevelSerializer.fromData(tag);
                 if (data == null || !entry.getKey().equals(data.uuid())) {
                     throw new IllegalStateException("取消常驻失败后快照无法解析: " + entry.getKey());
@@ -583,7 +787,8 @@ public final class TeleportOps {
         }
         for (var entry : originallyLoaded.entrySet()) {
             ServerSubLevel body = this.kit.resolveLoaded(entry.getKey());
-            if (body != null && !entry.getValue().tag().equals(serializeSnapshot(body, entry.getValue()))) {
+            if (body != null && !storedSnapshotMatches(
+                    entry.getValue().rollbackTag(), serializeSnapshot(body, entry.getValue()))) {
                 failed.add(entry.getKey());
             }
         }
@@ -591,7 +796,7 @@ public final class TeleportOps {
     }
 
     private static CompoundTag serializeSnapshot(ServerSubLevel body, StoredSnapshot snapshot) {
-        SubLevelData data = SubLevelSerializer.fromData(snapshot.tag());
+        SubLevelData data = SubLevelSerializer.fromData(snapshot.rollbackTag());
         if (data == null) throw new IllegalStateException("无法解析操作前快照: " + body.getUniqueId());
         return SubLevelSerializer.toData(body, data.dependencies()).fullTag();
     }
@@ -610,8 +815,30 @@ public final class TeleportOps {
                                       Function<T, CompoundTag> serializer) {
         T restored = loader.apply(expected.copy());
         CompoundTag actual = serializer.apply(restored);
-        if (!expected.equals(actual)) throw new IllegalStateException("操作前快照恢复后内容不一致");
+        if (!storedSnapshotMatches(expected, actual)) {
+            throw new IllegalStateException("操作前快照恢复后内容不一致");
+        }
         return restored;
+    }
+
+    /** Sable 把依赖当集合使用，但每次 BFS 产出的列表顺序不稳定；其余 NBT 仍逐字段严格比较。 */
+    static boolean storedSnapshotMatches(CompoundTag expected, CompoundTag actual) {
+        if (expected == null || actual == null) return expected == actual;
+        Set<String> keys = new LinkedHashSet<>(expected.getAllKeys());
+        keys.addAll(actual.getAllKeys());
+        keys.remove("loading_dependencies");
+        for (String key : keys) {
+            if (!java.util.Objects.equals(expected.get(key), actual.get(key))) return false;
+        }
+        return new LinkedHashSet<>(DiskScanner.dependencies(expected))
+                .equals(new LinkedHashSet<>(DiskScanner.dependencies(actual)));
+    }
+
+    static boolean unloadedSnapshotMatches(UUID uuid, Collection<UUID> chain, CompoundTag actual) {
+        if (actual == null || !uuid.equals(OpKit.tagUuid(actual))) return false;
+        Set<UUID> expectedDependencies = new LinkedHashSet<>(chain);
+        expectedDependencies.remove(uuid);
+        return expectedDependencies.equals(new LinkedHashSet<>(DiskScanner.dependencies(actual)));
     }
 
     static boolean applyMigrationIfUnchanged(long expectedRevision, LongSupplier currentRevision,
@@ -641,7 +868,12 @@ public final class TeleportOps {
     }
 
     private record StoredSnapshot(String dimension, ChunkPos holdingChunk,
-                                  GlobalSavedSubLevelPointer pointer, CompoundTag tag) {
+                                  GlobalSavedSubLevelPointer pointer,
+                                  CompoundTag rollbackTag, CompoundTag storedTag) {
+        StoredSnapshot withStoredTag(CompoundTag next) {
+            return new StoredSnapshot(this.dimension, this.holdingChunk, this.pointer,
+                    this.rollbackTag, next);
+        }
     }
 
     private record BodyVelocity(ServerSubLevel body, Vector3d linear, Vector3d angular) {

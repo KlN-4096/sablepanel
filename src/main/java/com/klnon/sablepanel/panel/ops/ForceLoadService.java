@@ -93,6 +93,16 @@ public final class ForceLoadService {
         return info != null && info.tickets().stream().anyMatch(ForceLoadService::isPanelTicket);
     }
 
+    static boolean isForcedOnMain(MinecraftServer server, String dimension, UUID uuid) {
+        for (ServerLevel level : server.getAllLevels()) {
+            if (!dimension.equals(level.dimension().location().toString())) continue;
+            ServerSubLevelContainer c = container(level);
+            SubLevelTicketInfo info = c == null ? null : c.getAllTickets().get(uuid);
+            return info != null && info.tickets().stream().anyMatch(ForceLoadService::isPanelTicket);
+        }
+        return false;
+    }
+
     public static Set<UUID> forcedOnMain(MinecraftServer server) {
         Set<UUID> forced = new HashSet<>();
         for (ServerLevel level : server.getAllLevels()) {
@@ -246,17 +256,32 @@ public final class ForceLoadService {
 
     /** 主线程:仅撤回目标体所属容器的新票，不能误删其他维度的异常同 UUID 票。 */
     public static void removeStrictOnMain(MinecraftServer server, ServerSubLevel sl) {
-        UUID uuid = sl.getUniqueId();
-        ServerSubLevelContainer c = container(sl.getLevel());
-        if (c == null) throw new IllegalStateException("常驻票所属容器不存在: " + uuid);
+        removeStrictOnMain(server, sl.getLevel().dimension().location().toString(), sl.getUniqueId());
+    }
+
+    /** 主线程:按本轮记下的精确维度撤票，体在补偿前已经卸载也能完成回滚。 */
+    static void removeStrictOnMain(MinecraftServer server, String dimension, UUID uuid) {
+        ServerLevel level = null;
+        for (ServerLevel candidate : server.getAllLevels()) {
+            if (dimension.equals(candidate.dimension().location().toString())) {
+                level = candidate;
+                break;
+            }
+        }
+        ServerSubLevelContainer c = level == null ? null : container(level);
+        if (c == null) throw new IllegalStateException("常驻票所属容器不存在: " + uuid + " @ " + dimension);
         SubLevelTicketInfo info = c.getAllTickets().get(uuid);
         boolean hadPanelTicket = info != null && info.tickets().stream().anyMatch(ForceLoadService::isPanelTicket);
-        if (!hadPanelTicket) throw new IllegalStateException("待回滚的常驻票不存在: " + uuid);
-        c.removeForceLoadTicket(sl, PANEL_FORCED, Unit.INSTANCE);
+        if (!hadPanelTicket) return;
+        ServerSubLevel sl = OpKit.loadedBody(c, uuid);
+        if (sl != null) c.removeForceLoadTicket(sl, PANEL_FORCED, Unit.INSTANCE);
+        else {
+            info.tickets().removeIf(ForceLoadService::isPanelTicket);
+            SubLevelTicketsSavedData.getOrLoad(level).setDirty();
+        }
         SubLevelTicketInfo remaining = c.getAllTickets().get(uuid);
         if (remaining != null && remaining.tickets().stream().anyMatch(ForceLoadService::isPanelTicket)) {
-            throw new IllegalStateException("常驻票删除后仍残留: " + uuid + " @ "
-                    + sl.getLevel().dimension().location());
+            throw new IllegalStateException("常驻票删除后仍残留: " + uuid + " @ " + dimension);
         }
         if (!isForcedOnMain(server, uuid)) {
             MIRROR.remove(uuid);

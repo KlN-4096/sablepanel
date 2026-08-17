@@ -137,7 +137,7 @@ const T = {
   copyMissing:'缺失依赖', copyQuarantineWarn:(n)=>
     `另有 ${n} 个无法组成完整依赖组的条目。确认主版本后会逐份归档为不可直接恢复的旧版本。`,
   copyGroupSummary:(members,versions)=>`${members} 个关联成员 · ${versions} 个候选版本`,
-  copyRuntimeBasis:(runtime,disk)=>`当前以已加载的 ${runtime} 人运行组为准；磁盘历史闭包为 ${disk} 人。`,
+  copyRuntimeBasis:(runtime,disk)=>`当前以已加载的 ${runtime} 个成员为准；磁盘历史闭包为 ${disk} 个成员。`,
   copyEvidenceMismatchList:(values)=>`待归一活动槽：${values}`,
   copyExternalLinkedList:(values)=>`不参与本次处理的历史关联成员：${values}`,
   copyRuntimeReady:'已识别唯一完整运行组；确认后用当前运行状态重建主版本并归档旧条目。',

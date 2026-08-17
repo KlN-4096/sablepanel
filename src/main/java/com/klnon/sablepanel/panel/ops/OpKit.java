@@ -61,7 +61,7 @@ public final class OpKit {
     record RuntimeSnapshot(String dimension, CompoundTag tag) {
     }
 
-    record DependencySelection(List<UUID> members, List<Set<UUID>> components) {
+    record DependencySelection(List<UUID> roots, List<UUID> members, List<Set<UUID>> components) {
     }
 
     record LoadAttempts(BooleanSupplier selectedCold, BooleanSupplier selectedPrepared,
@@ -74,18 +74,29 @@ public final class OpKit {
     }
 
     DependencySelection dependencyGroups(Collection<UUID> roots) throws Exception {
-        Map<UUID, Set<UUID>> runtime = runtimeDependencyGroups();
+        return dependencyGroups(roots, false);
+    }
+
+    DependencySelection forceLoadCandidates(Collection<UUID> roots) throws Exception {
+        return dependencyGroups(roots, true);
+    }
+
+    private DependencySelection dependencyGroups(Collection<UUID> roots, boolean mergeOverlaps) throws Exception {
+        List<UUID> requested = List.copyOf(new LinkedHashSet<>(roots));
+        Map<UUID, Set<UUID>> runtime = runtimeDependencyGroups(requested);
         Set<UUID> coldRoots = new LinkedHashSet<>();
-        for (UUID root : roots) if (!runtime.containsKey(root)) coldRoots.add(root);
+        for (UUID root : requested) if (!runtime.containsKey(root)) coldRoots.add(root);
         Map<UUID, List<DiskScanner.EntryMeta>> disk = Map.of();
         if (!coldRoots.isEmpty()) disk = strictScan(new ArrayList<>()).meta();
         Set<UUID> unknown = new LinkedHashSet<>();
         for (UUID root : coldRoots) if (!disk.containsKey(root)) unknown.add(root);
         if (!unknown.isEmpty()) throw new IllegalStateException("依赖组根成员不存在: " + unknown);
-        List<Set<UUID>> components = selectDependencyGroupSets(roots, disk, runtime);
+        List<Set<UUID>> components = mergeOverlaps
+                ? selectForceLoadGroupSets(requested, disk, runtime)
+                : selectDependencyGroupSets(requested, disk, runtime);
         LinkedHashSet<UUID> members = new LinkedHashSet<>();
         components.forEach(members::addAll);
-        return new DependencySelection(List.copyOf(members), components);
+        return new DependencySelection(requested, List.copyOf(members), components);
     }
 
     static List<UUID> selectDependencyGroups(Collection<UUID> roots,
@@ -121,8 +132,38 @@ public final class OpKit {
         return List.copyOf(groups);
     }
 
+    static List<Set<UUID>> selectForceLoadGroupSets(Collection<UUID> roots,
+                                                    Map<UUID, List<DiskScanner.EntryMeta>> disk,
+                                                    Map<UUID, Set<UUID>> runtime) {
+        List<Set<UUID>> groups = new ArrayList<>();
+        for (UUID root : roots) {
+            Set<UUID> selected = selectDependencyGroupSets(List.of(root), disk, runtime).get(0);
+            Set<UUID> merged = new LinkedHashSet<>(selected);
+            for (var iterator = groups.iterator(); iterator.hasNext();) {
+                Set<UUID> existing = iterator.next();
+                if (java.util.Collections.disjoint(existing, merged)) continue;
+                merged.addAll(existing);
+                iterator.remove();
+            }
+            groups.add(Set.copyOf(merged));
+        }
+        return List.copyOf(groups);
+    }
+
     Set<UUID> runtimeDependencyGroup(UUID root) throws Exception {
-        return runtimeDependencyGroups().getOrDefault(root, Set.of());
+        return runtimeDependencyGroups(List.of(root)).getOrDefault(root, Set.of());
+    }
+
+    Set<UUID> loadedDependencyMembersOnMain(Collection<UUID> roots) {
+        Set<UUID> members = new LinkedHashSet<>();
+        Set<UUID> missing = new LinkedHashSet<>();
+        for (UUID root : new LinkedHashSet<>(roots)) {
+            ServerSubLevel body = resolveLoaded(root);
+            if (body == null) missing.add(root);
+            else members.addAll(loadingDependencyUuids(body));
+        }
+        if (!missing.isEmpty()) throw new IllegalStateException("运行依赖组根成员未加载: " + missing);
+        return Set.copyOf(members);
     }
 
     void requireLoadedDependencyGroupOnMain(Collection<UUID> expectedMembers) {
@@ -141,10 +182,19 @@ public final class OpKit {
         requireExactRuntimeGroup(expected, actual, missing);
     }
 
-    void requirePreparedDependencyGroupsOnMain(Collection<Set<UUID>> components) {
-        for (Set<UUID> component : components) {
+    void requirePreparedDependencyGroupsOnMain(DependencySelection selection) {
+        for (Set<UUID> component : selection.components()) {
             boolean anyLoaded = component.stream().anyMatch(uuid -> resolveLoaded(uuid) != null);
-            if (anyLoaded) requireLoadedDependencyGroupOnMain(component);
+            if (!anyLoaded) continue;
+            Set<UUID> actual = new LinkedHashSet<>();
+            Set<UUID> missing = new LinkedHashSet<>();
+            for (UUID root : selection.roots()) {
+                if (!component.contains(root)) continue;
+                ServerSubLevel body = resolveLoaded(root);
+                if (body == null) missing.add(root);
+                else actual.addAll(loadingDependencyUuids(body));
+            }
+            requireExactRuntimeGroup(component, actual, missing);
         }
     }
 
@@ -183,37 +233,35 @@ public final class OpKit {
         });
     }
 
-    private Map<UUID, Set<UUID>> runtimeDependencyGroups() throws Exception {
-        return MainThread.on(this.server, 20, () -> {
-            Map<UUID, Set<UUID>> groups = new LinkedHashMap<>();
-            List<ServerSubLevel> loaded = new ArrayList<>();
-            for (ServerLevel level : this.server.getAllLevels()) {
-                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
-                if (container == null) continue;
-                loaded.addAll(List.copyOf(container.getAllSubLevels()));
+    private Map<UUID, Set<UUID>> runtimeDependencyGroups(Collection<UUID> roots) throws Exception {
+        return MainThread.on(this.server, 20, () -> runtimeDependencyGroupsOnMain(roots));
+    }
+
+    private Map<UUID, Set<UUID>> runtimeDependencyGroupsOnMain(Collection<UUID> roots) {
+        Map<UUID, ServerSubLevel> loaded = new LinkedHashMap<>();
+        for (ServerLevel level : this.server.getAllLevels()) {
+            ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+            if (container == null) continue;
+            for (ServerSubLevel body : List.copyOf(container.getAllSubLevels())) {
+                ServerSubLevel previous = loaded.putIfAbsent(body.getUniqueId(), body);
+                if (previous != null) throw new IllegalStateException("运行态存在重复 UUID: " + body.getUniqueId());
             }
-            Set<UUID> loadedUuids = new LinkedHashSet<>();
-            for (ServerSubLevel body : loaded) {
-                if (!loadedUuids.add(body.getUniqueId())) {
-                    throw new IllegalStateException("运行态存在重复 UUID: " + body.getUniqueId());
-                }
-            }
-            for (ServerSubLevel body : loaded) {
-                if (groups.containsKey(body.getUniqueId())) continue;
-                Set<UUID> component = new LinkedHashSet<>();
-                for (ServerSubLevel member : SubLevelHelper.getLoadingDependencyChain(body)) {
-                    component.add(member.getUniqueId());
-                }
-                Set<UUID> immutable = Set.copyOf(component);
-                for (UUID uuid : component) {
-                    Set<UUID> previous = groups.putIfAbsent(uuid, immutable);
-                    if (previous != null && !previous.equals(immutable)) {
-                        throw new IllegalStateException("运行依赖组不一致: " + uuid);
-                    }
-                }
-            }
-            return Map.copyOf(groups);
-        });
+        }
+        Map<UUID, Set<UUID>> groups = new LinkedHashMap<>();
+        for (UUID root : new LinkedHashSet<>(roots)) {
+            ServerSubLevel body = loaded.get(root);
+            if (body != null) groups.put(root, loadingDependencyUuids(body));
+        }
+        return Map.copyOf(groups);
+    }
+
+    private static Set<UUID> loadingDependencyUuids(ServerSubLevel anchor) {
+        if (anchor == null) return Set.of();
+        Set<UUID> members = new LinkedHashSet<>();
+        for (ServerSubLevel member : SubLevelHelper.getLoadingDependencyChain(anchor)) {
+            members.add(member.getUniqueId());
+        }
+        return Set.copyOf(members);
     }
 
     ScanSession freshScan(List<String> warnings) throws Exception {
@@ -510,17 +558,25 @@ public final class OpKit {
     ServerSubLevel ensureLoaded(UUID uuid, Map<UUID, MemberPlan> chain) {
         ServerSubLevel sl = resolveLoaded(uuid);
         if (sl != null) return sl;
-        for (Map.Entry<UUID, MemberPlan> en : chain.entrySet()) {
-            if (resolveLoaded(en.getKey()) != null) continue;
+        for (UUID candidate : loadOrder(uuid, chain.keySet())) {
+            if (resolveLoaded(candidate) != null) continue;
             try {
-                loadOne(en.getKey(), en.getValue());
+                loadOne(candidate, chain.get(candidate));
             } catch (Throwable t) {
-                SablePanel.LOGGER.warn("sablepanel: chain load {} failed", en.getKey(), t);
+                SablePanel.LOGGER.warn("sablepanel: chain load {} failed", candidate, t);
             }
+            sl = resolveLoaded(uuid);
+            if (sl != null) return sl;
         }
-        sl = resolveLoaded(uuid);
         if (sl == null) throw new IllegalStateException("无法加载该物理体(条目缺失或 sable 拒绝加载,详见服务器日志)");
         return sl;
+    }
+
+    static List<UUID> loadOrder(UUID root, Collection<UUID> candidates) {
+        LinkedHashSet<UUID> ordered = new LinkedHashSet<>();
+        if (candidates.contains(root)) ordered.add(root);
+        ordered.addAll(candidates);
+        return List.copyOf(ordered);
     }
 
     /** 主线程:单体加载。选定活指针 → 选定条目收养 → 同内容旧 holding 兜底。 */
@@ -536,8 +592,13 @@ public final class OpKit {
                 GlobalSavedSubLevelPointer pointer = new GlobalSavedSubLevelPointer(
                         new ChunkPos(plan.cold().chunkX(), plan.cold().chunkZ()),
                         (short) plan.cold().key().storage(), (short) plan.cold().key().index());
-                if (attemptedPointers.add(pointer)) selected.getHoldingChunkMap().snatchAndLoad(pointer, uuid);
-                return resolveLoaded(uuid) != null;
+                HoldingSubLevel holding = selected.getHoldingChunkMap().getHoldingSubLevel(uuid);
+                if (!samePointer(pointer, holding == null ? null : holding.pointer())) return false;
+                return loadNow(() -> {
+                    if (attemptedPointers.add(pointer)) {
+                        selected.getHoldingChunkMap().snatchAndLoad(pointer, uuid);
+                    }
+                }, selected.getHoldingChunkMap()::processChanges, () -> resolveLoaded(uuid) != null);
             } catch (Throwable t) {
                 SablePanel.LOGGER.warn("sablepanel: selected snatch {} failed", uuid, t);
                 return false;
@@ -574,6 +635,12 @@ public final class OpKit {
         return false;
     }
 
+    static boolean loadNow(Runnable enqueue, Runnable drain, BooleanSupplier loaded) {
+        enqueue.run();
+        if (!loaded.getAsBoolean()) drain.run();
+        return loaded.getAsBoolean();
+    }
+
     static boolean loadSelectedFirst(boolean occupied, LoadAttempts attempts) {
         if (occupied) return false;
         if (attempts.selectedCold() != null && attempts.selectedCold().getAsBoolean()) return true;
@@ -583,6 +650,10 @@ public final class OpKit {
 
     static boolean matchingHolding(CompoundTag selected, CompoundTag holding, boolean occupied) {
         return !occupied && selected.equals(holding);
+    }
+
+    static boolean samePointer(GlobalSavedSubLevelPointer selected, GlobalSavedSubLevelPointer holding) {
+        return selected != null && selected.equals(holding);
     }
 
     static boolean plotOccupiedByOther(ServerSubLevelContainer container, CompoundTag tag, UUID uuid) {
@@ -690,11 +761,11 @@ public final class OpKit {
         SablePanel.LOGGER.info("sablepanel: panel op {} {} ({})", op, uuid, name);
     }
 
-    JsonObject onMain(Callable<JsonObject> task) throws Exception {
+    <T> T onMain(Callable<T> task) throws Exception {
         return MainThread.on(this.server, 20, task);
     }
 
-    JsonObject onMainUntilComplete(Callable<JsonObject> task) throws Exception {
+    <T> T onMainUntilComplete(Callable<T> task) throws Exception {
         return MainThread.onUntilComplete(this.server, task);
     }
 }

@@ -1,9 +1,12 @@
 package com.klnon.sablepanel.panel.ops;
 
+import com.klnon.sablepanel.panel.storage.DiskScanner;
 import dev.ryanhcode.sable.companion.math.Pose3d;
 import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtUtils;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
 import org.junit.jupiter.api.AfterEach;
@@ -11,11 +14,14 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -214,6 +220,64 @@ class PauseServiceAnchorTest {
     }
 
     @Test
+    void unloadSnapshotTreatsDependencyOrderAsSet() {
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        CompoundTag expected = snapshotWithDependencies(first, second);
+        CompoundTag reordered = snapshotWithDependencies(second, first);
+
+        assertDoesNotThrow(() -> TeleportOps.restoreExactSnapshot(
+                expected, ignored -> reordered, CompoundTag::copy));
+    }
+
+    @Test
+    void unloadAcceptsFreshStoredContentButRejectsIdentityOrDependencyChanges() {
+        UUID body = UUID.randomUUID();
+        UUID dependency = UUID.randomUUID();
+        CompoundTag stored = snapshotWithDependencies(dependency);
+        stored.putUUID("uuid", body);
+        stored.putString("plot", "new runtime content");
+
+        assertTrue(TeleportOps.unloadedSnapshotMatches(body, List.of(body, dependency), stored));
+        assertFalse(TeleportOps.unloadedSnapshotMatches(UUID.randomUUID(),
+                List.of(body, dependency), stored));
+        assertFalse(TeleportOps.unloadedSnapshotMatches(body,
+                List.of(body, UUID.randomUUID()), stored));
+    }
+
+    @Test
+    void storedEntryVerificationAllowsRuntimeChangesButRejectsWrongPlot() {
+        UUID body = UUID.randomUUID();
+        UUID dependency = UUID.randomUUID();
+        CompoundTag expected = storedEntry(body, dependency, 4, 7, 1);
+        CompoundTag runtimeChanged = storedEntry(body, dependency, 4, 7, 99);
+
+        assertTrue(TeleportOps.storedEntryMatches(expected, runtimeChanged));
+        assertFalse(TeleportOps.storedEntryMatches(expected,
+                storedEntry(body, dependency, 5, 7, 99)));
+        assertFalse(TeleportOps.storedEntryMatches(expected,
+                storedEntry(UUID.randomUUID(), dependency, 4, 7, 99)));
+    }
+
+    @Test
+    void storedEntrySelectionRejectsOneMatchingAndOneConflictingCopy() {
+        UUID body = UUID.randomUUID();
+        UUID dependency = UUID.randomUUID();
+        CompoundTag expected = storedEntry(body, dependency, 4, 7, 1);
+        DiskScanner.EntryKey first = new DiskScanner.EntryKey(
+                "minecraft:overworld", 0, -7, 0, 1);
+        DiskScanner.EntryKey second = new DiskScanner.EntryKey(
+                "minecraft:overworld", 0, -7, 0, 2);
+
+        assertThrows(IllegalStateException.class, () -> TeleportOps.selectStoredEntry(
+                expected, Map.of(first, storedEntry(body, dependency, 4, 7, 2),
+                        second, storedEntry(body, dependency, 5, 7, 3)), first));
+        assertEquals(first, TeleportOps.selectStoredEntry(expected,
+                Map.of(first, storedEntry(body, dependency, 4, 7, 2),
+                        second, storedEntry(body, dependency, 4, 7, 3)), first));
+    }
+
+    @Test
     void rollbackVerificationRequiresTheFullRuntimeSnapshot() {
         CompoundTag expected = new CompoundTag();
         expected.putString("plot", "blocks");
@@ -229,6 +293,29 @@ class PauseServiceAnchorTest {
                 expected, ignored -> moved, CompoundTag::copy));
         assertThrows(IllegalStateException.class, () -> TeleportOps.restoreExactSnapshot(
                 expected, ignored -> changed, CompoundTag::copy));
+    }
+
+    private static CompoundTag snapshotWithDependencies(UUID... dependencies) {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("plot", "same");
+        ListTag values = new ListTag();
+        for (UUID dependency : dependencies) values.add(NbtUtils.createUUID(dependency));
+        tag.put("loading_dependencies", values);
+        return tag;
+    }
+
+    private static CompoundTag storedEntry(UUID uuid, UUID dependency,
+                                           int plotX, int plotZ, int runtimeValue) {
+        CompoundTag tag = snapshotWithDependencies(dependency);
+        tag.putUUID("uuid", uuid);
+        CompoundTag plot = new CompoundTag();
+        plot.putInt("plot_x", plotX);
+        plot.putInt("plot_z", plotZ);
+        tag.put("plot", plot);
+        CompoundTag pose = new CompoundTag();
+        pose.putInt("runtime", runtimeValue);
+        tag.put("pose", pose);
+        return tag;
     }
 
     @Test
