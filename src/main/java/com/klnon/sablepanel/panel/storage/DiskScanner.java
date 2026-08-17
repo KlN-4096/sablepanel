@@ -396,7 +396,7 @@ public final class DiskScanner {
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
             long fileSize = channel.size();
             ByteBuffer header = ByteBuffer.allocate(4096);
-            if (fileSize < 4096) {
+            if (fileSize < 4096 && !emptyPointerContainer(file, fileSize)) {
                 addStrictWarning(warnings, "存储头截断(" + fileSize + " 字节): " + file.getFileName()
                         + ",已按可读前缀处理;建议停服备份后删除该文件");
             }
@@ -507,7 +507,8 @@ public final class DiskScanner {
     private static void forEachEntry(Path file, Path dir, int rx, int rz, int sectorSize, EntryConsumer consumer) {
         try (FileChannel ch = FileChannel.open(file, StandardOpenOption.READ)) {
             long fileSize = ch.size();
-            if (fileSize < 4096 && rememberTruncatedPath(file.toAbsolutePath().toString())) {
+            if (fileSize < 4096 && !emptyPointerContainer(file, fileSize)
+                    && rememberTruncatedPath(file.toAbsolutePath().toString())) {
                 SablePanel.LOGGER.warn("sablepanel: 存储头截断({} 字节),与 sable 相同仅可读前缀有效,"
                         + "建议停服备份后删除该文件: {}", fileSize, file);
             }
@@ -545,6 +546,10 @@ public final class DiskScanner {
             }
             return WARNED_TRUNCATED.add(path);
         }
+    }
+
+    private static boolean emptyPointerContainer(Path file, long fileSize) {
+        return fileSize == 0 && SLVLR.matcher(file.getFileName().toString()).matches();
     }
 
     /**

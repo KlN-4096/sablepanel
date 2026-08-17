@@ -131,6 +131,22 @@ class DiskScannerCorruptionTest {
     }
 
     @Test
+    void zeroBytePointerFileIsANormalEmptyContainer() throws Exception {
+        Path dir = dimDir();
+        DiskScanner.EntryKey target = new DiskScanner.EntryKey(DIM, 0, 0, 0, 5);
+        writeStorageFile(dir.resolve("r.0.0.slvlr"), 128,
+                Map.of(7, gzipNbt(pointerTag(5))));
+        Files.createFile(dir.resolve("r.-175.-80.slvlr"));
+
+        List<String> warnings = new ArrayList<>();
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> located =
+                DiskScanner.locatePointersStrict(Map.of(DIM, dir), Set.of(target), warnings);
+
+        assertEquals(1, located.getOrDefault(target, List.of()).size());
+        assertTrue(warnings.isEmpty(), "Sable 会把 0 字节 .slvlr 当作空容器: " + warnings);
+    }
+
+    @Test
     void zeroByteStorageFileYieldsWarningNotFailure() throws Exception {
         Path dir = dimDir();
         UUID alive = UUID.randomUUID();
