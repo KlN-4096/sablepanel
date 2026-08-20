@@ -148,6 +148,33 @@ class PauseServiceAnchorTest {
     }
 
     @Test
+    void teleportDiskVerificationUsesTheSamePositionTolerance() {
+        var current = new com.klnon.sablepanel.panel.storage.DiskScanner.EntryKey("overworld", 0, 0, 0, 1);
+        var stale = new com.klnon.sablepanel.panel.storage.DiskScanner.EntryKey("overworld", 0, 0, 0, 2);
+        assertTrue(TeleportOps.positionMatches(new double[]{10.05, 20.05, 30.05}, 10, 20, 30));
+        assertFalse(TeleportOps.positionMatches(new double[]{10.11, 20, 30}, 10, 20, 30));
+        assertFalse(TeleportOps.positionMatches(new double[]{10, 20}, 10, 20, 30));
+        assertTrue(TeleportOps.entryPositionMatches(current.id(), current,
+                new double[]{10, 20, 30}, 10, 20, 30));
+        assertFalse(TeleportOps.entryPositionMatches(current.id(), stale,
+                new double[]{10, 20, 30}, 10, 20, 30));
+    }
+
+    @Test
+    void teleportDiskVerificationFailureRunsTheMoveRollback() {
+        List<String> calls = new ArrayList<>();
+
+        assertThrows(IllegalStateException.class, () -> PauseService.moveWithConstraint(false,
+                () -> calls.add("detach"), new PauseService.MoveActions(
+                        () -> TeleportOps.finishPersistence(() -> calls.add("persist"), () -> {
+                            calls.add("verify");
+                            throw new IllegalStateException("disk mismatch");
+                        }), () -> true, () -> calls.add("rollback"))));
+
+        assertEquals(List.of("persist", "verify", "rollback"), calls);
+    }
+
+    @Test
     void cancelForceLoadReturnsTheGroupToDiskBeforeReportingSuccess() {
         List<String> calls = new ArrayList<>();
 

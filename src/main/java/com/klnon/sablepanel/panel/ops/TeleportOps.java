@@ -14,6 +14,7 @@ import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
 import dev.ryanhcode.sable.sublevel.storage.holding.GlobalSavedSubLevelPointer;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelData;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelSerializer;
+import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelStorage;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import dev.ryanhcode.sable.util.SableNBTUtils;
 import net.minecraft.core.BlockPos;
@@ -79,7 +80,7 @@ public final class TeleportOps {
 
     public JsonObject teleport(UUID uuid, double x, double y, double z) throws Exception {
         Map<UUID, OpKit.MemberPlan> chain = this.kit.prepareChain(uuid);
-        JsonObject result = this.kit.onMain(() -> {
+        JsonObject result = this.kit.onMainUntilComplete(() -> {
             ServerSubLevel sl = this.kit.ensureLoaded(uuid, chain);
             ServerLevel level = sl.getLevel();
             SubLevelPhysicsSystem phys = SubLevelPhysicsSystem.get(level);
@@ -99,11 +100,13 @@ public final class TeleportOps {
                         finishMove(() -> pipeline.teleport(sl, target, orientation),
                                 () -> pipeline.resetVelocity(sl), () -> updatePoseAndBounds(sl));
                         requirePosition(sl, x, y, z);
+                        persistLoadedBody(sl, x, y, z);
                     },
                     () -> {
                         finishMove(() -> pipeline.teleport(sl, original.position(), original.orientation()),
                                 () -> pipeline.resetVelocity(sl), () -> updatePoseAndBounds(sl));
                         requirePosition(sl, sourceAnchor.x, sourceAnchor.y, sourceAnchor.z);
+                        persistLoadedBody(sl, sourceAnchor.x, sourceAnchor.y, sourceAnchor.z);
                     });
             this.kit.audit("teleport", uuid, sl.getName(), x + "," + y + "," + z);
             String dim = level.dimension().location().toString();
@@ -118,6 +121,53 @@ public final class TeleportOps {
         });
         this.kit.rescan.run();
         return result;
+    }
+
+    private static void persistLoadedBody(ServerSubLevel body, double x, double y, double z) {
+        ServerLevel level = body.getLevel();
+        ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (container == null) throw new IllegalStateException("物理体容器不存在");
+        GlobalSavedSubLevelPointer pointer = body.getLastSerializationPointer();
+        if (pointer == null) throw new IllegalStateException("传送保存前缺少活动磁盘条目");
+        List<UUID> dependencies = new ArrayList<>();
+        for (ServerSubLevel member : SubLevelHelper.getLoadingDependencyChain(body)) {
+            dependencies.add(member.getUniqueId());
+        }
+        SubLevelData data = SubLevelSerializer.toData(body, dependencies);
+        SubLevelStorage storage = container.getHoldingChunkMap().getStorage();
+        DiskScanner.EntryKey key = OpKit.entryKey(level.dimension().location().toString(), pointer);
+        finishPersistence(() -> {
+            storage.attemptSaveSubLevel(pointer, data);
+            try {
+                storage.flush();
+            } catch (java.io.IOException error) {
+                throw new IllegalStateException("传送磁盘写入失败", error);
+            }
+        }, () -> {
+            CompoundTag stored = OpKit.readVerified(DiskScanner.sublevelDirs(level.getServer()),
+                    body.getUniqueId(), key);
+            DiskScanner.DiskEntry summary = stored == null ? null : DiskScanner.summarize(key, stored);
+            if (summary == null || !positionMatches(summary.pos(), x, y, z)) {
+                throw new IllegalStateException("传送磁盘复核失败: " + key.id());
+            }
+        });
+    }
+
+    static void finishPersistence(Runnable persist, Runnable verify) {
+        persist.run();
+        verify.run();
+    }
+
+    static boolean positionMatches(double[] position, double x, double y, double z) {
+        return position != null && position.length == 3
+                && Math.abs(position[0] - x) <= POSITION_EPSILON
+                && Math.abs(position[1] - y) <= POSITION_EPSILON
+                && Math.abs(position[2] - z) <= POSITION_EPSILON;
+    }
+
+    static boolean entryPositionMatches(String expectedEntry, DiskScanner.EntryKey entry,
+                                        double[] position, double x, double y, double z) {
+        return expectedEntry != null && expectedEntry.equals(entry.id()) && positionMatches(position, x, y, z);
     }
 
     /** 整组物理暂停/恢复；暂停成功后清除组内全部线速度和角速度。 */
