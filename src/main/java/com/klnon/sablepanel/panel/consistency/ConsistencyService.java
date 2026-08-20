@@ -246,6 +246,7 @@ public final class ConsistencyService {
             String saveError = "保存修复元数据失败: " + messageOf(failure);
             error = error == null ? saveError : error + "; " + saveError;
         }
+        ForceLoadService.persist();
         return new RepairAttempt(Set.copyOf(skipped), error);
     }
 

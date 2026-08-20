@@ -62,6 +62,7 @@ public final class RestoreOps {
             });
         } finally {
             PauseService.persist();
+            ForceLoadService.persist();
         }
         this.tx.requireTargetsAbsent(targets, warnings);
     }
@@ -159,6 +160,7 @@ public final class RestoreOps {
             });
         } finally {
             PauseService.persist();
+            ForceLoadService.persist();
         }
         // 同一趟扫描顺路建 plot 槽位占用表:删除释放的槽位会被 sable 按首位适配复用给新体,
         // 而恢复用的 allocateSubLevel 只查加载态 —— 不拦下来就会造出"同槽双体"(加载互斥)
@@ -224,6 +226,7 @@ public final class RestoreOps {
             });
         } finally {
             if (!paused.isEmpty()) PauseService.persist();
+            ForceLoadService.persist();
         }
     }
 

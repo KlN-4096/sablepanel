@@ -33,6 +33,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /** 运行态操作:传送/暂停/常驻加载/在线玩家交互。sable 交互全部主线程执行。 */
 public final class TeleportOps {
@@ -203,8 +204,39 @@ public final class TeleportOps {
      */
     public JsonObject setForced(List<UUID> requested, boolean forced) throws Exception {
         synchronized (this.kit.lock) {
-            return setForcedExclusive(requested, forced);
+            try {
+                return setForcedExclusive(requested, forced);
+            } finally {
+                ForceLoadService.persist();
+            }
         }
+    }
+
+    public void restoreForcedIntents(List<UUID> candidates) throws Exception {
+        restoreForcedIntents(this.kit.lock, candidates, ForceLoadService::requestedSnapshot,
+                current -> setForcedExclusive(current, true), ForceLoadService::persist);
+    }
+
+    static void restoreForcedIntents(Object lock, Collection<UUID> candidates,
+                                     Supplier<Set<UUID>> requested, ForcedIntentRestorer restore,
+                                     Runnable persist) throws Exception {
+        synchronized (lock) {
+            try {
+                List<UUID> current = requestedRestoreCandidates(candidates, requested.get());
+                if (!current.isEmpty()) restore.run(current);
+            } finally {
+                persist.run();
+            }
+        }
+    }
+
+    static List<UUID> requestedRestoreCandidates(Collection<UUID> candidates, Set<UUID> requested) {
+        return candidates.stream().filter(requested::contains).distinct().toList();
+    }
+
+    @FunctionalInterface
+    interface ForcedIntentRestorer {
+        void run(List<UUID> requested) throws Exception;
     }
 
     private JsonObject setForcedExclusive(List<UUID> requested, boolean forced) throws Exception {
@@ -239,13 +271,14 @@ public final class TeleportOps {
         List<UUID> cold = uuids.stream().filter(u -> !this.kit.index.isLoaded(u)).toList();
         if (!cold.isEmpty()) chain = this.kit.prepareChain(cold); // 作业线程做磁盘定位,不占主线程
         Map<UUID, OpKit.MemberPlan> plans = chain;
+        List<UUID> anchors = forceLoadAnchors(selection);
         // ThreadLocal 到不了主线程,先在作业线程上取出来捕获进 lambda
         JobService.Job job = JobService.current();
         List<TicketRef> newlyTicketed = new ArrayList<>();
         try {
             this.kit.onMainUntilComplete(() -> {
                 JsonArray failed = new JsonArray();
-                for (UUID uuid : forceLoadAnchors(selection)) {
+                for (UUID uuid : anchors) {
                     if (job != null) job.phase("挂常驻票");
                     try {
                         ServerSubLevel body = this.kit.ensureLoaded(uuid, plans);
@@ -267,16 +300,13 @@ public final class TeleportOps {
                 job.phase("确认当前运行组");
                 job.detail("等待依赖关系稳定");
             }
-            Set<UUID> observedMembers = awaitSettledRuntimeMembers(
-                    () -> this.kit.onMainUntilComplete(
-                            () -> new RuntimeObservation(this.kit.server.getTickCount(),
-                                    this.kit.loadedDependencyMembersOnMain(selection.roots()))),
+            awaitSettledRuntimeMembers(
+                    () -> this.kit.onMainUntilComplete(() -> observeAndTicketOnMain(anchors, newlyTicketed)),
                     () -> Thread.sleep(FORCE_LOAD_POLL_MILLIS),
                     FORCE_LOAD_QUIET_TICKS, FORCE_LOAD_MAX_OBSERVED_TICKS);
 
             Set<UUID> activeMembers = this.kit.onMainUntilComplete(() -> {
-                Set<UUID> keep = new LinkedHashSet<>(observedMembers);
-                keep.addAll(this.kit.loadedDependencyMembersOnMain(selection.roots()));
+                Set<UUID> keep = new LinkedHashSet<>(this.kit.loadedDependencyMembersOnMain(anchors));
                 ForceTicketPlan plan = forceTicketPlan(
                         newlyTicketed.stream().map(TicketRef::uuid).toList(), keep);
                 for (UUID uuid : plan.keep()) {
@@ -294,7 +324,7 @@ public final class TeleportOps {
                             this.kit.server, ticket.dimension(), ticket.uuid());
                     iterator.remove();
                 }
-                Set<UUID> verified = this.kit.loadedDependencyMembersOnMain(selection.roots());
+                Set<UUID> verified = this.kit.loadedDependencyMembersOnMain(anchors);
                 if (!keep.containsAll(verified)) {
                     throw new IllegalStateException("常驻票收敛后出现未观察到的运行成员");
                 }
@@ -321,6 +351,18 @@ public final class TeleportOps {
             }
             throw failure;
         }
+    }
+
+    private RuntimeObservation observeAndTicketOnMain(Collection<UUID> anchors,
+                                                       List<TicketRef> newlyTicketed) {
+        Set<UUID> members = this.kit.loadedDependencyMembersOnMain(anchors);
+        for (UUID uuid : members) {
+            ServerSubLevel body = this.kit.resolveLoaded(uuid);
+            if (body == null || ForceLoadService.isForcedOnMain(body)) continue;
+            ForceLoadService.addOnMain(body);
+            newlyTicketed.add(ticketRef(body));
+        }
+        return new RuntimeObservation(this.kit.server.getTickCount(), members);
     }
 
     static List<UUID> forceLoadAnchors(OpKit.DependencySelection selection) {

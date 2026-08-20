@@ -86,7 +86,7 @@ class OpKitLoadOrderTest {
     }
 
     @Test
-    void forceLoadStartsOnlyOneRequestedAnchorPerDependencyComponent() {
+    void forceLoadStartsOneRequestedAnchorPerDependencyComponent() {
         UUID first = UUID.randomUUID();
         UUID firstMember = UUID.randomUUID();
         UUID second = UUID.randomUUID();
@@ -251,6 +251,24 @@ class OpKitLoadOrderTest {
         assertTrue(OpKit.samePointer(selected, selected));
         assertFalse(OpKit.samePointer(selected, current));
         assertFalse(OpKit.samePointer(selected, null));
+    }
+
+    @Test
+    void stopTicketDetachRetriesButNeverSilentlySucceeds() {
+        AtomicInteger attempts = new AtomicInteger();
+        ForceLoadService.retryStopDetach(3, () -> {
+            if (attempts.incrementAndGet() < 3) throw new IllegalStateException("still attached");
+        });
+        assertEquals(3, attempts.get());
+
+        AtomicInteger failed = new AtomicInteger();
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> ForceLoadService.retryStopDetach(3, () -> {
+                    failed.incrementAndGet();
+                    throw new IllegalStateException("still attached");
+                }));
+        assertEquals(3, failed.get());
+        assertEquals("still attached", error.getCause().getMessage());
     }
 
     private static com.klnon.sablepanel.panel.storage.DiskScanner.EntryMeta meta(

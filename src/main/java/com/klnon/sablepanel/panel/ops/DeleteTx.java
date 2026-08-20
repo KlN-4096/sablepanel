@@ -401,6 +401,7 @@ final class DeleteTx {
             });
         } finally {
             PauseService.persist();
+            ForceLoadService.persist();
         }
     }
 

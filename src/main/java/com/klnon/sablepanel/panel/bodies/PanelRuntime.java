@@ -10,6 +10,7 @@ import com.klnon.sablepanel.panel.metrics.StatsCollector;
 import com.klnon.sablepanel.panel.ops.JobService;
 import com.klnon.sablepanel.panel.ops.PanelOps;
 import com.klnon.sablepanel.panel.ops.PauseService;
+import com.klnon.sablepanel.panel.MainThread;
 import com.klnon.sablepanel.panel.transport.PanelClusterNode;
 import com.klnon.sablepanel.panel.gateway.PanelWebGateway;
 import com.klnon.sablepanel.panel.preview.DiskPreviewSource;
@@ -20,6 +21,8 @@ import com.klnon.sablepanel.panel.preview.resources.ModResourceStack;
 import net.minecraft.server.MinecraftServer;
 
 import java.util.Map;
+import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -68,6 +71,7 @@ public final class PanelRuntime implements AutoCloseable {
         if (config.enabled) {
             PauseService.load();
             com.klnon.sablepanel.panel.ops.FreezeService.load();
+            com.klnon.sablepanel.panel.ops.ForceLoadService.load();
             com.klnon.sablepanel.panel.ops.PhysicsService.load();
         }
         this.preparedConfig = config;
@@ -98,6 +102,10 @@ public final class PanelRuntime implements AutoCloseable {
                 return false;
             }
             this.bodyIndex.setConfig(config);
+            MainThread.onUntilComplete(server, () -> {
+                com.klnon.sablepanel.panel.ops.ForceLoadService.captureNativeIntentsOnMain(server);
+                return null;
+            });
             createdControlExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "sablepanel-control");
                 thread.setDaemon(true);
@@ -143,6 +151,8 @@ public final class PanelRuntime implements AutoCloseable {
             PanelClusterNode panel = createdNode;
             // 周期扫描和手动重扫走同一道门闩；运行期请求只合并成一次补跑。
             control.scheduleWithFixedDelay(requestScan, 5, 120, TimeUnit.SECONDS);
+            control.scheduleWithFixedDelay(
+                    () -> restoreForcedIntents(server, ops, generation), 2, 30, TimeUnit.SECONDS);
             // 和首次普通扫描排在同一个单线程磁盘队列里，避免启动期重复解压同一份存档。
             control.schedule(() -> {
                 if (!isLifecycleCurrent(generation) || scans.isShutdown()) return;
@@ -271,11 +281,51 @@ public final class PanelRuntime implements AutoCloseable {
         shutdownExecutor(scans);
         PauseService.reset();
         com.klnon.sablepanel.panel.ops.FreezeService.reset();
+        com.klnon.sablepanel.panel.ops.ForceLoadService.reset();
         com.klnon.sablepanel.panel.ops.PhysicsService.reset();
         this.preparedConfig = null;
         this.scanPauseLogged = false;
         this.refreshRequested.set(false);
         this.ticksSinceRefresh = 0;
+    }
+
+    public void prepareForStop(MinecraftServer server) {
+        try {
+            MainThread.onUntilComplete(server, () -> {
+                com.klnon.sablepanel.panel.ops.ForceLoadService.prepareForStopOnMain(server);
+                return null;
+            });
+        } catch (Throwable error) {
+            SablePanel.LOGGER.error("sablepanel: failed to detach native force-load tickets before shutdown", error);
+            throw new IllegalStateException("停服前常驻票清理失败，已中止正常停服保存", error);
+        }
+    }
+
+    private void restoreForcedIntents(MinecraftServer server, PanelOps ops, long generation) {
+        List<UUID> pending = new java.util.ArrayList<>();
+        for (UUID uuid : com.klnon.sablepanel.panel.ops.ForceLoadService.requestedSnapshot()
+                .stream().sorted().toList()) {
+            if (!isLifecycleCurrent(generation)) return;
+            try {
+                boolean active = MainThread.onUntilComplete(server, () -> {
+                    boolean forced = com.klnon.sablepanel.panel.ops.ForceLoadService.isForcedOnMain(server, uuid);
+                    boolean loaded = com.klnon.sablepanel.panel.ops.ForceLoadService.isLoadedOnMain(server, uuid);
+                    if (forced && !loaded) com.klnon.sablepanel.panel.ops.ForceLoadService
+                            .detachNativeTicketsOnMain(server, List.of(uuid));
+                    return forced && loaded;
+                });
+                if (!active) pending.add(uuid);
+            } catch (Exception error) {
+                SablePanel.LOGGER.warn("sablepanel: checking force-load intent {} failed", uuid, error);
+            }
+        }
+        if (!pending.isEmpty() && isLifecycleCurrent(generation)) {
+            try {
+                ops.teleport().restoreForcedIntents(pending);
+            } catch (Exception error) {
+                SablePanel.LOGGER.warn("sablepanel: restoring {} force-load intents failed", pending.size(), error);
+            }
+        }
     }
 
     /**

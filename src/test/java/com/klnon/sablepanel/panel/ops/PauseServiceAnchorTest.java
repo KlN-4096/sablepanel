@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -229,6 +230,34 @@ class PauseServiceAnchorTest {
                         loadedPointer.get() != null, forced.get(), paused.get(), frozen.get()))));
 
         assertEquals("saved-slot", verifiedPointer.get());
+    }
+
+    @Test
+    void delayedRestoreDropsIntentsCancelledWhileItWasWaitingForTheOperationLock() {
+        UUID cancelled = UUID.randomUUID();
+        UUID retained = UUID.randomUUID();
+
+        assertEquals(List.of(retained), TeleportOps.requestedRestoreCandidates(
+                List.of(cancelled, retained, retained), Set.of(retained)));
+        assertEquals(List.of(), TeleportOps.requestedRestoreCandidates(
+                List.of(cancelled), Set.of()));
+    }
+
+    @Test
+    void delayedRestoreFiltersAndPersistsInsideTheSameOperationLock() throws Exception {
+        Object lock = new Object();
+        UUID cancelled = UUID.randomUUID();
+        AtomicBoolean restored = new AtomicBoolean();
+        AtomicBoolean persisted = new AtomicBoolean();
+
+        TeleportOps.restoreForcedIntents(lock, List.of(cancelled), Set::of,
+                ignored -> restored.set(true), () -> {
+                    assertTrue(Thread.holdsLock(lock), "持久化必须仍在共享操作锁内");
+                    persisted.set(true);
+                });
+
+        assertFalse(restored.get(), "锁内复核已取消后不能重新挂票");
+        assertTrue(persisted.get(), "即使过滤为空也必须持久化当前空意图");
     }
 
     @Test

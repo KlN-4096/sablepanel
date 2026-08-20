@@ -16,7 +16,7 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * 意图集合的落盘({@code config/sablepanel/<name>}):Pause/Freeze/Physics 三个服务共用,
+ * 意图集合的落盘({@code config/sablepanel/<name>}):Pause/Freeze/Force/Physics 服务共用,
  * 此前各手抄一份。读写失败只记日志绝不抛 —— 起服路径上宁可丢意图也不能拦启动。
  */
 final class IntentFile {

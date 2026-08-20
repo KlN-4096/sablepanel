@@ -16,7 +16,6 @@ import net.minecraft.util.Unit;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -42,8 +41,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * ({@code loadForceLoadedSubLevels}),体一旦被 UNLOADED 就不会自愈 —— 故本类带
  * {@link #guardOnMain} 守护:每次运行时刷新把掉线的常驻体按票中指针重新 snatch 回来。
  * <p>
- * 线程约定:sable 的 {@code allTickets} 是非并发结构,只在主线程访问;{@link #MIRROR} 是给
- * HTTP 线程(/api/bodies 输出)读的镜像,由主线程维护。
+ * 线程约定:sable 的 {@code allTickets} 是非并发结构,只在主线程访问;{@link #REQUESTED}
+ * 持久化跨重启意图,{@link #ACTIVE} 供 HTTP 线程展示当前实际状态。
  */
 public final class ForceLoadService {
     /**
@@ -54,12 +53,12 @@ public final class ForceLoadService {
     public static final SubLevelLoadingTicketType<Unit> PANEL_FORCED = SubLevelLoadingTicketType.create(
             ResourceLocation.fromNamespaceAndPath(SablePanel.MOD_ID, "panel_forced"), Unit.CODEC);
 
-    /** 常驻意图镜像(主线程写,HTTP 线程读) */
-    private static final Set<UUID> MIRROR = ConcurrentHashMap.newKeySet();
-
-    /** 守护重载连续失败计数(仅主线程);达到 MAX_RETRY 后停手,重新挂票清零 */
-    private static final Map<UUID, Integer> FAILED = new HashMap<>();
-    private static final int MAX_RETRY = 3;
+    /** 常驻意图，独立于 Sable 当前票持久化。 */
+    private static final Set<UUID> REQUESTED = ConcurrentHashMap.newKeySet();
+    /** 当前实际持票集合，供 HTTP 线程展示。 */
+    private static final Set<UUID> ACTIVE = ConcurrentHashMap.newKeySet();
+    private static final int STOP_DETACH_ATTEMPTS = 3;
+    private static final IntentFile FILE = new IntentFile("forced.json");
 
     private ForceLoadService() {
     }
@@ -71,7 +70,36 @@ public final class ForceLoadService {
 
     /** 当前常驻集合快照(HTTP 线程 /api/bodies 输出用) */
     public static Set<UUID> snapshot() {
-        return Set.copyOf(MIRROR);
+        return Set.copyOf(ACTIVE);
+    }
+
+    public static Set<UUID> requestedSnapshot() {
+        return Set.copyOf(REQUESTED);
+    }
+
+    public static void load() {
+        REQUESTED.addAll(FILE.loadUuids("forced bodies"));
+    }
+
+    public static void persist() {
+        FILE.saveUuids(REQUESTED);
+    }
+
+    public static void reset() {
+        REQUESTED.clear();
+        ACTIVE.clear();
+    }
+
+    public static void captureNativeIntentsOnMain(MinecraftServer server) {
+        if (REQUESTED.addAll(forcedOnMain(server))) persist();
+    }
+
+    public static boolean isLoadedOnMain(MinecraftServer server, UUID uuid) {
+        for (ServerLevel level : server.getAllLevels()) {
+            ServerSubLevelContainer c = container(level);
+            if (c != null && OpKit.loadedBody(c, uuid) != null) return true;
+        }
+        return false;
     }
 
     /** 主线程:直接读取 Sable 票表，删除/恢复事务不能依赖异步维护的镜像。 */
@@ -151,32 +179,34 @@ public final class ForceLoadService {
     /** 主线程:按取消前快照恢复面板票；卸载路径会保留对应的 ticket info 和指针。 */
     static Set<String> restorePanelTicketsOnMain(MinecraftServer server,
                                                  Map<UUID, Set<String>> snapshot) {
-        Set<String> changed = new LinkedHashSet<>();
         Set<String> missing = new LinkedHashSet<>();
         for (var entry : snapshot.entrySet()) {
             UUID uuid = entry.getKey();
             for (String dimension : entry.getValue()) {
-                ServerLevel level = null;
-                for (ServerLevel candidate : server.getAllLevels()) {
-                    if (dimension.equals(candidate.dimension().location().toString())) {
-                        level = candidate;
-                        break;
-                    }
-                }
+                ServerLevel level = levelOf(server, dimension);
                 ServerSubLevelContainer c = level == null ? null : container(level);
                 SubLevelTicketInfo info = c == null ? null : c.getAllTickets().get(uuid);
                 if (info == null) {
                     missing.add(uuid + " @ " + dimension);
-                    continue;
                 }
-                info.tickets().add(new SubLevelLoadingTicket<>(PANEL_FORCED, uuid, Unit.INSTANCE));
-                SubLevelTicketsSavedData.getOrLoad(level).setDirty();
-                changed.add(dimension);
-                MIRROR.add(uuid);
-                FAILED.remove(uuid);
             }
         }
         if (!missing.isEmpty()) throw new IllegalStateException("无法恢复原常驻票: " + missing);
+
+        Set<String> changed = new LinkedHashSet<>();
+        for (var entry : snapshot.entrySet()) {
+            UUID uuid = entry.getKey();
+            for (String dimension : entry.getValue()) {
+                ServerLevel level = levelOf(server, dimension);
+                ServerSubLevelContainer c = container(level);
+                SubLevelTicketInfo info = c.getAllTickets().get(uuid);
+                info.tickets().add(new SubLevelLoadingTicket<>(PANEL_FORCED, uuid, Unit.INSTANCE));
+                SubLevelTicketsSavedData.getOrLoad(level).setDirty();
+                changed.add(dimension);
+                REQUESTED.add(uuid);
+                ACTIVE.add(uuid);
+            }
+        }
         return Set.copyOf(changed);
     }
 
@@ -186,8 +216,8 @@ public final class ForceLoadService {
         if (c == null) throw new IllegalStateException("常驻票所属容器不存在: " + sl.getUniqueId());
         c.addForceLoadTicket(sl, PANEL_FORCED, Unit.INSTANCE);
         if (!isForcedOnMain(sl)) throw new IllegalStateException("常驻票写入后未生效: " + sl.getUniqueId());
-        MIRROR.add(sl.getUniqueId());
-        FAILED.remove(sl.getUniqueId());
+        REQUESTED.add(sl.getUniqueId());
+        ACTIVE.add(sl.getUniqueId());
     }
 
     /**
@@ -198,6 +228,7 @@ public final class ForceLoadService {
      */
     public static Set<String> removeOnMain(MinecraftServer server, UUID uuid) {
         Set<String> changedDimensions = new HashSet<>();
+        List<Throwable> failures = new ArrayList<>();
         for (ServerLevel level : server.getAllLevels()) {
             try {
                 ServerSubLevelContainer c = container(level);
@@ -216,11 +247,18 @@ public final class ForceLoadService {
                     changedDimensions.add(level.dimension().location().toString());
                 }
             } catch (Throwable t) {
+                failures.add(t);
                 SablePanel.LOGGER.warn("sablepanel: clearing force-load ticket {} failed", uuid, t);
             }
         }
-        MIRROR.remove(uuid);
-        FAILED.remove(uuid);
+        boolean residual = isForcedOnMain(server, uuid);
+        if (!failures.isEmpty() || residual) {
+            IllegalStateException failure = new IllegalStateException("常驻票摘除不完整: " + uuid);
+            failures.forEach(failure::addSuppressed);
+            throw failure;
+        }
+        REQUESTED.remove(uuid);
+        ACTIVE.remove(uuid);
         return Set.copyOf(changedDimensions);
     }
 
@@ -249,8 +287,8 @@ public final class ForceLoadService {
             changedDimensions.add(level.dimension().location().toString());
         }
         if (isForcedOnMain(server, uuid)) throw new IllegalStateException("常驻票删除后仍残留: " + uuid);
-        MIRROR.remove(uuid);
-        FAILED.remove(uuid);
+        REQUESTED.remove(uuid);
+        ACTIVE.remove(uuid);
         return Set.copyOf(changedDimensions);
     }
 
@@ -284,9 +322,52 @@ public final class ForceLoadService {
             throw new IllegalStateException("常驻票删除后仍残留: " + uuid + " @ " + dimension);
         }
         if (!isForcedOnMain(server, uuid)) {
-            MIRROR.remove(uuid);
-            FAILED.remove(uuid);
+            REQUESTED.remove(uuid);
+            ACTIVE.remove(uuid);
         }
+    }
+
+    /** 停服保存前剥离面板原生票，避免 Sable 把即将搬迁的旧序列化指针写进下次启动。 */
+    public static void prepareForStopOnMain(MinecraftServer server) {
+        Set<UUID> actual = forcedOnMain(server);
+        REQUESTED.addAll(actual);
+        persist();
+        retryStopDetach(STOP_DETACH_ATTEMPTS, () -> detachNativeTicketsOnMain(server, actual));
+    }
+
+    static void retryStopDetach(int attempts, Runnable detach) {
+        if (attempts < 1) throw new IllegalArgumentException("attempts 必须大于 0");
+        RuntimeException last = null;
+        for (int attempt = 0; attempt < attempts; attempt++) {
+            try {
+                detach.run();
+                return;
+            } catch (RuntimeException failure) {
+                last = failure;
+            }
+        }
+        throw new IllegalStateException("停服前无法剥离面板原生常驻票", last);
+    }
+
+    public static void detachNativeTicketsOnMain(MinecraftServer server, Collection<UUID> targets) {
+        for (ServerLevel level : server.getAllLevels()) {
+            ServerSubLevelContainer c = container(level);
+            if (c == null) continue;
+            boolean changed = false;
+            for (UUID uuid : targets) {
+                SubLevelTicketInfo info = c.getAllTickets().get(uuid);
+                if (info == null || info.tickets().stream().noneMatch(ForceLoadService::isPanelTicket)) continue;
+                ServerSubLevel body = OpKit.loadedBody(c, uuid);
+                if (body != null) c.removeForceLoadTicket(body, PANEL_FORCED, Unit.INSTANCE);
+                if (info.tickets().removeIf(ForceLoadService::isPanelTicket)) changed = true;
+                changed = true;
+            }
+            if (changed) SubLevelTicketsSavedData.getOrLoad(level).setDirty();
+        }
+        Set<UUID> residual = targets.stream().filter(uuid -> isForcedOnMain(server, uuid))
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        if (!residual.isEmpty()) throw new IllegalStateException("原生常驻票剥离不完整: " + residual);
+        ACTIVE.removeAll(targets);
     }
 
     /**
@@ -295,6 +376,7 @@ public final class ForceLoadService {
      */
     public static void guardOnMain(MinecraftServer server) {
         Set<UUID> forced = new HashSet<>();
+        Set<UUID> recover = new LinkedHashSet<>();
         for (ServerLevel level : server.getAllLevels()) {
             try {
                 ServerSubLevelContainer c = container(level);
@@ -316,11 +398,15 @@ public final class ForceLoadService {
                     UUID uuid = en.getKey();
                     forced.add(uuid);
                     if (OpKit.loadedBody(c, uuid) != null) {
-                        FAILED.remove(uuid);
                         continue;
                     }
-                    if (FAILED.getOrDefault(uuid, 0) >= MAX_RETRY) continue;
-                    if (info.getPointer() != null) pending.add(new Reload(uuid, info.getPointer()));
+                    var holding = c.getHoldingChunkMap().getHoldingSubLevel(uuid);
+                    GlobalSavedSubLevelPointer current = holding == null ? null : holding.pointer();
+                    if (!OpKit.samePointer(info.getPointer(), current)) {
+                        recover.add(uuid);
+                        continue;
+                    }
+                    pending.add(new Reload(uuid, info.getPointer()));
                 }
                 for (Reload r : pending) {
                     try {
@@ -329,23 +415,19 @@ public final class ForceLoadService {
                         SablePanel.LOGGER.warn("sablepanel: force-load guard snatch {} failed", r.uuid(), t);
                     }
                     if (OpKit.loadedBody(c, r.uuid()) == null) {
-                        int fails = FAILED.merge(r.uuid(), 1, Integer::sum);
-                        if (fails >= MAX_RETRY) {
-                            SablePanel.LOGGER.warn(
-                                    "sablepanel: force-loaded body {} could not be reloaded after {} attempts, "
-                                            + "giving up until re-applied from the panel", r.uuid(), fails);
-                        }
-                    } else {
-                        FAILED.remove(r.uuid());
+                        recover.add(r.uuid());
                     }
                 }
             } catch (Throwable t) {
                 SablePanel.LOGGER.warn("sablepanel: force-load guard failed", t);
             }
         }
-        MIRROR.retainAll(forced);
-        MIRROR.addAll(forced);
-        FAILED.keySet().retainAll(forced);
+        if (!recover.isEmpty()) {
+            detachNativeTicketsOnMain(server, recover);
+            forced.removeAll(recover);
+        }
+        ACTIVE.retainAll(forced);
+        ACTIVE.addAll(forced);
     }
 
     private static boolean isPanelTicket(SubLevelLoadingTicket<?> ticket) {
@@ -358,6 +440,13 @@ public final class ForceLoadService {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    private static ServerLevel levelOf(MinecraftServer server, String dimension) {
+        for (ServerLevel level : server.getAllLevels()) {
+            if (dimension.equals(level.dimension().location().toString())) return level;
+        }
+        return null;
     }
 
     private record Reload(UUID uuid, GlobalSavedSubLevelPointer pointer) {
