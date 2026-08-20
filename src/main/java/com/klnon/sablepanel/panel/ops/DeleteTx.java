@@ -675,6 +675,38 @@ final class DeleteTx {
         }
     }
 
+    private void dropInvalidHoldingRecords(ServerLevel level) {
+        ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (container == null) return;
+        var map = (com.klnon.sablepanel.mixin.HoldingChunkMapAccessor)
+                (Object) container.getHoldingChunkMap();
+        for (var chunk : map.sablepanel$loadedHoldingChunks().values()) {
+            Map<UUID, dev.ryanhcode.sable.sublevel.storage.HoldingSubLevel> records =
+                    ((com.klnon.sablepanel.mixin.HoldingChunkAccessor) (Object) chunk)
+                            .sablepanel$loadedHoldingSubLevels();
+            Map<UUID, List<UUID>> dependencies = new LinkedHashMap<>();
+            records.forEach((uuid, holding) -> dependencies.put(uuid, holding.data().dependencies()));
+            for (UUID invalid : invalidHoldingRecords(dependencies)) {
+                var removed = records.remove(invalid);
+                if (map.sablepanel$allHoldingSubLevels().get(invalid) == removed) {
+                    map.sablepanel$allHoldingSubLevels().remove(invalid);
+                }
+            }
+        }
+    }
+
+    static Set<UUID> invalidHoldingRecords(Map<UUID, List<UUID>> dependencies) {
+        Set<UUID> remaining = new LinkedHashSet<>(dependencies.keySet());
+        boolean changed;
+        do {
+            changed = remaining.removeIf(uuid -> dependencies.getOrDefault(uuid, List.of()).stream()
+                    .anyMatch(dependency -> !remaining.contains(dependency)));
+        } while (changed);
+        Set<UUID> invalid = new LinkedHashSet<>(dependencies.keySet());
+        invalid.removeAll(remaining);
+        return Set.copyOf(invalid);
+    }
+
     static int removeKeys(Map<UUID, ?> values, Set<UUID> targets) {
         int before = values.size();
         values.keySet().removeAll(targets);
@@ -751,6 +783,7 @@ final class DeleteTx {
                 ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
                 if (container == null) throw new IllegalStateException("物理体容器不存在");
                 dropHoldingRecords(level, flush.targetsByLevel().getOrDefault(level, Set.of()));
+                dropInvalidHoldingRecords(level);
                 container.getHoldingChunkMap().saveAll();
             } catch (Throwable error) {
                 String message = "saveAll 失败: " + messageOf(error);

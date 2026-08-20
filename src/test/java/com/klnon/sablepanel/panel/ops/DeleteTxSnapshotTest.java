@@ -141,6 +141,22 @@ class DeleteTxSnapshotTest {
     }
 
     @Test
+    void invalidHoldingClosureIsRemovedBeforeSableSaveAll() {
+        UUID missing = UUID.randomUUID();
+        UUID direct = UUID.randomUUID();
+        UUID transitive = UUID.randomUUID();
+        UUID validA = UUID.randomUUID();
+        UUID validB = UUID.randomUUID();
+        Map<UUID, List<UUID>> dependencies = Map.of(
+                direct, List.of(missing),
+                transitive, List.of(direct),
+                validA, List.of(validB),
+                validB, List.of(validA));
+
+        assertEquals(Set.of(direct, transitive), DeleteTx.invalidHoldingRecords(dependencies));
+    }
+
+    @Test
     void dependencyWriteVerificationFailureRestoresPreviousState() throws Exception {
         AtomicReference<String> state = new AtomicReference<>("before");
 
