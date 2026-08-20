@@ -774,10 +774,10 @@ function renderMembers(){
 function renderDetail(){
   const b = SEL, g = SELG;
   if (!b) return;
+  const job = BUSY.get(b.uuid);
   // 该体有作业在跑时整片操作区禁用:重复提交后端会 409 挡掉,但按钮先灰掉更诚实
   const ops = document.getElementById('ops');
   if (ops) {
-    const job = BUSY.get(b.uuid);
     ops.classList.toggle('is-busy', !!job);
     ops.querySelectorAll('button').forEach(btn => btn.disabled = !!job);
   }
@@ -847,12 +847,12 @@ function renderDetail(){
   const pauseBtn = document.getElementById('pauseBtn');
   pauseBtn.textContent = PAUSED.has(b.uuid) ? T.resumeBody : T.pauseBody;
   pauseBtn.classList.toggle('warnb', !PAUSED.has(b.uuid));
-  pauseBtn.disabled = !fullyLoaded && !PAUSED.has(b.uuid);
+  pauseBtn.disabled = !!job || (!fullyLoaded && !PAUSED.has(b.uuid));
   pauseBtn.title = pauseBtn.disabled ? T.stateNeedsLoad : T.pauseTip;
   const freezeBtn = document.getElementById('freezeBtn');
   freezeBtn.textContent = FROZEN.has(b.uuid) ? T.thawBody : T.freezeBody;
   freezeBtn.classList.toggle('warnb', !FROZEN.has(b.uuid));
-  freezeBtn.disabled = !fullyLoaded && !FROZEN.has(b.uuid);
+  freezeBtn.disabled = !!job || (!fullyLoaded && !FROZEN.has(b.uuid));
   freezeBtn.title = freezeBtn.disabled ? T.stateNeedsLoad : T.freezeTip;
   const forceBtn = document.getElementById('forceBtn');
   forceBtn.textContent = FORCED.has(b.uuid) ? T.unforceBody : T.forceBody;
@@ -860,7 +860,7 @@ function renderDetail(){
   forceBtn.title = T.forceHint;
   const autoRepairBtn = document.getElementById('autoRepairBtn');
   autoRepairBtn.textContent = AUTO_REPAIR_RUN ? T.autoRepairing : T.autoRepairGroup;
-  autoRepairBtn.disabled = !!AUTO_REPAIR_RUN;
+  autoRepairBtn.disabled = !!job || !!AUTO_REPAIR_RUN;
   autoRepairBtn.title = T.autoRepairHint;
   loadPlayers();
 }

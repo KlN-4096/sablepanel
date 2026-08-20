@@ -2127,6 +2127,20 @@ test('自动修复只接受唯一运行态主版本，不会隔离唯一残缺�
   assert.equal(external.kind, 'clean', '不参与处理的历史关联成员不能被自动流程当成待删除副本');
 });
 
+test('详情已有作业时一键修复和组操作保持禁用', () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    const body={uuid:'busy',name:'忙碌体',state:'loaded',blocks:10,pos:[0,0,0],size:[1,1,1],entry:'entry'};
+    SEL=body; SELG={gid:'g',name:'忙碌组',members:1,loaded:1,blocks:10,bodies:[body]};
+    BUSY=new Map([['busy',{seq:7,op:'删除'}]]); loadPlayers=()=>{};
+    renderDetail();
+    __disabled=['pauseBtn','freezeBtn','autoRepairBtn']
+      .map(id=>document.getElementById(id).disabled);
+  `);
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify(__disabled)')),
+    [true,true,true]);
+});
+
 test('自动修复在常驻后暴露二次断链时继续下一轮', async () => {
   const { sandbox } = setup();
   evalIn(sandbox, `
