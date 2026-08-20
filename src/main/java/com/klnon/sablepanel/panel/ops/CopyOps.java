@@ -50,7 +50,8 @@ public final class CopyOps {
     private record PreparedCopyResolution(DeleteTx.DeleteComponent component, CopyVersionScanner.Scan scan,
                                           Map<UUID, RecycleStore.OperationalState> states, boolean live,
                                           String runtimeVersion,
-                                          Map<UUID, OpKit.RuntimeSnapshot> runtimeSnapshots) {
+                                          Map<UUID, OpKit.RuntimeSnapshot> runtimeSnapshots,
+                                          List<DeleteTx.DependencyRewrite> externalRewrites) {
     }
 
     /** 实时副本审查:列表快照只负责提示,真正操作前始终严格重扫并深比较完整 NBT。 */
@@ -267,8 +268,11 @@ public final class CopyOps {
                 ? null : CopyVersionScanner.runtimeCandidate(versions, active);
         Map<UUID, OpKit.RuntimeSnapshot> runtimeSnapshots = runtimeVersion == null
                 ? Map.of() : this.kit.snapshotRuntimeGroup(members);
+        List<DeleteTx.DependencyRewrite> externalRewrites = initial.externalMembers().isEmpty()
+                ? List.of() : this.tx.prepareDependencyRewrites(scan, members, warnings).stream()
+                .filter(rewrite -> initial.externalMembers().contains(rewrite.uuid())).toList();
         return new PreparedCopyResolution(component, versions, states, live,
-                runtimeVersion == null ? null : runtimeVersion.id(), runtimeSnapshots);
+                runtimeVersion == null ? null : runtimeVersion.id(), runtimeSnapshots, externalRewrites);
     }
 
     static boolean preSaveAllowed(CopyVersionScanner.Scan scan) {
@@ -325,10 +329,27 @@ public final class CopyOps {
             this.restore.restoreGroupData(
                     restoreSelection(selected, prepared.runtimeVersion(), prepared.runtimeSnapshots(),
                             states, "copy-selection"), false, warnings);
-            if (!rollbackVersion.id().equals(selected.id())) {
-                this.recycle.commitOld(stages.get(rollbackVersion.id()));
-            }
-            this.recycle.discard(stages.get(selected.id()));
+            DeleteTx.DependencyTransition externalTransition = prepared.externalRewrites().isEmpty()
+                    ? new DeleteTx.DependencyTransition(List.of(), List.of())
+                    : this.tx.prepareDependencyTransition(prepared.externalRewrites(), Set.of(),
+                    scan.members(), warnings);
+            RecycleStore.Stage externalBackup = externalTransition.before().isEmpty() ? null
+                    : this.recycle.stage(dependencySources(externalTransition.before()),
+                    operationalStates(externalTransition.before().stream()
+                            .map(DeleteTx.DependencyRewrite::uuid)
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet())));
+            finishExternalNormalization(
+                    () -> this.tx.applyDependencyTransition(externalTransition),
+                    () -> {
+                        if (!rollbackVersion.id().equals(selected.id())) {
+                            this.recycle.commitOld(stages.get(rollbackVersion.id()));
+                        }
+                        this.recycle.discard(stages.get(selected.id()));
+                    },
+                    () -> this.tx.applyDependencyTransition(new DeleteTx.DependencyTransition(
+                            externalTransition.after(), externalTransition.before())),
+                    () -> this.recycle.discard(externalBackup),
+                    () -> this.recycle.commitRecoveryRequired(externalBackup));
             out = new JsonObject();
             out.addProperty("ok", true);
             out.addProperty("version", selected.id());
@@ -393,6 +414,41 @@ public final class CopyOps {
         }
         OpKit.attachWarnings(out, warnings);
         return out;
+    }
+
+    static void finishExternalNormalization(DeleteTx.RewriteStep normalize, DeleteTx.RewriteStep finish,
+                                            DeleteTx.RewriteStep rollback, DeleteTx.RewriteStep discardBackup,
+                                            DeleteTx.RewriteStep keepRecoveryBackup) throws Exception {
+        boolean normalized = false;
+        try {
+            normalize.run();
+            normalized = true;
+            finish.run();
+            discardBackup.run();
+        } catch (Throwable failure) {
+            boolean recoveryRequired = !normalized && failure.getSuppressed().length > 0;
+            if (normalized) {
+                try {
+                    rollback.run();
+                } catch (Throwable rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                    recoveryRequired = true;
+                }
+            }
+            try {
+                if (recoveryRequired) keepRecoveryBackup.run();
+                else discardBackup.run();
+            } catch (Throwable backupFailure) {
+                failure.addSuppressed(backupFailure);
+            }
+            if (failure instanceof Exception exception) throw exception;
+            throw new IllegalStateException("外部历史依赖归一失败", failure);
+        }
+    }
+
+    static List<RecycleStore.Source> dependencySources(List<DeleteTx.DependencyRewrite> rewrites) {
+        return rewrites.stream().map(rewrite -> new RecycleStore.Source(
+                rewrite.uuid(), rewrite.key().dim(), rewrite.key(), rewrite.updated())).toList();
     }
 
     public JsonObject quarantineIncompleteCopies(UUID uuid) throws Exception {

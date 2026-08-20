@@ -8,6 +8,7 @@ import net.minecraft.nbt.NbtUtils;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -121,6 +122,54 @@ class CopyOpsResolutionTest {
 
         assertEquals("live", sources.get(0).tag().getString("state"));
         assertEquals("live", restored.bodies().get(0).tag().getString("state"));
+    }
+
+    @Test
+    void laterCommitFailureRollsBackExternalDependencyNormalization() {
+        List<String> calls = new ArrayList<>();
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> CopyOps.finishExternalNormalization(
+                        () -> calls.add("normalize"),
+                        () -> {
+                            calls.add("finish");
+                            throw new IllegalStateException("commit failed");
+                        }, () -> calls.add("rollback"), () -> calls.add("discard"),
+                        () -> calls.add("recovery")));
+
+        assertEquals("commit failed", failure.getMessage());
+        assertEquals(List.of("normalize", "finish", "rollback", "discard"), calls);
+    }
+
+    @Test
+    void failedExternalRollbackKeepsRecoveryMaterial() {
+        List<String> calls = new ArrayList<>();
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> CopyOps.finishExternalNormalization(
+                        () -> calls.add("normalize"),
+                        () -> { throw new IllegalStateException("finish"); },
+                        () -> { calls.add("rollback"); throw new IllegalStateException("rollback"); },
+                        () -> calls.add("discard"), () -> calls.add("recovery")));
+
+        assertEquals(List.of("normalize", "rollback", "recovery"), calls);
+        assertEquals("rollback", failure.getSuppressed()[0].getMessage());
+    }
+
+    @Test
+    void partialNormalizeFailureKeepsRecoveryMaterial() {
+        List<String> calls = new ArrayList<>();
+        IllegalStateException normalize = new IllegalStateException("normalize");
+        normalize.addSuppressed(new IllegalStateException("internal rollback"));
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> CopyOps.finishExternalNormalization(
+                        () -> { throw normalize; }, () -> calls.add("finish"),
+                        () -> calls.add("rollback"), () -> calls.add("discard"),
+                        () -> calls.add("recovery")));
+
+        assertEquals(normalize, failure);
+        assertEquals(List.of("recovery"), calls);
     }
 
     private static DiskScanner.EntryKey key(int slot) {
