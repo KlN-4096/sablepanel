@@ -208,6 +208,9 @@ document.documentElement.dataset.theme=ok[t]?t
               <div class="row">
                 <button id="forceBtn" onclick="doForceCurrent()">常驻加载[断链处理]</button>
               </div>
+              <div class="row">
+                <button class="primary" id="autoRepairBtn" onclick="doAutoRepairCurrent()">自动修复物理组</button>
+              </div>
               <div class="row" id="adoptRow" style="display:none">
                 <button onclick="doAdopt()">收养找回(含依赖)</button>
                 <span class="opHint">重建加载指针,数据不动盘</span>

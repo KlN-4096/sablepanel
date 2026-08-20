@@ -2101,6 +2101,199 @@ test('copyVerdict 判定表:八个终态各归各位', async () => {
     '唯一完整运行组允许归一旧活动槽，磁盘外部关联不计入移出成员');
 });
 
+test('自动修复只接受唯一运行态主版本，不会隔离唯一残缺数据', () => {
+  const { sandbox } = setup();
+  const f = verdictFixtures();
+  const resolve = evalIn(sandbox, 'autoRepairCopyDecision')(f.known);
+  assert.deepEqual([resolve.kind, resolve.version], ['resolve', 'v608']);
+  const loss = evalIn(sandbox, 'autoRepairCopyDecision')({current_state:'known',current_version:'live',
+    members:3,runtime_members:3,active_members:2,
+    versions:[{id:'live',complete:true,members:2,active_members:2,redundant:0}],incomplete:[]});
+  assert.equal(loss.kind, 'blocked');
+  assert.match(loss.reason, /移出 1 个当前运行成员/);
+  const blocked = evalIn(sandbox, 'autoRepairCopyDecision')({current_state:'unknown',members:2,active_members:0,
+    versions:[],incomplete:[{uuid:'a'}]});
+  assert.deepEqual([blocked.kind, blocked.reason], ['blocked', evalIn(sandbox, 'T.autoRepairNoVersion')]);
+  const clean = evalIn(sandbox, 'autoRepairCopyDecision')({current_state:'known',members:1,active_members:1,
+    current_version:'only',versions:[{id:'only',complete:true,members:1,active_members:1,redundant:0}],
+    incomplete:[],external_members:[]});
+  assert.equal(clean.kind, 'clean');
+  const unknown = evalIn(sandbox, 'autoRepairCopyDecision')({current_state:'unknown',members:1,active_members:0,
+    versions:[{id:'only',complete:true,members:1,active_members:0,redundant:0}],incomplete:[]});
+  assert.equal(unknown.kind, 'blocked', '单一完整磁盘版本不能代替完整运行证据');
+  const external = evalIn(sandbox, 'autoRepairCopyDecision')({current_state:'known',current_version:'live',
+    members:24,active_members:24,versions:[{id:'live',complete:true,members:24,active_members:24,redundant:0}],
+    incomplete:[],external_members:['historic']});
+  assert.equal(external.kind, 'clean', '不参与处理的历史关联成员不能被自动流程当成待删除副本');
+});
+
+test('自动修复在常驻后暴露二次断链时继续下一轮', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    authenticated=true;
+    const root='aaaaaaaa-0000-0000-0000-000000000001';
+    const mate='bbbbbbbb-0000-0000-0000-000000000002';
+    const oldDetached='cccccccc-0000-0000-0000-000000000003';
+    const newDetached='dddddddd-0000-0000-0000-000000000004';
+    const historical='eeeeeeee-0000-0000-0000-000000000005';
+    const body=(uuid,extra={})=>({uuid,blocks:10,deps:2,...extra});
+    const group=(bodies,extra={})=>({gid:root,name:'测试组',members:bodies.length,blocks:30,
+      loaded:0,bodies,...extra});
+    SEL={uuid:root,name:'测试组'};
+    SELG=group([body(root,{copies:2}),body(mate),body(oldDetached,{detached:true})],{detached:1,dup:true});
+    FORCED=new Set();
+    __deleted=[]; __forced=[]; __resolved=[]; __toasts=[];
+    toast=(message,kind)=>__toasts.push({message,kind});
+    renderDetail=()=>{}; loadBodies=async()=>{};
+    batchDelete=async targets=>{ __deleted.push([...targets]); return 'ok'; };
+    setForcedBodies=async targets=>{ __forced.push([...targets]); return {job:11}; };
+    awaitJob=async()=> 'ok';
+    submitJob=async(path,opts)=>{ __resolved.push({path,body:JSON.parse(opts.body)}); return {job:12}; };
+    const freshInitial={group:SELG,forced:new Set()};
+    const afterFirstDelete={group:group([body(root,{copies:2}),body(mate),body(newDetached),body(historical)],
+      {dup:true}),forced:new Set()};
+    const afterForce={group:group([body(root,{copies:2}),body(mate),body(newDetached,{detached:true}),
+      body(historical,{detached:true})],{loaded:3,detached:2,dup:true}),forced:new Set([root,mate,newDetached])};
+    const afterCopies={group:group([body(root),body(mate),body(newDetached,{detached:true})],
+      {loaded:3,detached:1}),forced:new Set([root,mate,newDetached])};
+    const finalView={group:group([body(root,{deps:1}),body(mate,{deps:1})],{loaded:2}),forced:new Set([root,mate])};
+    __views=[freshInitial,afterFirstDelete,afterForce,afterCopies,finalView,finalView];
+    waitRepairGroup=async(uuid,accept)=>{ const value=__views.shift();
+      if(!value||!accept(value)) throw new Error('unexpected repair view'); return value; };
+    const needsResolve={uuid:root,current_state:'known',current_version:'live',members:3,runtime_members:3,active_members:3,
+      versions:[{id:'live',complete:true,members:3,active_members:3,redundant:0},
+        {id:'old',complete:true,members:3,active_members:0,redundant:0}],incomplete:[],external_members:[historical]};
+    const afterResolve={uuid:root,current_state:'known',current_version:'live',members:3,runtime_members:3,active_members:3,
+      versions:[{id:'live',complete:true,members:3,active_members:3,redundant:0}],incomplete:[],external_members:[]};
+    const cleanScan={uuid:root,current_state:'known',current_version:'live',members:2,active_members:2,
+      versions:[{id:'live',complete:true,members:2,active_members:2,redundant:0}],incomplete:[],external_members:[]};
+    __scans=[needsResolve,cleanScan];
+    api=async path=>{ if(path.includes('/copies')) return __scans.shift(); throw new Error(path); };
+    waitRepairCopies=async()=>afterResolve;
+  `);
+
+  await evalIn(sandbox, 'doAutoRepairCurrent')();
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify(__deleted)')),
+    [['cccccccc-0000-0000-0000-000000000003'],['dddddddd-0000-0000-0000-000000000004']]);
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify(__forced)')),
+    [['aaaaaaaa-0000-0000-0000-000000000001']]);
+  assert.equal(evalIn(sandbox, '__resolved[0].body.version'), 'live');
+  assert.match(evalIn(sandbox, '__toasts.at(-1).message'), /自动修复完成/);
+  assert.equal(evalIn(sandbox, '__toasts.at(-1).kind'), 'ok');
+});
+
+test('自动修复确认期间切换详情也只处理确认时的物理组', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    authenticated=true;
+    const original={gid:'old',name:'原组',members:1,loaded:0,bodies:[{uuid:'old-root',blocks:1}]};
+    const other={gid:'new',name:'新组',members:1,loaded:0,bodies:[{uuid:'new-root',blocks:1}]};
+    SEL={uuid:'old-root',name:'原组'}; SELG=original; FORCED=new Set();
+    __handled=null; toast=()=>{}; renderDetail=()=>{}; loadBodies=async()=>{};
+    askModal=async()=>{ SEL={uuid:'new-root',name:'新组'}; SELG=other; return true; };
+    runAutoRepairGroup=async uuid=>{ __handled={uuid}; return {members:1,removed:0}; };
+  `);
+  await evalIn(sandbox, 'doAutoRepairCurrent')();
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify(__handled)')),
+    {uuid:'old-root'});
+});
+
+test('自动修复从断链成员详情进入时改用非断链成员作为稳定锚点', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    authenticated=true;
+    const keep={uuid:'keep',blocks:10}; const detached={uuid:'drop',blocks:1,detached:true};
+    SEL=detached; SELG={gid:'g',name:'组',members:2,loaded:0,detached:1,bodies:[keep,detached]};
+    FORCED=new Set(); __anchor=null; toast=()=>{}; renderDetail=()=>{}; loadBodies=async()=>{};
+    runAutoRepairGroup=async uuid=>{ __anchor=uuid; return {members:1,removed:1}; };
+  `);
+  await evalIn(sandbox, 'doAutoRepairCurrent')();
+  assert.equal(evalIn(sandbox, '__anchor'), 'keep');
+});
+
+test('自动修复只接受用户确认时完全一致的存疑断链名单', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    authenticated=true;
+    const keep={uuid:'keep',blocks:10};
+    const drop={uuid:'drop',blocks:1,detached:true};
+    const group={gid:'g',name:'组',members:2,loaded:0,detached:1,detach_unsure:true,bodies:[keep,drop]};
+    SEL=keep; SELG=group; FORCED=new Set(); __message=''; __accepted='';
+    askModal=async(title,message)=>{ __message=message; return true; };
+    toast=()=>{}; renderDetail=()=>{}; loadBodies=async()=>{};
+    runAutoRepairGroup=async(uuid,run)=>{ __accepted=run.acceptedDetached; return {members:1,removed:1}; };
+  `);
+  await evalIn(sandbox, 'doAutoRepairCurrent')();
+  assert.equal(evalIn(sandbox, '__accepted'), 'drop');
+  assert.match(evalIn(sandbox, '__message'), /断链名单有任何变化/);
+  evalIn(sandbox, `
+    __error='';
+    const changed={group:{...SELG,bodies:[keep,{uuid:'other',blocks:1,detached:true}]},forced:new Set()};
+    try { requireCompleteRepairView(changed,'drop'); } catch(error) { __error=error.message; }
+  `);
+  assert.equal(evalIn(sandbox, '__error'), evalIn(sandbox, 'T.autoRepairUnsure'));
+});
+
+test('自动修复按确认后的权威断链结果重新选择稳定锚点', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    authenticated=true;
+    const stale={uuid:'stale',blocks:10,deps:0,detached:true};
+    const keep={uuid:'keep',blocks:9,deps:0};
+    const before={group:{gid:'g',members:2,loaded:2,detached:1,bodies:[stale,keep]},
+      forced:new Set(['stale','keep'])};
+    const after={group:{gid:'keep',members:1,loaded:1,bodies:[keep]},forced:new Set(['keep'])};
+    const clean={current_state:'known',current_version:'v',members:1,runtime_members:1,active_members:1,
+      versions:[{id:'v',complete:true,members:1,active_members:1,redundant:0}],incomplete:[]};
+    const run={uuid:'stale',ctx:captureCtx()}; AUTO_REPAIR_RUN=run;
+    __groups=[before,after,after]; __waited=[]; __deleted=[]; __copyPath='';
+    waitRepairGroup=async(uuid,accept)=>{ __waited.push(uuid); const value=__groups.shift();
+      if(!accept(value)) throw new Error('unexpected view'); return value; };
+    batchDelete=async targets=>{ __deleted.push(...targets); return 'ok'; };
+    api=async path=>{ __copyPath=path; return clean; };
+    __result=runAutoRepairGroup('stale',run);
+  `);
+  await evalIn(sandbox, '__result');
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify(__deleted)')), ['stale']);
+  assert.equal(evalIn(sandbox, '__copyPath.includes("/body/keep/copies")'), true);
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify(__waited)')), ['stale','keep','keep']);
+});
+
+test('自动修复子操作部分失败后立即停止', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    authenticated=true;
+    const group={gid:'g',members:2,loaded:0,detached:1,
+      bodies:[{uuid:'keep',blocks:10},{uuid:'drop',blocks:1,detached:true}]};
+    const run={uuid:'keep',ctx:captureCtx()}; AUTO_REPAIR_RUN=run;
+    waitRepairGroup=async()=>({group,forced:new Set()});
+    batchDelete=async()=> 'partial'; __forced=false;
+    setForcedBodies=async()=>{ __forced=true; return {job:1}; };
+    __failure='';
+    runAutoRepairGroup('keep',run).catch(error=>{ __failure=error.message; });
+  `);
+  await tick(); await tick();
+  assert.equal(evalIn(sandbox, '__forced'), false);
+  assert.equal(evalIn(sandbox, '__failure'), evalIn(sandbox, 'T.autoRepairPartial'));
+});
+
+test('自动修复三轮仍不满足依赖后验就停止', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    authenticated=true;
+    const group={gid:'g',members:2,loaded:2,bodies:[
+      {uuid:'a',blocks:10,deps:0},{uuid:'b',blocks:10,deps:0}]};
+    const view={group,forced:new Set(['a','b'])};
+    const clean={current_state:'known',current_version:'v',members:2,runtime_members:2,active_members:2,
+      versions:[{id:'v',complete:true,members:2,active_members:2,redundant:0}],incomplete:[]};
+    const run={uuid:'a',ctx:captureCtx()}; AUTO_REPAIR_RUN=run;
+    waitRepairGroup=async()=>view; api=async()=>clean; __failure='';
+    runAutoRepairGroup('a',run).catch(error=>{ __failure=error.message; });
+  `);
+  await tick(); await tick();
+  assert.equal(evalIn(sandbox, '__failure'), evalIn(sandbox, 'T.autoRepairChanging'));
+});
+
 test('副本对话框列出运行槽不对齐和不参与处理的历史关联成员', async () => {
   const { sandbox } = setup();
   evalIn(sandbox, `

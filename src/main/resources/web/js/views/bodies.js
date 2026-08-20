@@ -858,6 +858,10 @@ function renderDetail(){
   forceBtn.textContent = FORCED.has(b.uuid) ? T.unforceBody : T.forceBody;
   forceBtn.classList.toggle('primary', !FORCED.has(b.uuid));
   forceBtn.title = T.forceHint;
+  const autoRepairBtn = document.getElementById('autoRepairBtn');
+  autoRepairBtn.textContent = AUTO_REPAIR_RUN ? T.autoRepairing : T.autoRepairGroup;
+  autoRepairBtn.disabled = !!AUTO_REPAIR_RUN;
+  autoRepairBtn.title = T.autoRepairHint;
   loadPlayers();
 }
 /* 把当前坐标填进目的坐标输入框(想基于当前位置微调时用) */
