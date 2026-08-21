@@ -198,6 +198,90 @@ class CopyVersionScannerTest {
     }
 
     @Test
+    void uniqueCompleteCandidateMatchingTheLoadedRuntimeGroupWinsOverOneStalePointer() {
+        UUID root = UUID.randomUUID();
+        UUID dependency = UUID.randomUUID();
+        var rootCurrent = copy(root, 0, tag(root, dependency), 0, 0);
+        var dependencyCurrent = copy(dependency, 1, tag(dependency, root), 0, 0);
+        var dependencyOld = copy(dependency, 2, tag(dependency), 10, 10);
+        Map<UUID, String> active = Map.of(
+                root, rootCurrent.key().id(), dependency, dependencyOld.key().id());
+
+        CopyVersionScanner.Scan scan = CopyVersionScanner.assemble(root, Set.of(root, dependency),
+                List.of(rootCurrent, dependencyCurrent, dependencyOld), active, true);
+        CopyVersionScanner.Version current = scan.versions().stream()
+                .filter(version -> version.id().equals(scan.currentVersion())).findFirst().orElseThrow();
+
+        assertEquals(CopyVersionScanner.CurrentState.KNOWN, scan.currentState());
+        assertTrue(current.complete());
+        assertEquals(Map.of(dependency, dependencyOld.key().id()),
+                CopyVersionScanner.evidenceMismatches(current, active));
+    }
+
+    @Test
+    void fullyLoadedRuntimeGroupCanSpanDifferentHoldingLocations() {
+        UUID root = UUID.randomUUID();
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        var rootCurrent = copy(root, 0, tag(root, first, second), 0, 0);
+        var firstCurrent = copy(first, 1, tag(first, root, second), 10, 10);
+        var secondCurrent = copy(second, 2, tag(second, root, first), 20, 20);
+        Map<UUID, String> active = Map.of(
+                root, rootCurrent.key().id(),
+                first, firstCurrent.key().id(),
+                second, secondCurrent.key().id());
+
+        CopyVersionScanner.Scan scan = CopyVersionScanner.assemble(root, Set.of(root, first, second),
+                List.of(rootCurrent, firstCurrent, secondCurrent), active, true);
+        CopyVersionScanner.Version current = scan.versions().stream()
+                .filter(version -> version.id().equals(scan.currentVersion())).findFirst().orElseThrow();
+
+        assertEquals(CopyVersionScanner.CurrentState.KNOWN, scan.currentState());
+        assertTrue(current.complete());
+        assertEquals(Set.of(root, first, second), current.copies().stream()
+                .map(CopyVersionScanner.Copy::uuid).collect(java.util.stream.Collectors.toSet()));
+        assertEquals(3, current.activeMembers());
+        assertTrue(scan.incomplete().isEmpty());
+    }
+
+    @Test
+    void incompleteRuntimeEvidenceDoesNotFallBackToAPartialHoldingCandidate() {
+        UUID root = UUID.randomUUID();
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        var rootCurrent = copy(root, 0, tag(root, first, second), 0, 0);
+        var firstCurrent = copy(first, 1, tag(first, root, second), 10, 10);
+        var secondCurrent = copy(second, 2, tag(second, root, first), 20, 20);
+
+        CopyVersionScanner.Scan scan = CopyVersionScanner.assemble(root, Set.of(root, first, second),
+                List.of(rootCurrent, firstCurrent, secondCurrent),
+                Map.of(root, rootCurrent.key().id(), first, firstCurrent.key().id()), true);
+
+        assertNull(scan.currentVersion());
+        assertEquals(CopyVersionScanner.CurrentState.UNKNOWN, scan.currentState());
+    }
+
+    @Test
+    void runtimeGroupDoesNotOverrideTwoStaleActivePointers() {
+        UUID root = UUID.randomUUID();
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        var rootCurrent = copy(root, 0, tag(root, first, second), 0, 0);
+        var firstCurrent = copy(first, 1, tag(first, root, second), 0, 0);
+        var secondCurrent = copy(second, 2, tag(second, root, first), 0, 0);
+        var firstOld = copy(first, 3, tag(first), 10, 10);
+        var secondOld = copy(second, 4, tag(second), 20, 20);
+        Map<UUID, String> active = Map.of(root, rootCurrent.key().id(),
+                first, firstOld.key().id(), second, secondOld.key().id());
+
+        CopyVersionScanner.Scan scan = CopyVersionScanner.assemble(root, Set.of(root, first, second),
+                List.of(rootCurrent, firstCurrent, secondCurrent, firstOld, secondOld), active, true);
+
+        assertNull(scan.currentVersion());
+        assertEquals(CopyVersionScanner.CurrentState.UNKNOWN, scan.currentState());
+    }
+
+    @Test
     void provenMixedEvidenceWinsOverAnAdditionalStaleEntry() {
         UUID root = UUID.randomUUID();
         UUID dependency = UUID.randomUUID();

@@ -133,12 +133,20 @@ async function confirmPurge(groups){
     {method:'POST',body:JSON.stringify({ids:groups.map(group=>group.id)})});
   if (r) { R_SELECTED.clear(); clearRecycleDetail(); renderRecycle(); }
 }
-/* 单体物理暂停:无确认直接执行;内存态,重启服务端自动恢复运行 */
+function visibleGroupUuids(uuids){
+  const expanded = new Set(uuids);
+  for (const uuid of uuids) {
+    const group = BODY_BY_UUID.get(uuid)?.g;
+    if (group) for (const body of group.bodies) expanded.add(body.uuid);
+  }
+  return [...expanded];
+}
+/* 物理暂停按完整依赖组执行:全部固定后清除线速度和角速度,重启后保持。 */
 async function setPausedBodies(uuids, paused){
   if (!uuids.length) return;
   const r = await submitJob('/api/ops/pause', {method:'POST', body: JSON.stringify({uuids, paused})});
   if (!r) return;
-  for (const u of uuids) paused ? PAUSED.add(u) : PAUSED.delete(u);
+  for (const u of visibleGroupUuids(uuids)) paused ? PAUSED.add(u) : PAUSED.delete(u);
   renderAll();
   if (SEL) renderDetail();
 }
@@ -154,8 +162,7 @@ async function setFrozenBodies(uuids, frozen){
   if (!uuids.length) return;
   const r = await submitJob('/api/ops/freeze', {method:'POST', body: JSON.stringify({uuids, frozen})});
   if (!r) return;
-  // 后端展开到整组,乐观更新只覆盖点名的体;整组真值由下一次 loadBodies 纠正
-  for (const u of uuids) frozen ? FROZEN.add(u) : FROZEN.delete(u);
+  for (const u of visibleGroupUuids(uuids)) frozen ? FROZEN.add(u) : FROZEN.delete(u);
   renderAll();
   if (SEL) renderDetail();
 }
@@ -181,14 +188,17 @@ async function doFreezeSelected(frozen){
   }
   setFrozenBodies(uuids, frozen);
 }
-/* 常驻加载(sable force-load ticket):开启时后端会先把体加载出来,大体可能耗时数分钟;
-   票由 sable 持久化,重启后仍然生效。注意后端会顺带冻结整组 —— 不冻结就是几十秒内崩 */
+/* 常驻加载只管理 sable force-load ticket:不清速度、不固定物理、不暂停 tick。
+   取消时整组保存到磁盘并退出活动态。 */
 async function setForcedBodies(uuids, forced){
   if (!uuids.length) return null;
   const r = await submitJob('/api/ops/force_load', {method:'POST', body: JSON.stringify({uuids, forced})});
   if (!r) return null;
   // 乐观更新;作业失败时下一次 loadBodies 会用服务端真值纠正回来
-  for (const u of uuids) forced ? FORCED.add(u) : FORCED.delete(u);
+  for (const u of visibleGroupUuids(uuids)) {
+    forced ? FORCED.add(u) : FORCED.delete(u);
+    if (!forced) { PAUSED.delete(u); FROZEN.delete(u); }
+  }
   renderAll();
   if (SEL) renderDetail();
   return r;   // 副本对话框的唤醒出口要拿 job seq 等它结束

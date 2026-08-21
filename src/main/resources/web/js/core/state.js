@@ -47,9 +47,8 @@ let PLAYERS = [], PLAYERS_ERROR = '', playersFetchedAt = 0;
 /* 暂停集合:以 /api/bodies 的 paused 为单一事实源,操作成功后本地乐观更新 */
 let PAUSED = new Set();
 
-/* 冻结集合(暂停 tick):和 PAUSED 是两回事 —— PAUSED 只锁住物理不让动,方块实体照跑;
-   FROZEN 拦掉整组的方块实体 tick(Create 机器/流体网络全停),并连带锁物理。
-   常驻加载会自动冻结整组,所以这里常常有 PAUSED 里没有的体 */
+/* 冻结集合(暂停 tick):和 PAUSED 完全独立。PAUSED 只锁住物理并清速度;
+   FROZEN 只拦掉整组方块实体 tick(Create 机器/流体网络全停)。 */
 let FROZEN = new Set();
 
 /* 常驻加载集合(sable force-load ticket):以 /api/bodies 的 forced 为单一事实源;

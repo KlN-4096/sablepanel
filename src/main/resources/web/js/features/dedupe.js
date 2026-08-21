@@ -71,7 +71,7 @@ function loadDedupeScan(uuid){
     document.getElementById('copyPanelStatus').textContent = T.dedupeFail + message;
   });
 }
-/* NOT_LOADED 的出口:一键常驻加载(后端自动整组展开+冻结),作业结束后自动重扫。
+/* NOT_LOADED 的出口:一键常驻加载(后端自动整组展开并自然运行),作业结束后自动重扫。
    与列表入口同一条路:断链残骸确认流 + setForcedBodies 的乐观更新一并生效。 */
 async function wakeDedupeTarget(){
   if (!COPY_UUID || COPY_WAKE_SEQ !== null) return;
@@ -97,6 +97,12 @@ function renderDedupe(scan){
   const current = versions.find(version=>version.id===scan.current_version);
   const currentBlocks = current ? current.blocks||0 : null;
   const incomplete = scan.incomplete || [];
+  const mismatches = scan.evidence_mismatches || [];
+  const external = scan.external_members || [];
+  const memberLabel = uuid => {
+    const entry = typeof BODY_BY_UUID!=='undefined' ? BODY_BY_UUID.get(uuid) : null;
+    return entry?.b?.name ? `${entry.b.name} (${uuid.slice(0,8)})` : uuid;
+  };
   const rows = versions.map((version,index)=>{
     const delta = currentBlocks===null ? null : (version.blocks||0)-currentBlocks;
     const locations = (version.locations||[]).map(location=>
@@ -116,6 +122,11 @@ function renderDedupe(scan){
   }).join('');
   const warning = incomplete.length
     ? `<div class="copyWarning">${T.copyQuarantineWarn(incomplete.length)}</div>` : '';
+  const runtimeDiagnostic = scan.runtime_current ? `<div class="copyWarning">
+    ${esc(T.copyRuntimeBasis(scan.runtime_members||scan.members||0,scan.disk_members||scan.members||0))}
+    ${mismatches.length?`<br>${esc(T.copyEvidenceMismatchList(mismatches.map(item=>`${memberLabel(item.uuid)} → ${item.entry}`).join(' / ')))}`:''}
+    ${external.length?`<br>${esc(T.copyExternalLinkedList(external.map(memberLabel).join(' / ')))}`:''}
+  </div>` : '';
   const raw = !versions.length && incomplete.length ? `<table class="copyTable"><tbody>${incomplete.map(copy=>
     `<tr><td class="entry">${esc(copy.entry)}</td><td>${fmt(copy.blocks||0)}</td><td>${esc(copy.dim)}</td></tr>`).join('')}</tbody></table>` : '';
   const selected = versions.find(version=>version.id===COPY_VERSION);
@@ -130,14 +141,14 @@ function renderDedupe(scan){
     EVIDENCE_STRAY: `<div class="copyWarning">${T.copyEvidenceStray}</div>`,
     EVIDENCE_AMBIGUOUS: `<div class="copyWarning">${T.copyEvidenceAmbiguous}</div>`,
   })[verdict.kind] || '';
-  document.getElementById('copyPanelBody').innerHTML = `<div class="copySummary">${T.copyGroupSummary(scan.members||0,versions.length)}</div>${notice}${warning}${rows||raw||`<div class="empty">${T.dedupeSingle}</div>`}${copySelectionDetails(scan,selected)}`;
+  document.getElementById('copyPanelBody').innerHTML = `<div class="copySummary">${T.copyGroupSummary(scan.members||0,versions.length)}</div>${notice}${runtimeDiagnostic}${warning}${rows||raw||`<div class="empty">${T.dedupeSingle}</div>`}${copySelectionDetails(scan,selected)}`;
   const confirm = document.getElementById('dedupeConfirm');
   confirm.disabled = verdict.kind==='QUARANTINE_ONLY' ? false
     : !['READY_CLEAN','READY_WITH_LOSS','READY_REPAIR'].includes(verdict.kind)
       || !selected || (!selected.complete && !selected.repairable_current);
   confirm.textContent = verdict.kind==='QUARANTINE_ONLY' ? T.copyQuarantineAll : T.dedupeConfirm;
   const status = ({
-    READY_CLEAN: T.copyReadyClean,
+    READY_CLEAN: scan.runtime_current===verdict.pick ? T.copyRuntimeReady : T.copyReadyClean,
     READY_WITH_LOSS: T.copyReadyLoss(verdict.removed),
     READY_REPAIR: T.copyReadyRepair(verdict.missing,verdict.removed),
     NOT_LOADED: COPY_WAKE_SEQ!==null ? T.copyWaking : T.copyCurrentUnknown,
@@ -205,7 +216,9 @@ async function confirmDedupe(){
   const archived = Math.max(0,selectable.length-1);
   const quarantined = (COPY_SCAN.incomplete||[]).length;
   const kept=version.members||0, removed=Math.max(0,(COPY_SCAN.members||0)-kept);
-  const message=T.copyResolveAsk({total:COPY_SCAN.members||0,keep:kept,removed,old:archived,
+  const runtimePrefix=version.id===COPY_SCAN.runtime_current
+    ? T.copyRuntimeResolveAsk((COPY_SCAN.evidence_mismatches||[]).length,(COPY_SCAN.external_members||[]).length) : '';
+  const message=runtimePrefix+T.copyResolveAsk({total:COPY_SCAN.members||0,keep:kept,removed,old:archived,
     incomplete:quarantined,repair:version.repairable_current?(version.missing_dependencies||[]).length:0});
   if (!await askModal(T.dedupeTitle,message,false)) return;
   const uuid = COPY_UUID, selected = COPY_VERSION;

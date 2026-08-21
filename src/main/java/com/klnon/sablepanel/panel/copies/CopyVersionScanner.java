@@ -65,6 +65,12 @@ public final class CopyVersionScanner {
     public static Scan scan(Map<String, Path> dimensions, Map<UUID, List<DiskScanner.EntryMeta>> metadata,
                             UUID target, Map<UUID, String> activeEntries, List<String> warnings) throws IOException {
         Set<UUID> members = members(metadata, target);
+        return scan(dimensions, metadata, target, members, activeEntries, warnings, false);
+    }
+
+    public static Scan scan(Map<String, Path> dimensions, Map<UUID, List<DiskScanner.EntryMeta>> metadata,
+                            UUID target, Set<UUID> members, Map<UUID, String> activeEntries,
+                            List<String> warnings, boolean runtimeAuthoritative) throws IOException {
 
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         for (UUID member : members) {
@@ -88,7 +94,7 @@ public final class CopyVersionScanner {
                         List.copyOf(pointers.getOrDefault(entry.key(), List.of()))));
             }
         }
-        return assemble(target, members, copies, activeEntries);
+        return assemble(target, members, copies, activeEntries, runtimeAuthoritative);
     }
 
     public static Set<UUID> members(Map<UUID, List<DiskScanner.EntryMeta>> metadata, UUID target)
@@ -101,6 +107,11 @@ public final class CopyVersionScanner {
 
     public static Scan assemble(UUID target, Set<UUID> members, Collection<Copy> copies,
                                 Map<UUID, String> activeEntries) {
+        return assemble(target, members, copies, activeEntries, false);
+    }
+
+    public static Scan assemble(UUID target, Set<UUID> members, Collection<Copy> copies,
+                                Map<UUID, String> activeEntries, boolean runtimeAuthoritative) {
         Map<Location, LinkedHashMap<DiskScanner.EntryKey, Copy>> byLocation = new LinkedHashMap<>();
         for (Copy copy : copies) {
             for (DiskScanner.LiveLocation pointer : copy.pointers()) {
@@ -118,11 +129,24 @@ public final class CopyVersionScanner {
             else known.merge(candidate, entry.getKey());
         }
 
+        if (runtimeAuthoritative) {
+            Version runtime = atRuntime(target, members, copies, activeEntries);
+            if (runtime != null) versions.putIfAbsent(runtime.id(), new MutableVersion(runtime));
+        }
+
         List<Version> result = versions.values().stream().map(MutableVersion::freeze)
                 .sorted(Comparator.comparing((Version version) -> !version.active())
                         .thenComparing((Version version) -> !version.complete())
                         .thenComparing(Version::id)).toList();
         Current current = resolveCurrent(result, activeEntries);
+        if (runtimeAuthoritative) {
+            Version runtimeCandidate = runtimeCandidate(result, members, activeEntries);
+            if (runtimeCandidate != null) {
+                current = new Current(runtimeCandidate.id(), CurrentState.KNOWN);
+            } else if (current.state() != CurrentState.MIXED) {
+                current = new Current(null, CurrentState.UNKNOWN);
+            }
+        }
         Set<DiskScanner.EntryKey> assigned = new LinkedHashSet<>();
         for (Version version : result) {
             if (version.complete() || repairableCurrent(version, current)) {
@@ -194,6 +218,30 @@ public final class CopyVersionScanner {
                 List.copyOf(selected), List.copyOf(redundant), List.of(location), Set.copyOf(missing));
     }
 
+    private static Version atRuntime(UUID target, Set<UUID> members, Collection<Copy> copies,
+                                     Map<UUID, String> activeEntries) {
+        if (!activeEntries.keySet().equals(members) || !members.contains(target)) return null;
+        Map<UUID, Copy> selected = new LinkedHashMap<>();
+        for (Copy copy : copies) {
+            if (!copy.key().id().equals(activeEntries.get(copy.uuid()))) continue;
+            if (selected.putIfAbsent(copy.uuid(), copy) != null) return null;
+        }
+        if (!selected.keySet().equals(members)) return null;
+        for (Copy copy : selected.values()) {
+            Set<UUID> expected = new LinkedHashSet<>(members);
+            expected.remove(copy.uuid());
+            if (!Set.copyOf(DiskScanner.dependencies(copy.tag())).equals(expected)) return null;
+        }
+
+        List<Copy> ordered = selected.values().stream()
+                .sorted(Comparator.comparing(copy -> copy.key().id())).toList();
+        List<Location> locations = ordered.stream().flatMap(copy -> copy.pointers().stream()
+                        .map(pointer -> new Location(copy.key().dim(), pointer.chunkX(), pointer.chunkZ())))
+                .distinct().sorted().toList();
+        return new Version(versionId(ordered), true, ordered.size(), ordered,
+                List.of(), locations, Set.of());
+    }
+
     private static Current resolveCurrent(List<Version> versions, Map<UUID, String> activeEntries) {
         if (activeEntries.isEmpty()) return new Current(null, CurrentState.UNKNOWN);
         List<Version> fullyActive = versions.stream()
@@ -245,6 +293,34 @@ public final class CopyVersionScanner {
     private static boolean containsEntry(Version version, UUID uuid, String entryId) {
         return java.util.stream.Stream.concat(version.copies().stream(), version.redundant().stream())
                 .anyMatch(copy -> copy.uuid().equals(uuid) && copy.key().id().equals(entryId));
+    }
+
+    public static Map<UUID, String> evidenceMismatches(Version version, Map<UUID, String> activeEntries) {
+        Map<UUID, String> mismatches = new LinkedHashMap<>();
+        for (Map.Entry<UUID, String> entry : activeEntries.entrySet()) {
+            if (!containsEntry(version, entry.getKey(), entry.getValue())) {
+                mismatches.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return Map.copyOf(mismatches);
+    }
+
+    public static Version runtimeCandidate(Scan scan, Map<UUID, String> activeEntries) {
+        return runtimeCandidate(scan.versions(), scan.members(), activeEntries);
+    }
+
+    private static Version runtimeCandidate(List<Version> versions, Set<UUID> members,
+                                            Map<UUID, String> activeEntries) {
+        if (!activeEntries.keySet().equals(members)) return null;
+        List<Version> candidates = versions.stream().filter(Version::complete)
+                .filter(version -> version.copies().stream().map(Copy::uuid)
+                        .collect(java.util.stream.Collectors.toSet()).equals(members)).toList();
+        List<Version> exact = candidates.stream()
+                .filter(version -> evidenceMismatches(version, activeEntries).isEmpty()).toList();
+        if (exact.size() == 1) return exact.get(0);
+        if (!exact.isEmpty() || candidates.size() != 1) return null;
+        Version candidate = candidates.get(0);
+        return evidenceMismatches(candidate, activeEntries).size() == 1 ? candidate : null;
     }
 
     private record Current(String version, CurrentState state) {

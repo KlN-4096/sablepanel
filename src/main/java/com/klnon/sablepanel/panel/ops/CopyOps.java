@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -41,8 +42,15 @@ public final class CopyOps {
                               CopyVersionScanner.Version rollback) {
     }
 
+    private record CopyInspection(CopyVersionScanner.Scan scan, Set<UUID> diskMembers,
+                                  Set<UUID> runtimeMembers, Set<UUID> externalMembers,
+                                  Map<UUID, String> activeEntries, String runtimeVersion) {
+    }
+
     private record PreparedCopyResolution(DeleteTx.DeleteComponent component, CopyVersionScanner.Scan scan,
-                                          Map<UUID, RecycleStore.OperationalState> states, boolean live) {
+                                          Map<UUID, RecycleStore.OperationalState> states, boolean live,
+                                          String runtimeVersion,
+                                          Map<UUID, OpKit.RuntimeSnapshot> runtimeSnapshots) {
     }
 
     /** 实时副本审查:列表快照只负责提示,真正操作前始终严格重扫并深比较完整 NBT。 */
@@ -55,7 +63,8 @@ public final class CopyOps {
 
     public CompoundTag copyVersionTag(UUID uuid, String versionId) throws Exception {
         List<String> warnings = new ArrayList<>();
-        CopyVersionScanner.Version version = requireVersion(inspectVersionState(uuid, warnings), versionId, false);
+        CopyVersionScanner.Version version = requireVersion(
+                inspectVersionState(uuid, warnings).scan(), versionId, false);
         CopyVersionScanner.Copy preview = version.copies().stream()
                 .filter(copy -> copy.uuid().equals(uuid)).findFirst()
                 .orElseGet(() -> version.copies().stream().max(
@@ -63,12 +72,21 @@ public final class CopyOps {
         return preview.tag();
     }
 
-    private CopyVersionScanner.Scan inspectVersionState(UUID uuid, List<String> warnings) throws Exception {
+    private CopyInspection inspectVersionState(UUID uuid, List<String> warnings) throws Exception {
         ScanSession scan = this.kit.strictScan(warnings);
-        Set<UUID> members = CopyVersionScanner.members(scan.meta(), uuid);
+        Set<UUID> diskMembers = CopyVersionScanner.members(scan.meta(), uuid);
+        Set<UUID> runtimeMembers = this.kit.runtimeDependencyGroup(uuid);
+        Set<UUID> members = runtimeMembers.isEmpty() ? diskMembers : runtimeMembers;
         JsonObject runtime = this.kit.readOperationalMetadata(members);
-        return JobService.underLocate(() -> CopyVersionScanner.scan(
-                scan.dims(), scan.meta(), uuid, activeEntries(runtime, members), warnings));
+        Map<UUID, String> active = activeEntries(runtime, members);
+        CopyVersionScanner.Scan versions = JobService.underLocate(() -> CopyVersionScanner.scan(
+                scan.dims(), scan.meta(), uuid, members, active, warnings, !runtimeMembers.isEmpty()));
+        CopyVersionScanner.Version runtimeVersion = runtimeMembers.isEmpty()
+                ? null : CopyVersionScanner.runtimeCandidate(versions, active);
+        Set<UUID> external = new LinkedHashSet<>(diskMembers);
+        external.removeAll(members);
+        return new CopyInspection(versions, Set.copyOf(diskMembers), Set.copyOf(runtimeMembers),
+                Set.copyOf(external), Map.copyOf(active), runtimeVersion == null ? null : runtimeVersion.id());
     }
 
     private static CopyVersionScanner.Version requireVersion(CopyVersionScanner.Scan scan, String versionId,
@@ -120,13 +138,20 @@ public final class CopyOps {
         return active;
     }
 
-    private JsonObject copyVersionsJson(CopyVersionScanner.Scan scan) {
+    private JsonObject copyVersionsJson(CopyInspection inspection) {
+        CopyVersionScanner.Scan scan = inspection.scan();
         JsonObject out = new JsonObject();
         out.addProperty("uuid", scan.target().toString());
         if (scan.currentVersion() != null) out.addProperty("current_version", scan.currentVersion());
         out.addProperty("current_state", scan.currentState().name().toLowerCase(java.util.Locale.ROOT));
         out.addProperty("active_members", scan.activeMembers());
         out.addProperty("members", scan.members().size());
+        out.addProperty("disk_members", inspection.diskMembers().size());
+        out.addProperty("runtime_members", inspection.runtimeMembers().size());
+        if (inspection.runtimeVersion() != null) out.addProperty("runtime_current", inspection.runtimeVersion());
+        JsonArray external = new JsonArray();
+        inspection.externalMembers().stream().sorted().forEach(uuid -> external.add(uuid.toString()));
+        out.add("external_members", external);
         JsonArray versions = new JsonArray();
         for (CopyVersionScanner.Version version : scan.versions()) {
             JsonObject item = new JsonObject();
@@ -161,6 +186,20 @@ public final class CopyOps {
         JsonArray incomplete = new JsonArray();
         for (CopyVersionScanner.Copy copy : scan.incomplete()) incomplete.add(copyVersionItem(copy, false));
         out.add("incomplete", incomplete);
+        JsonArray mismatches = new JsonArray();
+        if (inspection.runtimeVersion() != null) {
+            CopyVersionScanner.Version current = scan.versions().stream()
+                    .filter(version -> version.id().equals(inspection.runtimeVersion())).findFirst().orElse(null);
+            if (current != null) {
+                CopyVersionScanner.evidenceMismatches(current, inspection.activeEntries()).forEach((uuid, entry) -> {
+                    JsonObject mismatch = new JsonObject();
+                    mismatch.addProperty("uuid", uuid.toString());
+                    mismatch.addProperty("entry", entry);
+                    mismatches.add(mismatch);
+                });
+            }
+        }
+        out.add("evidence_mismatches", mismatches);
         return out;
     }
 
@@ -185,20 +224,25 @@ public final class CopyOps {
     private PreparedCopyResolution prepareCopyResolution(UUID uuid, String versionId, List<String> warnings)
             throws Exception {
         // flush 之前判定:那之后活着那份的 id 和槽位都不再是用户看到的那一个
-        CopyVersionScanner.Scan initial = inspectVersionState(uuid, warnings);
-        boolean live = requireSelectableVersion(initial, versionId).active();
-        boolean allowPreSave = preSaveAllowed(initial);
+        CopyInspection initial = inspectVersionState(uuid, warnings);
+        CopyVersionScanner.Version requested = requireSelectableVersion(initial.scan(), versionId);
+        boolean live = versionId.equals(initial.scan().currentVersion());
+        boolean allowPreSave = initial.runtimeMembers().isEmpty() && preSaveAllowed(initial.scan());
         ScanSession scan = this.kit.strictScan(warnings);
-        Set<UUID> members = CopyVersionScanner.members(scan.meta(), uuid);
+        Set<UUID> diskMembers = CopyVersionScanner.members(scan.meta(), uuid);
+        Set<UUID> members = initial.runtimeMembers().isEmpty() ? diskMembers : initial.runtimeMembers();
         if (allowPreSave) {
             this.kit.flushLoadedTargets(members);
             scan = this.kit.strictScan(warnings);
-            members = CopyVersionScanner.members(scan.meta(), uuid);
+            diskMembers = CopyVersionScanner.members(scan.meta(), uuid);
+            if (initial.runtimeMembers().isEmpty()) members = diskMembers;
         }
         DeleteTx.DeleteComponent component = this.tx.prepareExactDeleteComponent(members, warnings, allowPreSave);
         if (!component.targets.equals(members)) {
             throw new IllegalStateException("副本依赖组缺少可读取的磁盘条目，未执行副本处理");
         }
+        component.diskMembersSnapshot = Set.copyOf(diskMembers);
+        if (!initial.runtimeMembers().isEmpty()) component.runtimeMembersSnapshot = Set.copyOf(members);
 
         JsonObject runtime = this.kit.readOperationalMetadata(members);
         Map<UUID, String> active = activeEntries(runtime, members);
@@ -217,8 +261,14 @@ public final class CopyOps {
                         copy.pointers()));
             }
         }
-        CopyVersionScanner.Scan versions = CopyVersionScanner.assemble(uuid, members, copies, active);
-        return new PreparedCopyResolution(component, versions, states, live);
+        CopyVersionScanner.Scan versions = CopyVersionScanner.assemble(
+                uuid, members, copies, active, !initial.runtimeMembers().isEmpty());
+        CopyVersionScanner.Version runtimeVersion = initial.runtimeMembers().isEmpty()
+                ? null : CopyVersionScanner.runtimeCandidate(versions, active);
+        Map<UUID, OpKit.RuntimeSnapshot> runtimeSnapshots = runtimeVersion == null
+                ? Map.of() : this.kit.snapshotRuntimeGroup(members);
+        return new PreparedCopyResolution(component, versions, states, live,
+                runtimeVersion == null ? null : runtimeVersion.id(), runtimeSnapshots);
     }
 
     static boolean preSaveAllowed(CopyVersionScanner.Scan scan) {
@@ -248,7 +298,8 @@ public final class CopyOps {
             for (CopyVersionScanner.Version version : scan.versions()) {
                 if (!version.complete() && !CopyVersionScanner.repairableCurrent(scan, version)) continue;
                 stages.put(version.id(), this.recycle.stageArchived(
-                        versionSources(version), states, "deleted"));
+                        resolutionSources(version, prepared.runtimeVersion(),
+                                prepared.runtimeSnapshots()), states, "deleted"));
             }
             for (CopyVersionScanner.Copy copy : scan.incomplete()) {
                 incompleteStages.put(copy.key().id(), this.recycle.stageArchived(
@@ -271,7 +322,9 @@ public final class CopyOps {
             for (RecycleStore.Stage stage : incompleteStages.values()) {
                 this.recycle.commitIncomplete(stage);
             }
-            this.restore.restoreGroupData(restoreGroup(selected, states, "copy-selection"), false, warnings);
+            this.restore.restoreGroupData(
+                    restoreSelection(selected, prepared.runtimeVersion(), prepared.runtimeSnapshots(),
+                            states, "copy-selection"), false, warnings);
             if (!rollbackVersion.id().equals(selected.id())) {
                 this.recycle.commitOld(stages.get(rollbackVersion.id()));
             }
@@ -348,7 +401,7 @@ public final class CopyOps {
 
     private JsonObject quarantineIncompleteCopiesExclusive(UUID uuid) throws Exception {
         List<String> warnings = new ArrayList<>();
-        CopyVersionScanner.Scan scan = inspectVersionState(uuid, warnings);
+        CopyVersionScanner.Scan scan = inspectVersionState(uuid, warnings).scan();
         if (scan.versions().stream().anyMatch(version -> version.complete()
                 || CopyVersionScanner.repairableCurrent(scan, version))) {
             throw new IllegalStateException("存在完整候选版本，请选择主版本；未归属条目会随切换一起隔离");
@@ -421,6 +474,37 @@ public final class CopyOps {
             CompoundTag tag = version.complete() ? copy.tag() : retainDependencies(copy.tag(), retained);
             return new RecycleStore.RestoreBody(copy.uuid(), copy.key().dim(), tag,
                     state.paused(), state.forced());
+        }).toList();
+        return new RecycleStore.RestoreGroup(id, "pending", false, bodies);
+    }
+
+    static List<RecycleStore.Source> resolutionSources(
+            CopyVersionScanner.Version version, String runtimeVersion,
+            Map<UUID, OpKit.RuntimeSnapshot> runtimeSnapshots) {
+        if (!version.id().equals(runtimeVersion) || runtimeSnapshots.isEmpty()) {
+            return versionSources(version);
+        }
+        Map<UUID, DiskScanner.EntryKey> keys = new LinkedHashMap<>();
+        for (CopyVersionScanner.Copy copy : version.copies()) keys.putIfAbsent(copy.uuid(), copy.key());
+        if (!keys.keySet().equals(runtimeSnapshots.keySet())) {
+            throw new IllegalStateException("当前运行组快照与候选版本成员不一致");
+        }
+        return runtimeSnapshots.entrySet().stream().map(entry -> new RecycleStore.Source(
+                entry.getKey(), entry.getValue().dimension(), keys.get(entry.getKey()), entry.getValue().tag())).toList();
+    }
+
+    static RecycleStore.RestoreGroup restoreSelection(
+            CopyVersionScanner.Version selected, String runtimeVersion,
+            Map<UUID, OpKit.RuntimeSnapshot> runtimeSnapshots,
+            Map<UUID, RecycleStore.OperationalState> states, String id) {
+        if (!selected.id().equals(runtimeVersion) || runtimeSnapshots.isEmpty()) {
+            return restoreGroup(selected, states, id);
+        }
+        List<RecycleStore.RestoreBody> bodies = runtimeSnapshots.entrySet().stream().map(entry -> {
+            RecycleStore.OperationalState state = states.getOrDefault(entry.getKey(),
+                    new RecycleStore.OperationalState(false, false));
+            return new RecycleStore.RestoreBody(entry.getKey(), entry.getValue().dimension(),
+                    entry.getValue().tag(), state.paused(), state.forced());
         }).toList();
         return new RecycleStore.RestoreGroup(id, "pending", false, bodies);
     }

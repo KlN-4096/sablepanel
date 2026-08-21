@@ -8,6 +8,7 @@ import net.minecraft.nbt.NbtUtils;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -97,6 +98,29 @@ class CopyOpsResolutionTest {
     @Test
     void completeCurrentVersionStillUsesTheNormalPreSavePath() {
         assertTrue(CopyOps.preSaveAllowed(scan("first", CopyVersionScanner.CurrentState.KNOWN)));
+    }
+
+    @Test
+    void runtimeCurrentSelectionBacksUpAndRestoresTheRuntimeSnapshot() {
+        CompoundTag disk = new CompoundTag();
+        disk.putString("state", "disk");
+        DiskScanner.EntryKey key = key(0);
+        CopyVersionScanner.Version version = new CopyVersionScanner.Version("runtime", true, 0,
+                List.of(new CopyVersionScanner.Copy(this.target, key, disk, 1, List.of())),
+                List.of(), List.of(), Set.of());
+        CompoundTag live = new CompoundTag();
+        live.putString("state", "live");
+        Map<UUID, OpKit.RuntimeSnapshot> snapshots = Map.of(this.target,
+                new OpKit.RuntimeSnapshot("minecraft:overworld", live));
+
+        List<com.klnon.sablepanel.panel.recycle.RecycleStore.Source> sources =
+                CopyOps.resolutionSources(version, "runtime", snapshots);
+        var restored = CopyOps.restoreSelection(version, "runtime", snapshots,
+                Map.of(this.target, new com.klnon.sablepanel.panel.recycle.RecycleStore.OperationalState(
+                        false, false)), "selection");
+
+        assertEquals("live", sources.get(0).tag().getString("state"));
+        assertEquals("live", restored.bodies().get(0).tag().getString("state"));
     }
 
     private static DiskScanner.EntryKey key(int slot) {

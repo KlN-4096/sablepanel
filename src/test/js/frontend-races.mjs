@@ -153,6 +153,31 @@ const bodiesResponse = (extra = {}) => jsonResponse({
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
+test('常驻、物理暂停和 tick 暂停按整组独立更新', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    const group = {gid:'g1',bodies:[{uuid:'a'},{uuid:'b'}]};
+    BODY_BY_UUID = new Map([
+      ['a',{b:group.bodies[0],g:group}],
+      ['b',{b:group.bodies[1],g:group}]
+    ]);
+    PAUSED = new Set(['a']); FROZEN = new Set(['b']); FORCED = new Set();
+    submitJob = async () => ({job:1}); renderAll = () => {}; renderDetail = () => {};
+  `);
+
+  await evalIn(sandbox, 'setForcedBodies')(['a'], true);
+  assert.deepEqual(JSON.parse(evalIn(sandbox,
+    'JSON.stringify({paused:[...PAUSED],frozen:[...FROZEN],forced:[...FORCED].sort()})')),
+    {paused:['a'], frozen:['b'], forced:['a','b']}, '开启常驻不得改动两种暂停');
+
+  await evalIn(sandbox, 'setPausedBodies')(['a'], true);
+  await evalIn(sandbox, 'setFrozenBodies')(['a'], true);
+  await evalIn(sandbox, 'setForcedBodies')(['a'], false);
+  assert.deepEqual(JSON.parse(evalIn(sandbox,
+    'JSON.stringify({paused:[...PAUSED],frozen:[...FROZEN],forced:[...FORCED]})')),
+    {paused:[], frozen:[], forced:[]}, '取消常驻必须清除整组运行状态');
+});
+
 test('总览分别按依赖组和成员体统计规模', () => {
   const { sandbox } = setup();
   const summary = JSON.parse(evalIn(sandbox, `
@@ -1157,7 +1182,7 @@ test('回收站切换版本页签会清选择但保留筛选条件', async () =>
     '旧版本页签必须请求服务端全局分类后的 old 分页');
 });
 
-test('旧版本恢复和需恢复彻底删除都会给出对应警告', async () => {
+test('旧版本恢复和删除未完成彻底删除都会给出对应警告', async () => {
   const { sandbox } = setup();
   evalIn(sandbox, `
     __modals = [];
@@ -2068,6 +2093,30 @@ test('copyVerdict 判定表:八个终态各归各位', async () => {
       missing_dependencies:['stale-a','stale-b']}], incomplete:[] });
   assert.deepEqual([repair.kind,repair.pick,repair.removed,repair.missing],
     ['READY_REPAIR','repair',1,2], '逐成员运行证据完整的当前残缺版本进入显式修复流');
+  const runtime = verdict({ current_state:'known', current_version:'runtime', runtime_current:'runtime',
+    members:25, disk_members:26, runtime_members:25, active_members:25,
+    versions:[{id:'runtime',complete:true,members:25,active_members:24}],
+    evidence_mismatches:[{uuid:'stale',entry:'old'}], external_members:['ancient'], incomplete:[] });
+  assert.deepEqual([runtime.kind,runtime.pick,runtime.removed], ['READY_CLEAN','runtime',0],
+    '唯一完整运行组允许归一旧活动槽，磁盘外部关联不计入移出成员');
+});
+
+test('副本对话框列出运行槽不对齐和不参与处理的历史关联成员', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    COPY_VERSION='runtime';
+    BODY_BY_UUID=new Map([['ancient',{b:{name:'古城'}}],['stale',{b:{name:'尾部构件'}}]]);
+    renderDedupe({current_state:'known',current_version:'runtime',runtime_current:'runtime',
+      members:25,disk_members:26,runtime_members:25,active_members:25,
+      versions:[{id:'runtime',complete:true,current:true,members:25,active_members:24,
+        blocks:24011,locations:[],missing_dependencies:[],copies:[]}],
+      evidence_mismatches:[{uuid:'stale',entry:'minecraft:overworld/-11.-8.0:13'}],
+      external_members:['ancient'],incomplete:[]});
+  `);
+  const html = evalIn(sandbox, "document.getElementById('copyPanelBody').innerHTML");
+  assert.match(html, /尾部构件/);
+  assert.match(html, /-11\.-8\.0:13/);
+  assert.match(html, /古城/);
 });
 
 test('副本预览提示随 dialog 进入顶层，迁移时清掉旧提示', async () => {
