@@ -1,8 +1,6 @@
 package com.klnon.sablepanel.panel.transport;
 
 import java.net.Socket;
-import java.security.Principal;
-import java.security.PrivateKey;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import javax.net.ssl.SSLEngine;

@@ -1,6 +1,5 @@
 package com.klnon.sablepanel.panel.consistency;
 
-import com.klnon.sablepanel.panel.storage.DiskScanner;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;
 import org.junit.jupiter.api.Test;
