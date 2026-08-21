@@ -13,6 +13,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.server.ServerAboutToStartEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
@@ -36,6 +37,7 @@ public class SablePanel {
         NeoForge.EVENT_BUS.addListener(this::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(this::onPostPhysics);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
+        NeoForge.EVENT_BUS.addListener(this::onServerAboutToStart);
         NeoForge.EVENT_BUS.addListener(this::onServerStarted);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         LOGGER.info("SablePanel instrumentation loaded");
@@ -52,6 +54,10 @@ public class SablePanel {
             gateway.close();
             LOGGER.warn("sablepanel: client web gateway startup failed", error);
         }
+    }
+
+    private void onServerAboutToStart(ServerAboutToStartEvent event) {
+        this.panelRuntime.prepareForServer();
     }
 
     private void onServerStarted(ServerStartedEvent event) {

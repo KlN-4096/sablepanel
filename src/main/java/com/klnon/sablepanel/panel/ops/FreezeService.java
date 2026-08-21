@@ -12,16 +12,14 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 冻结 tick —— <b>与"暂停"是两件事,别混</b>:
+ * 冻结 tick —— <b>与物理暂停完全独立</b>:
  * <ul>
  *   <li><b>暂停</b>({@link PauseService})= 引擎级固定约束。体被钉住不动,但方块实体照常 tick,
  *       机器照转。砍掉的是 Rapier 求解器那份开销。</li>
  *   <li><b>冻结</b>(本类)= 该体 plot 内的方块实体<b>整个不 tick</b>。Create 的流体网络、应力网络、
  *       传送带全部停摆,时间对这个结构静止。砍掉的是方块实体那份开销。</li>
  * </ul>
- * 2026-08-08 实测(192 体 / 25009 方块的绳链组,整组挂常驻票):
- * 不暂停 40 秒被看门狗杀,吊在 {@code Rapier3D.step};全组暂停后延到 ~5 分钟,吊死处换成
- * {@code Create FluidNetwork.tick} —— 一点物理都没有。所以两者<b>都</b>要,缺一个都撑不住。
+ * 暂停 tick 不会创建物理约束，也不会清除速度；需要整组停住时由用户另行点击“暂停物理”。
  * <p>
  * 判定走 sable 自己的 plot 反查({@code container.getPlot(chunkX, chunkZ).getSubLevel()}),
  * 纯位移加数组索引。冻结集合为空时直接短路,常态开销是一次 {@code isEmpty()}。

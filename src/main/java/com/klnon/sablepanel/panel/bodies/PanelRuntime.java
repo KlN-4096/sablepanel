@@ -38,6 +38,7 @@ public final class PanelRuntime implements AutoCloseable {
     private static final int RUNTIME_REFRESH_TICKS = 100;
     private static final int RUNTIME_REFRESH_IDLE_TICKS = 1200;
     private static final int EVENT_REFRESH_TICKS = 20;
+    private static final int LEGACY_MIGRATION_ATTEMPTS = 3;
     private static final int EXECUTOR_SHUTDOWN_SECONDS = 3;
     private static final int SCAN_IDLE = 0;
     private static final int SCAN_RUNNING = 1;
@@ -52,12 +53,25 @@ public final class PanelRuntime implements AutoCloseable {
     private volatile PanelWebGateway panelWeb;
     private volatile JobService jobService;
     private volatile PreviewSubsystem previewSubsystem;
+    private PanelConfig preparedConfig;
     private volatile boolean stopping = true;
     private volatile boolean scanPauseLogged;
     private ScheduledExecutorService controlExecutor;
     private ExecutorService scanExecutor;
     private ScheduledFuture<?> heartbeatTask;
     private int ticksSinceRefresh;
+
+    /** 世界加载前读取安全意图，确保 Sable 恢复常驻体时约束判据已经可用。 */
+    public synchronized void prepareForServer() {
+        if (this.preparedConfig != null) return;
+        PanelConfig config = PanelConfig.load();
+        if (config.enabled) {
+            PauseService.load();
+            com.klnon.sablepanel.panel.ops.FreezeService.load();
+            com.klnon.sablepanel.panel.ops.PhysicsService.load();
+        }
+        this.preparedConfig = config;
+    }
 
     public synchronized boolean start(MinecraftServer server) throws Exception {
         long generation;
@@ -75,7 +89,8 @@ public final class PanelRuntime implements AutoCloseable {
         PanelClusterNode createdNode = null;
         ScheduledFuture<?> createdHeartbeat = null;
         try {
-            PanelConfig config = PanelConfig.load();
+            prepareForServer();
+            PanelConfig config = this.preparedConfig;
             if (!config.enabled) {
                 synchronized (this.lifecycleLock) {
                     if (this.lifecycleGeneration.get() == generation) this.stopping = true;
@@ -83,9 +98,6 @@ public final class PanelRuntime implements AutoCloseable {
                 return false;
             }
             this.bodyIndex.setConfig(config);
-            PauseService.load();
-            com.klnon.sablepanel.panel.ops.FreezeService.load();
-            com.klnon.sablepanel.panel.ops.PhysicsService.load();
             createdControlExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "sablepanel-control");
                 thread.setDaemon(true);
@@ -143,7 +155,11 @@ public final class PanelRuntime implements AutoCloseable {
             }, 10, TimeUnit.SECONDS);
             createdHeartbeat = control.scheduleWithFixedDelay(() -> clusterTick(config, panel, generation),
                     PanelClusterNode.HEARTBEAT_SECONDS, PanelClusterNode.HEARTBEAT_SECONDS, TimeUnit.SECONDS);
-            PauseService.refreshOnMain(server, PauseService.snapshot());
+            var lockFailures = PauseService.refreshAllOnMain(server);
+            if (!lockFailures.isEmpty()) {
+                SablePanel.LOGGER.error("sablepanel: startup physical lock failed for bodies {}; "
+                        + "their explicit physics pause is not active", lockFailures);
+            }
             synchronized (this.lifecycleLock) {
                 if (!isLifecycleCurrent(generation)) throw new IllegalStateException("面板启动已取消");
                 this.controlExecutor = control;
@@ -154,6 +170,7 @@ public final class PanelRuntime implements AutoCloseable {
                 PhysicsTimer.ENABLED = true;
                 PanelObserver.ENABLED = true;
             }
+            scheduleLegacyPauseMigration(ops, control, scans, generation, 1);
             if (panel.isHost()) startServerWeb(config, panel, generation);
             return true;
         } catch (Exception error) {
@@ -164,6 +181,31 @@ public final class PanelRuntime implements AutoCloseable {
             rollbackStartup(generation, createdControlExecutor, createdScanExecutor,
                     createdNode, createdHeartbeat);
             throw error;
+        }
+    }
+
+    private void scheduleLegacyPauseMigration(PanelOps ops, ScheduledExecutorService control,
+                                              ExecutorService scans, long generation, int attempt) {
+        try {
+            scans.execute(() -> {
+                if (!isLifecycleCurrent(generation)) return;
+                try {
+                    int normalized = ops.teleport().normalizePersistedPausedGroups();
+                    if (normalized > 0) {
+                        SablePanel.LOGGER.info("sablepanel: normalized {} legacy paused members to full groups",
+                                normalized);
+                    }
+                } catch (Exception error) {
+                    if (attempt >= LEGACY_MIGRATION_ATTEMPTS) {
+                        SablePanel.LOGGER.error("sablepanel: legacy paused-state group migration failed after {} attempts",
+                                attempt, error);
+                        return;
+                    }
+                    control.schedule(() -> scheduleLegacyPauseMigration(
+                            ops, control, scans, generation, attempt + 1), 1, TimeUnit.SECONDS);
+                }
+            });
+        } catch (RejectedExecutionException ignored) {
         }
     }
 
@@ -230,6 +272,7 @@ public final class PanelRuntime implements AutoCloseable {
         PauseService.reset();
         com.klnon.sablepanel.panel.ops.FreezeService.reset();
         com.klnon.sablepanel.panel.ops.PhysicsService.reset();
+        this.preparedConfig = null;
         this.scanPauseLogged = false;
         this.refreshRequested.set(false);
         this.ticksSinceRefresh = 0;
@@ -347,9 +390,7 @@ public final class PanelRuntime implements AutoCloseable {
         if (preview != null) preview.close();
         shutdownExecutor(control);
         shutdownExecutor(scans);
-        PauseService.reset();
-        com.klnon.sablepanel.panel.ops.FreezeService.reset();
-        com.klnon.sablepanel.panel.ops.PhysicsService.reset();
+        // 安全意图和约束属于服务器生命周期；面板网关启动失败不能留下不可追踪的孤儿约束。
         this.scanPauseLogged = false;
         this.refreshRequested.set(false);
     }

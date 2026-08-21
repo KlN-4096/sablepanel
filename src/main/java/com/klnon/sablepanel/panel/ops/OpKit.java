@@ -7,6 +7,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.panel.audit.EventLog;
 import com.klnon.sablepanel.SablePanel;
+import dev.ryanhcode.sable.api.SubLevelHelper;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
@@ -30,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.function.BooleanSupplier;
 import com.klnon.sablepanel.panel.MainThread;
 
 /**
@@ -56,24 +58,162 @@ public final class OpKit {
     record MemberPlan(DiskScanner.EntryKey key, CompoundTag tag, DiskScanner.LiveLocation cold) {
     }
 
-    /**
-     * 把点名的体扩成它们所在的完整依赖组(双向闭包,与列表页分组同一判据)。
-     * {@code prepareChain} 只沿 deps 单向 BFS 且受 {@link #MAX_CHAIN} 约束,拿不到整组。
-     * 定位失败时退回原样:宁可少扩也不要因为一次扫描抖动就拒绝整个操作。
-     */
-    List<UUID> expandToDependencyGroups(Collection<UUID> roots) {
-        try {
-            List<String> warnings = new ArrayList<>();
-            ScanSession scan = freshScan(warnings);
-            Set<UUID> all = new LinkedHashSet<>(roots);
-            for (Set<UUID> component : DiskScanner.selectedDependencyComponents(scan.meta(), List.copyOf(all))) {
-                all.addAll(component);
+    record RuntimeSnapshot(String dimension, CompoundTag tag) {
+    }
+
+    record DependencySelection(List<UUID> members, List<Set<UUID>> components) {
+    }
+
+    record LoadAttempts(BooleanSupplier selectedCold, BooleanSupplier selectedPrepared,
+                        BooleanSupplier matchingHolding) {
+    }
+
+    /** 加载中的体以 Sable 当前运行链为准；未加载体才使用严格磁盘依赖闭包。 */
+    List<UUID> expandToDependencyGroups(Collection<UUID> roots) throws Exception {
+        return dependencyGroups(roots).members();
+    }
+
+    DependencySelection dependencyGroups(Collection<UUID> roots) throws Exception {
+        Map<UUID, Set<UUID>> runtime = runtimeDependencyGroups();
+        Set<UUID> coldRoots = new LinkedHashSet<>();
+        for (UUID root : roots) if (!runtime.containsKey(root)) coldRoots.add(root);
+        Map<UUID, List<DiskScanner.EntryMeta>> disk = Map.of();
+        if (!coldRoots.isEmpty()) disk = strictScan(new ArrayList<>()).meta();
+        Set<UUID> unknown = new LinkedHashSet<>();
+        for (UUID root : coldRoots) if (!disk.containsKey(root)) unknown.add(root);
+        if (!unknown.isEmpty()) throw new IllegalStateException("依赖组根成员不存在: " + unknown);
+        List<Set<UUID>> components = selectDependencyGroupSets(roots, disk, runtime);
+        LinkedHashSet<UUID> members = new LinkedHashSet<>();
+        components.forEach(members::addAll);
+        return new DependencySelection(List.copyOf(members), components);
+    }
+
+    static List<UUID> selectDependencyGroups(Collection<UUID> roots,
+                                             Map<UUID, List<DiskScanner.EntryMeta>> disk,
+                                             Map<UUID, Set<UUID>> runtime) {
+        LinkedHashSet<UUID> all = new LinkedHashSet<>();
+        selectDependencyGroupSets(roots, disk, runtime).forEach(all::addAll);
+        return List.copyOf(all);
+    }
+
+    static List<Set<UUID>> selectDependencyGroupSets(Collection<UUID> roots,
+                                                     Map<UUID, List<DiskScanner.EntryMeta>> disk,
+                                                     Map<UUID, Set<UUID>> runtime) {
+        List<Set<UUID>> groups = new ArrayList<>();
+        for (UUID root : roots) {
+            Set<UUID> loaded = runtime.get(root);
+            List<Set<UUID>> diskComponents = loaded == null
+                    ? DiskScanner.selectedDependencyComponents(disk, List.of(root)) : List.of();
+            Set<UUID> selected = loaded != null ? loaded
+                    : diskComponents.isEmpty() ? Set.of(root) : Set.copyOf(diskComponents.get(0));
+            boolean duplicate = false;
+            for (Set<UUID> existing : groups) {
+                if (existing.equals(selected)) {
+                    duplicate = true;
+                    break;
+                }
+                if (!java.util.Collections.disjoint(existing, selected)) {
+                    throw new IllegalStateException("准备阶段依赖组相互重叠但不一致");
+                }
             }
-            return List.copyOf(all);
-        } catch (Throwable error) {
-            SablePanel.LOGGER.warn("sablepanel: expanding force-load targets to dependency groups failed", error);
-            return List.copyOf(new LinkedHashSet<>(roots));
+            if (!duplicate) groups.add(Set.copyOf(selected));
         }
+        return List.copyOf(groups);
+    }
+
+    Set<UUID> runtimeDependencyGroup(UUID root) throws Exception {
+        return runtimeDependencyGroups().getOrDefault(root, Set.of());
+    }
+
+    void requireLoadedDependencyGroupOnMain(Collection<UUID> expectedMembers) {
+        Set<UUID> expected = Set.copyOf(expectedMembers);
+        Set<UUID> missing = new LinkedHashSet<>();
+        ServerSubLevel anchor = null;
+        for (UUID uuid : expected) {
+            ServerSubLevel body = resolveLoaded(uuid);
+            if (body == null) missing.add(uuid);
+            else if (anchor == null) anchor = body;
+        }
+        Set<UUID> actual = new LinkedHashSet<>();
+        if (anchor != null) for (ServerSubLevel member : SubLevelHelper.getLoadingDependencyChain(anchor)) {
+            actual.add(member.getUniqueId());
+        }
+        requireExactRuntimeGroup(expected, actual, missing);
+    }
+
+    void requirePreparedDependencyGroupsOnMain(Collection<Set<UUID>> components) {
+        for (Set<UUID> component : components) {
+            boolean anyLoaded = component.stream().anyMatch(uuid -> resolveLoaded(uuid) != null);
+            if (anyLoaded) requireLoadedDependencyGroupOnMain(component);
+        }
+    }
+
+    static void requireExactRuntimeGroup(Set<UUID> expected, Set<UUID> actual, Set<UUID> missing) {
+        if (!missing.isEmpty() || !actual.equals(expected)) {
+            throw new IllegalStateException("当前运行依赖组在操作期间发生变化: expected="
+                    + expected + ", actual=" + actual + ", missing=" + missing);
+        }
+    }
+
+    Map<UUID, RuntimeSnapshot> snapshotRuntimeGroup(Set<UUID> expected) throws Exception {
+        return MainThread.onUntilComplete(this.server, () -> {
+            if (expected.isEmpty()) return Map.of();
+            List<UUID> ordered = expected.stream().sorted().toList();
+            Map<UUID, ServerSubLevel> bodies = new LinkedHashMap<>();
+            for (UUID uuid : ordered) {
+                ServerSubLevel body = resolveLoaded(uuid);
+                if (body == null) throw new IllegalStateException("当前运行组成员已卸载: " + uuid);
+                bodies.put(uuid, body);
+            }
+            Set<UUID> actual = new LinkedHashSet<>();
+            for (ServerSubLevel member : SubLevelHelper.getLoadingDependencyChain(bodies.get(ordered.get(0)))) {
+                actual.add(member.getUniqueId());
+            }
+            if (!actual.equals(expected)) {
+                throw new IllegalStateException("当前运行依赖组在操作期间发生变化");
+            }
+            Map<UUID, RuntimeSnapshot> snapshots = new LinkedHashMap<>();
+            for (Map.Entry<UUID, ServerSubLevel> entry : bodies.entrySet()) {
+                ServerSubLevel body = entry.getValue();
+                snapshots.put(entry.getKey(), new RuntimeSnapshot(
+                        body.getLevel().dimension().location().toString(),
+                        SubLevelSerializer.toData(body, ordered).fullTag().copy()));
+            }
+            return Map.copyOf(snapshots);
+        });
+    }
+
+    private Map<UUID, Set<UUID>> runtimeDependencyGroups() throws Exception {
+        return MainThread.on(this.server, 20, () -> {
+            Map<UUID, Set<UUID>> groups = new LinkedHashMap<>();
+            List<ServerSubLevel> loaded = new ArrayList<>();
+            for (ServerLevel level : this.server.getAllLevels()) {
+                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+                if (container == null) continue;
+                loaded.addAll(List.copyOf(container.getAllSubLevels()));
+            }
+            Set<UUID> loadedUuids = new LinkedHashSet<>();
+            for (ServerSubLevel body : loaded) {
+                if (!loadedUuids.add(body.getUniqueId())) {
+                    throw new IllegalStateException("运行态存在重复 UUID: " + body.getUniqueId());
+                }
+            }
+            for (ServerSubLevel body : loaded) {
+                if (groups.containsKey(body.getUniqueId())) continue;
+                Set<UUID> component = new LinkedHashSet<>();
+                for (ServerSubLevel member : SubLevelHelper.getLoadingDependencyChain(body)) {
+                    component.add(member.getUniqueId());
+                }
+                Set<UUID> immutable = Set.copyOf(component);
+                for (UUID uuid : component) {
+                    Set<UUID> previous = groups.putIfAbsent(uuid, immutable);
+                    if (previous != null && !previous.equals(immutable)) {
+                        throw new IllegalStateException("运行依赖组不一致: " + uuid);
+                    }
+                }
+            }
+            return Map.copyOf(groups);
+        });
     }
 
     ScanSession freshScan(List<String> warnings) throws Exception {
@@ -244,7 +384,7 @@ public final class OpKit {
         });
     }
 
-    private static DiskScanner.EntryKey entryKey(String dim, GlobalSavedSubLevelPointer pointer) {
+    static DiskScanner.EntryKey entryKey(String dim, GlobalSavedSubLevelPointer pointer) {
         return new DiskScanner.EntryKey(dim,
                 Math.floorDiv(pointer.chunkPos().x, 32), Math.floorDiv(pointer.chunkPos().z, 32),
                 pointer.storageIndex(), pointer.subLevelIndex());
@@ -383,41 +523,72 @@ public final class OpKit {
         return sl;
     }
 
-    /** 主线程:单体加载。holding snatch → 活指针 snatch → 孤儿收养(fromData+loadHoldingSubLevel) */
+    /** 主线程:单体加载。选定活指针 → 选定条目收养 → 同内容旧 holding 兜底。 */
     void loadOne(UUID uuid, MemberPlan plan) {
         Set<GlobalSavedSubLevelPointer> attemptedPointers = new LinkedHashSet<>();
-        // 1) sable 内存 holding 态:原生指针权威
+        ServerLevel selectedLevel = levelOf(plan.key().dim());
+        ServerSubLevelContainer selected = selectedLevel == null ? null : SubLevelContainer.getContainer(selectedLevel);
+        if (selected == null) return;
+        boolean occupied = plotOccupiedByOther(selected, plan.tag(), uuid);
+        // 面板已经按当前副本证据选过条目，先用与该条目匹配的活指针。
+        BooleanSupplier selectedCold = plan.cold() == null ? null : () -> {
+            try {
+                GlobalSavedSubLevelPointer pointer = new GlobalSavedSubLevelPointer(
+                        new ChunkPos(plan.cold().chunkX(), plan.cold().chunkZ()),
+                        (short) plan.cold().key().storage(), (short) plan.cold().key().index());
+                if (attemptedPointers.add(pointer)) selected.getHoldingChunkMap().snatchAndLoad(pointer, uuid);
+                return resolveLoaded(uuid) != null;
+            } catch (Throwable t) {
+                SablePanel.LOGGER.warn("sablepanel: selected snatch {} failed", uuid, t);
+                return false;
+            }
+        };
+        boolean loaded = loadSelectedFirst(occupied, new LoadAttempts(selectedCold,
+                () -> {
+                    loadPreparedMember(uuid, plan);
+                    return resolveLoaded(uuid) != null;
+                }, () -> loadMatchingHolding(uuid, plan, attemptedPointers)));
+        if (!loaded && occupied) {
+            SablePanel.LOGGER.warn("sablepanel: selected copy {} uses an occupied plot; resolve copies first", uuid);
+        }
+    }
+
+    private boolean loadMatchingHolding(UUID uuid, MemberPlan plan,
+                                        Set<GlobalSavedSubLevelPointer> attemptedPointers) {
         for (ServerLevel level : this.server.getAllLevels()) {
             try {
                 ServerSubLevelContainer c = SubLevelContainer.getContainer(level);
                 if (c == null) continue;
                 var holding = c.getHoldingChunkMap().getHoldingSubLevel(uuid);
-                if (holding != null && holding.pointer() != null && attemptedPointers.add(holding.pointer())) {
+                if (holding != null && holding.pointer() != null
+                        && matchingHolding(plan.tag(), holding.data().fullTag(),
+                        plotOccupiedByOther(c, holding.data().fullTag(), uuid))
+                        && attemptedPointers.add(holding.pointer())) {
                     c.getHoldingChunkMap().snatchAndLoad(holding.pointer(), uuid);
-                    if (resolveLoaded(uuid) != null) return;
+                    if (resolveLoaded(uuid) != null) return true;
                 }
             } catch (Throwable t) {
                 SablePanel.LOGGER.warn("sablepanel: holding snatch {} failed", uuid, t);
             }
         }
-        ServerLevel level = levelOf(plan.key().dim());
-        if (level == null) return;
-        ServerSubLevelContainer c = SubLevelContainer.getContainer(level);
-        if (c == null) return;
-        // 2) 盘上活指针:走原生 snatch(保持 sable 自身指针记账精确)
-        if (plan.cold() != null) {
-            try {
-                GlobalSavedSubLevelPointer ptr = new GlobalSavedSubLevelPointer(
-                        new ChunkPos(plan.cold().chunkX(), plan.cold().chunkZ()),
-                        (short) plan.cold().key().storage(), (short) plan.cold().key().index());
-                if (attemptedPointers.add(ptr)) c.getHoldingChunkMap().snatchAndLoad(ptr, uuid);
-                if (resolveLoaded(uuid) != null) return;
-            } catch (Throwable t) {
-                SablePanel.LOGGER.warn("sablepanel: cold snatch {} failed", uuid, t);
-            }
-        }
-        // 3) 真孤儿收养:构造 HoldingSubLevel 直接入 sable 加载管线。
-        loadPreparedMember(uuid, plan);
+        return false;
+    }
+
+    static boolean loadSelectedFirst(boolean occupied, LoadAttempts attempts) {
+        if (occupied) return false;
+        if (attempts.selectedCold() != null && attempts.selectedCold().getAsBoolean()) return true;
+        if (attempts.selectedPrepared().getAsBoolean()) return true;
+        return attempts.matchingHolding().getAsBoolean();
+    }
+
+    static boolean matchingHolding(CompoundTag selected, CompoundTag holding, boolean occupied) {
+        return !occupied && selected.equals(holding);
+    }
+
+    static boolean plotOccupiedByOther(ServerSubLevelContainer container, CompoundTag tag, UUID uuid) {
+        CompoundTag plot = tag.getCompound("plot");
+        var occupant = container.getSubLevel(plot.getInt("plot_x"), plot.getInt("plot_z"));
+        return occupant != null && !uuid.equals(occupant.getUniqueId());
     }
 
     /**

@@ -36,6 +36,15 @@ public final class PanelObserver implements SubLevelObserver {
 
     @Override
     public void onSubLevelAdded(SubLevel subLevel) {
+        try {
+            if (subLevel instanceof ServerSubLevel ssl && !PauseService.onBodyLoaded(ssl)) {
+                SablePanel.LOGGER.error("sablepanel: body {} requires a physical lock but locking failed",
+                        ssl.getUniqueId());
+            }
+        } catch (Throwable t) {
+            SablePanel.LOGGER.error("sablepanel: restoring body {} constraint failed",
+                    subLevel.getUniqueId(), t);
+        }
         if (!ENABLED) return;
         try {
             JsonObject o = base("add", subLevel);
@@ -46,8 +55,6 @@ public final class PanelObserver implements SubLevelObserver {
                     o.addProperty("split_from", splitFrom.toString());
                     checkFragmentStorm(splitFrom);
                 }
-                // 有暂停意图的体(含重启恢复)在加载时重新挂固定约束
-                PauseService.onBodyLoaded(ssl);
             }
             EventLog.write(o);
         } catch (Throwable t) {
@@ -85,9 +92,13 @@ public final class PanelObserver implements SubLevelObserver {
 
     @Override
     public void onSubLevelRemoved(SubLevel subLevel, SubLevelRemovalReason reason) {
-        if (!ENABLED) return;
         try {
             PauseService.onBodyUnloaded(subLevel.getUniqueId());
+        } catch (Throwable t) {
+            SablePanel.LOGGER.warn("sablepanel: clearing body constraint handle failed", t);
+        }
+        if (!ENABLED) return;
+        try {
             JsonObject o = base("remove", subLevel);
             o.addProperty("reason", reason.name());
             EventLog.write(o);
