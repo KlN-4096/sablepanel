@@ -254,9 +254,11 @@ public final class TeleportOps {
         // 常驻加载必须整组。只钉一部分是无效操作:PhysicsChunkTicketManager 按整条依赖链判定卸载,
         // 2026-08-08 实测给 192 体组里的一个成员挂票,体加载出来 827 毫秒后照样 remove UNLOADED,
         // 而作业还报 ok。挂票和摘票必须保持相同的整组语义。
+        Set<UUID> forcedSnapshot = forced ? Set.of()
+                : this.kit.onMainUntilComplete(() -> ForceLoadService.forcedOnMain(this.kit.server));
         OpKit.DependencySelection selection = forced
                 ? this.kit.forceLoadCandidates(requested)
-                : this.kit.dependencyGroups(requested);
+                : this.kit.forcedDisableGroups(requested, forcedSnapshot);
         List<UUID> uuids;
         JsonObject out;
         if (forced) {
@@ -265,7 +267,7 @@ public final class TeleportOps {
             out = result.response();
         } else {
             uuids = selection.members();
-            out = disableForceLoad(selection);
+            out = disableForceLoad(selection, forcedSnapshot);
         }
         out.addProperty("requested", requested.size());
         for (UUID uuid : uuids) this.kit.audit(forced ? "force_load" : "force_unload", uuid, null, null);
@@ -274,14 +276,7 @@ public final class TeleportOps {
 
     private ForceEnableResult enableForceLoad(OpKit.DependencySelection selection) throws Exception {
         List<UUID> uuids = selection.members();
-        // 整批一次建链:多选往往是同一个依赖组的成员,分层 BFS 会把它们一趟解完。
-        // 逐个建链会把同一批 .slvls 解压 N 遍 —— 全选 178 体的绳链时就是 178 遍。
-        Map<UUID, OpKit.MemberPlan> chain = Map.of();
-        // 已加载的体不用进链:ensureLoaded 第一行 resolveLoaded 就会返回。
-        // 生产上曾为一个已加载的 178 依赖体白扫 16 分钟磁盘。
-        List<UUID> cold = uuids.stream().filter(u -> !this.kit.index.isLoaded(u)).toList();
-        if (!cold.isEmpty()) chain = this.kit.prepareChain(cold); // 作业线程做磁盘定位,不占主线程
-        Map<UUID, OpKit.MemberPlan> plans = chain;
+        Map<UUID, OpKit.MemberPlan> plans = selection.plans();
         List<UUID> anchors = forceLoadAnchors(selection);
         // ThreadLocal 到不了主线程,先在作业线程上取出来捕获进 lambda
         JobService.Job job = JobService.current();
@@ -311,13 +306,14 @@ public final class TeleportOps {
                 job.phase("确认当前运行组");
                 job.detail("等待依赖关系稳定");
             }
-            awaitSettledRuntimeMembers(
+            Set<UUID> observedMembers = awaitSettledRuntimeMembers(
                     () -> this.kit.onMainUntilComplete(() -> observeAndTicketOnMain(anchors, newlyTicketed)),
                     () -> Thread.sleep(FORCE_LOAD_POLL_MILLIS),
                     FORCE_LOAD_QUIET_TICKS, FORCE_LOAD_MAX_OBSERVED_TICKS);
 
             Set<UUID> activeMembers = this.kit.onMainUntilComplete(() -> {
-                Set<UUID> keep = new LinkedHashSet<>(this.kit.loadedDependencyMembersOnMain(anchors));
+                Set<UUID> keep = settledForceMembers(
+                        observedMembers, this.kit.loadedDependencyMembersOnMain(anchors));
                 ForceTicketPlan plan = forceTicketPlan(
                         newlyTicketed.stream().map(TicketRef::uuid).toList(), keep);
                 for (UUID uuid : plan.keep()) {
@@ -379,11 +375,23 @@ public final class TeleportOps {
     static List<UUID> forceLoadAnchors(OpKit.DependencySelection selection) {
         List<UUID> anchors = new ArrayList<>();
         for (Set<UUID> component : selection.components()) {
-            UUID anchor = selection.roots().stream().filter(component::contains).findFirst()
-                    .orElseGet(() -> component.stream().min(UUID::compareTo).orElseThrow());
-            anchors.add(anchor);
+            boolean found = false;
+            for (UUID root : selection.roots()) {
+                if (!component.contains(root)) continue;
+                anchors.add(root);
+                found = true;
+            }
+            if (!found) anchors.add(component.stream().min(UUID::compareTo).orElseThrow());
         }
         return List.copyOf(anchors);
+    }
+
+    static Set<UUID> settledForceMembers(Collection<UUID> observed, Collection<UUID> current) {
+        Set<UUID> keep = new LinkedHashSet<>(observed);
+        if (!keep.containsAll(current)) {
+            throw new IllegalStateException("常驻票收敛后出现未观察到的运行成员");
+        }
+        return Set.copyOf(keep);
     }
 
     static ForceTicketPlan forceTicketPlan(Collection<UUID> provisional, Collection<UUID> runtime) {
@@ -451,7 +459,8 @@ public final class TeleportOps {
         return new TicketRef(body.getUniqueId(), body.getLevel().dimension().location().toString());
     }
 
-    private JsonObject disableForceLoad(OpKit.DependencySelection selection) throws Exception {
+    private JsonObject disableForceLoad(OpKit.DependencySelection selection,
+                                        Set<UUID> forcedSnapshot) throws Exception {
         List<UUID> uuids = selection.members();
         Set<UUID> originalPaused = new LinkedHashSet<>();
         Set<UUID> originalFrozen = new LinkedHashSet<>();
@@ -460,6 +469,7 @@ public final class TeleportOps {
         Map<UUID, DiskScanner.EntryKey> savedEntries = new LinkedHashMap<>();
         try {
             JsonObject out = this.kit.onMainUntilComplete(() -> {
+                requireForcedTicketSnapshot(forcedSnapshot, ForceLoadService.forcedOnMain(this.kit.server));
                 Set<ServerLevel> touched = new LinkedHashSet<>();
                 Set<String> changedMetadata = new LinkedHashSet<>();
                 JobService.Job job = JobService.current();
@@ -486,7 +496,7 @@ public final class TeleportOps {
                         },
                         () -> {
                             if (job != null) job.phase("卸载到存档");
-                            unloadGroupsOnMain(uuids, touched, expectedStored);
+                            unloadGroupsOnMain(selection, touched, expectedStored);
                         },
                         () -> {
                             if (job != null) job.phase("保存存档");
@@ -500,7 +510,13 @@ public final class TeleportOps {
                             }
                             saveChangedMetadata(changedMetadata);
                         },
-                        () -> verifyUnforcedOnMain(uuids)));
+                        () -> {
+                            verifyUnforcedOnMain(uuids);
+                            Set<UUID> expectedRemaining = new LinkedHashSet<>(forcedSnapshot);
+                            expectedRemaining.removeAll(uuids);
+                            requireForcedTicketSnapshot(
+                                    expectedRemaining, ForceLoadService.forcedOnMain(this.kit.server));
+                        }));
                 JsonObject result = new JsonObject();
                 result.addProperty("ok", true);
                 result.addProperty("forced", false);
@@ -704,16 +720,18 @@ public final class TeleportOps {
         }
     }
 
-    private void unloadGroupsOnMain(Collection<UUID> uuids, Set<ServerLevel> touched,
+    private void unloadGroupsOnMain(OpKit.DependencySelection selection, Set<ServerLevel> touched,
                                     Map<UUID, StoredSnapshot> expectedStored) {
-        Set<UUID> pending = new LinkedHashSet<>(uuids);
-        while (true) {
-            ServerSubLevel anchor = null;
-            for (UUID uuid : pending) {
-                anchor = this.kit.resolveLoaded(uuid);
-                if (anchor != null) break;
+        for (Set<UUID> component : selection.components()) {
+            Map<UUID, Set<UUID>> runtimeGroups = new LinkedHashMap<>();
+            for (UUID uuid : component) {
+                if (this.kit.resolveLoaded(uuid) == null) continue;
+                runtimeGroups.put(uuid, this.kit.loadedDependencyMembersOnMain(List.of(uuid)));
             }
-            if (anchor == null) return;
+            if (runtimeGroups.isEmpty()) continue;
+            UUID anchorUuid = exactGroupAnchor(component, selection.roots(), runtimeGroups);
+            ServerSubLevel anchor = this.kit.resolveLoaded(anchorUuid);
+            if (anchor == null) throw new IllegalStateException("完整卸载锚点已卸载: " + anchorUuid);
             Collection<ServerSubLevel> chain = SubLevelHelper.getLoadingDependencyChain(anchor);
             Set<UUID> otherTickets = new LinkedHashSet<>();
             for (ServerSubLevel body : chain) {
@@ -724,7 +742,6 @@ public final class TeleportOps {
             if (!otherTickets.isEmpty()) {
                 throw new IllegalStateException("依赖组存在其他模组的常驻票，未卸载: " + otherTickets);
             }
-            pending.removeAll(chain.stream().map(ServerSubLevel::getUniqueId).toList());
             ServerLevel level = anchor.getLevel();
             ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
             if (container == null) throw new IllegalStateException("物理体容器不存在");
@@ -751,6 +768,17 @@ public final class TeleportOps {
             }
             touched.add(level);
         }
+    }
+
+    static UUID exactGroupAnchor(Set<UUID> expected, Collection<UUID> preferred,
+                                 Map<UUID, Set<UUID>> runtimeGroups) {
+        LinkedHashSet<UUID> candidates = new LinkedHashSet<>();
+        for (UUID uuid : preferred) if (expected.contains(uuid)) candidates.add(uuid);
+        expected.stream().sorted().forEach(candidates::add);
+        for (UUID uuid : candidates) {
+            if (expected.equals(runtimeGroups.get(uuid))) return uuid;
+        }
+        throw new IllegalStateException("当前运行依赖组没有完整卸载锚点: " + expected);
     }
 
     private void saveChangedMetadata(Set<String> dimensions) {
@@ -796,6 +824,13 @@ public final class TeleportOps {
                     PauseService.isPaused(uuid), FreezeService.isFrozen(uuid))) failed.add(uuid);
         }
         if (!failed.isEmpty()) throw new IllegalStateException("取消常驻状态复核失败: " + failed);
+    }
+
+    static void requireForcedTicketSnapshot(Set<UUID> expected, Set<UUID> actual) {
+        if (!expected.equals(actual)) {
+            throw new IllegalStateException("当前面板常驻票在操作期间发生变化: expected="
+                    + expected + ", actual=" + actual);
+        }
     }
 
     static boolean unforceStateValid(boolean loaded, boolean forced, boolean paused, boolean frozen) {

@@ -20,6 +20,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OpKitLoadOrderTest {
     @Test
+    void preparedLoadRejectsContentChangesAtTheSelectedEntry() {
+        CompoundTag expected = new CompoundTag();
+        expected.putString("state", "prepared");
+        CompoundTag changed = expected.copy();
+        changed.putString("state", "changed");
+
+        assertTrue(OpKit.preparedTagMatches(expected, expected.copy()));
+        assertFalse(OpKit.preparedTagMatches(expected, changed));
+        assertFalse(OpKit.preparedTagMatches(expected, null));
+    }
+
+    @Test
     void loadedDependencyExpansionUsesTheRuntimeGroupWithoutHistoricalDiskNeighbors() {
         UUID diskRoot = UUID.randomUUID();
         UUID bridge = UUID.randomUUID();
@@ -111,7 +123,7 @@ class OpKitLoadOrderTest {
     }
 
     @Test
-    void forceLoadStartsOneRequestedAnchorPerDependencyComponent() {
+    void forceLoadObservesEveryRequestedRootInMergedComponents() {
         UUID first = UUID.randomUUID();
         UUID firstMember = UUID.randomUUID();
         UUID second = UUID.randomUUID();
@@ -119,7 +131,52 @@ class OpKitLoadOrderTest {
                 List.of(firstMember, first, second), List.of(first, firstMember, second),
                 List.of(Set.of(first, firstMember), Set.of(second)));
 
-        assertEquals(List.of(firstMember, second), TeleportOps.forceLoadAnchors(selection));
+        assertEquals(List.of(firstMember, first, second), TeleportOps.forceLoadAnchors(selection));
+    }
+
+    @Test
+    void forceLoadRejectsAStaleActiveEntryInsteadOfDroppingColdDependencies() {
+        UUID root = UUID.randomUUID();
+        UUID coldDependency = UUID.randomUUID();
+        Map<UUID, List<com.klnon.sablepanel.panel.storage.DiskScanner.EntryMeta>> disk = Map.of(
+                root, List.of(meta(0, List.of(coldDependency)), meta(1, List.of())),
+                coldDependency, List.of(meta(2, List.of())));
+
+        assertThrows(IllegalStateException.class, () -> OpKit.directedDependencyClosure(
+                Set.of(root), disk, Map.of(root, "missing-entry")));
+        assertThrows(IllegalStateException.class, () -> OpKit.directedDependencyClosure(
+                Set.of(root), Map.of(), Map.of(root, "missing-entry")));
+        assertThrows(IllegalStateException.class, () -> OpKit.selectForceLoadCandidateGroupSets(
+                List.of(root), disk, Map.of(), Map.of()));
+    }
+
+    @Test
+    void cancelForceLoadUsesTheRootThatCoversTheWholeMergedComponent() {
+        UUID balloon = UUID.randomUUID();
+        UUID balloonPart = UUID.randomUUID();
+        UUID ancientCity = UUID.randomUUID();
+        Set<UUID> complete = Set.of(balloon, balloonPart, ancientCity);
+
+        UUID anchor = TeleportOps.exactGroupAnchor(complete, List.of(balloon, ancientCity), Map.of(
+                balloon, Set.of(balloon, balloonPart), ancientCity, complete));
+
+        assertEquals(ancientCity, anchor);
+        assertThrows(IllegalStateException.class, () -> TeleportOps.exactGroupAnchor(
+                complete, List.of(balloon), Map.of(balloon, Set.of(balloon, balloonPart))));
+    }
+
+    @Test
+    void cancelForceLoadIncludesOnlyForcedComponentsIntersectingTheSelection() {
+        UUID selected = UUID.randomUUID();
+        Set<UUID> selectedGroup = Set.of(selected, UUID.randomUUID());
+        Set<UUID> unrelatedGroup = Set.of(UUID.randomUUID(), UUID.randomUUID());
+
+        assertEquals(List.of(selectedGroup), OpKit.intersectingComponents(
+                List.of(selectedGroup, unrelatedGroup), List.of(selected)));
+        assertDoesNotThrow(() -> TeleportOps.requireForcedTicketSnapshot(
+                selectedGroup, Set.copyOf(selectedGroup)));
+        assertThrows(IllegalStateException.class, () -> TeleportOps.requireForcedTicketSnapshot(
+                selectedGroup, Set.of(selected)));
     }
 
     @Test
@@ -141,6 +198,10 @@ class OpKitLoadOrderTest {
 
         assertEquals(Set.of(balloon, delayedPart), settled);
         assertEquals(6, sample.get(), "同一服务器 tick 的重复采样不能计入静默 tick");
+        assertEquals(Set.of(balloon, delayedPart),
+                TeleportOps.settledForceMembers(settled, Set.of(balloon)));
+        assertThrows(IllegalStateException.class, () -> TeleportOps.settledForceMembers(
+                Set.of(balloon), Set.of(balloon, delayedPart)));
     }
 
     @Test

@@ -61,7 +61,11 @@ public final class OpKit {
     record RuntimeSnapshot(String dimension, CompoundTag tag) {
     }
 
-    record DependencySelection(List<UUID> roots, List<UUID> members, List<Set<UUID>> components) {
+    record DependencySelection(List<UUID> roots, List<UUID> members, List<Set<UUID>> components,
+                               Map<UUID, MemberPlan> plans) {
+        DependencySelection(List<UUID> roots, List<UUID> members, List<Set<UUID>> components) {
+            this(roots, members, components, Map.of());
+        }
     }
 
     record LoadAttempts(BooleanSupplier selectedCold, BooleanSupplier selectedPrepared,
@@ -77,10 +81,35 @@ public final class OpKit {
         return dependencyGroups(roots, false);
     }
 
+    DependencySelection forcedDisableGroups(Collection<UUID> requested,
+                                             Collection<UUID> activeForced) throws Exception {
+        List<UUID> selected = List.copyOf(new LinkedHashSet<>(requested));
+        LinkedHashSet<UUID> roots = new LinkedHashSet<>(selected);
+        roots.addAll(activeForced);
+        DependencySelection all = dependencyGroups(roots, true);
+        List<Set<UUID>> components = intersectingComponents(all.components(), selected);
+        LinkedHashSet<UUID> members = new LinkedHashSet<>();
+        components.forEach(members::addAll);
+        List<UUID> componentRoots = all.roots().stream().filter(members::contains).toList();
+        return new DependencySelection(componentRoots, List.copyOf(members), components);
+    }
+
+    static List<Set<UUID>> intersectingComponents(Collection<Set<UUID>> components,
+                                                   Collection<UUID> selected) {
+        Set<UUID> requested = Set.copyOf(selected);
+        return components.stream()
+                .filter(component -> component.stream().anyMatch(requested::contains)).toList();
+    }
+
     DependencySelection forceLoadCandidates(Collection<UUID> roots) throws Exception {
         List<UUID> requested = List.copyOf(new LinkedHashSet<>(roots));
         Map<UUID, Set<UUID>> runtime = runtimeDependencyGroups(requested);
-        Map<UUID, List<DiskScanner.EntryMeta>> disk = strictScan(new ArrayList<>()).meta();
+        List<String> warnings = new ArrayList<>();
+        ScanSession scan = strictScan(warnings);
+        if (!warnings.isEmpty()) {
+            throw new IllegalStateException("常驻候选磁盘扫描存在损坏: " + String.join("; ", warnings));
+        }
+        Map<UUID, List<DiskScanner.EntryMeta>> disk = scan.meta();
         Set<UUID> unknown = new LinkedHashSet<>();
         for (UUID root : requested) {
             if (!runtime.containsKey(root) && !disk.containsKey(root)) unknown.add(root);
@@ -90,16 +119,13 @@ public final class OpKit {
         Set<UUID> loadedMembers = new LinkedHashSet<>();
         runtime.values().forEach(loadedMembers::addAll);
         Map<UUID, String> selectedEntries = onMain(() -> activeEntriesOnMain(loadedMembers));
-        for (UUID uuid : disk.keySet()) {
-            if (selectedEntries.containsKey(uuid)) continue;
-            DiskScanner.DiskEntry entry = this.index.findEntry(uuid);
-            if (entry != null) selectedEntries.put(uuid, entry.key().id());
-        }
         List<Set<UUID>> components = selectForceLoadCandidateGroupSets(
                 requested, disk, runtime, selectedEntries);
         LinkedHashSet<UUID> members = new LinkedHashSet<>();
         components.forEach(members::addAll);
-        return new DependencySelection(requested, List.copyOf(members), components);
+        Map<UUID, MemberPlan> plans = JobService.underLocate(
+                () -> prepareForceLoadPlans(scan, members, selectedEntries));
+        return new DependencySelection(requested, List.copyOf(members), components, plans);
     }
 
     private DependencySelection dependencyGroups(Collection<UUID> roots, boolean mergeOverlaps) throws Exception {
@@ -169,11 +195,8 @@ public final class OpKit {
         List<Set<UUID>> selected = new ArrayList<>();
         for (UUID root : roots) {
             Set<UUID> loaded = runtime.get(root);
-            if (loaded == null) {
-                selected.addAll(selectDependencyGroupSets(List.of(root), disk, runtime));
-            } else {
-                selected.add(directedDependencyClosure(loaded, disk, selectedEntries));
-            }
+            selected.add(directedDependencyClosure(loaded == null ? Set.of(root) : loaded,
+                    disk, selectedEntries));
         }
         return mergeOverlappingGroups(selected);
     }
@@ -187,15 +210,68 @@ public final class OpKit {
             UUID uuid = pending.get(index);
             List<DiskScanner.EntryMeta> copies = disk.getOrDefault(uuid, List.of());
             String selected = selectedEntries.get(uuid);
-            DiskScanner.EntryMeta current = copies.stream()
-                    .filter(copy -> copy.key().id().equals(selected)).findFirst()
-                    .orElse(copies.size() == 1 ? copies.get(0) : null);
+            DiskScanner.EntryMeta current = selectedForceLoadEntry(uuid, copies, selected);
             if (current == null) continue;
             for (UUID dependency : current.deps()) {
+                // 缺失依赖保持既有断链语义：不凭空加入候选，也不在常驻流程内删除。
                 if (disk.containsKey(dependency) && members.add(dependency)) pending.add(dependency);
             }
         }
         return Set.copyOf(members);
+    }
+
+    static DiskScanner.EntryMeta selectedForceLoadEntry(
+            UUID uuid, List<DiskScanner.EntryMeta> copies, String selected) {
+        if (copies.isEmpty()) {
+            if (selected != null) {
+                throw new IllegalStateException("当前活动条目不在同次磁盘扫描中: " + uuid);
+            }
+            return null;
+        }
+        if (selected != null) {
+            return copies.stream().filter(copy -> copy.key().id().equals(selected)).findFirst()
+                    .orElseThrow(() -> new IllegalStateException(
+                            "当前活动条目不在同次磁盘扫描中: " + uuid));
+        }
+        if (copies.size() == 1) return copies.get(0);
+        throw new IllegalStateException("依赖成员存在多份副本，无法选择常驻版本: " + uuid);
+    }
+
+    private Map<UUID, MemberPlan> prepareForceLoadPlans(
+            ScanSession scan, Collection<UUID> members, Map<UUID, String> selectedEntries) throws Exception {
+        Map<UUID, DiskScanner.EntryMeta> selected = new LinkedHashMap<>();
+        Map<DiskScanner.EntryKey, UUID> owners = new LinkedHashMap<>();
+        Map<UUID, CompoundTag> tags = new LinkedHashMap<>();
+        for (UUID uuid : members) {
+            DiskScanner.EntryMeta entry = selectedForceLoadEntry(
+                    uuid, scan.entriesOf(uuid), selectedEntries.get(uuid));
+            if (entry == null) continue;
+            CompoundTag tag = readVerifiedTag(scan.dims(), uuid, entry.key());
+            DiskScanner.DiskEntry summary = DiskScanner.summarize(entry.key(), tag);
+            if (summary == null || summary.plotX() != entry.plotX() || summary.plotZ() != entry.plotZ()
+                    || !Set.copyOf(summary.deps()).equals(Set.copyOf(entry.deps()))) {
+                throw new IllegalStateException("常驻候选条目在准备期间发生变化: " + uuid);
+            }
+            selected.put(uuid, entry);
+            owners.put(entry.key(), uuid);
+            tags.put(uuid, tag);
+        }
+        List<String> warnings = new ArrayList<>();
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
+                DiskScanner.locatePointersStrict(scan.dims(), owners.keySet(), warnings);
+        if (!warnings.isEmpty()) {
+            throw new IllegalStateException("常驻候选指针扫描存在损坏: " + String.join("; ", warnings));
+        }
+        Map<UUID, MemberPlan> plans = new LinkedHashMap<>();
+        for (Map.Entry<UUID, DiskScanner.EntryMeta> item : selected.entrySet()) {
+            List<DiskScanner.LiveLocation> locations = pointers.getOrDefault(item.getValue().key(), List.of());
+            if (locations.size() > 1) {
+                throw new IllegalStateException("常驻候选存在多个 holding 指针: " + item.getKey());
+            }
+            plans.put(item.getKey(), new MemberPlan(item.getValue().key(), tags.get(item.getKey()),
+                    locations.isEmpty() ? null : locations.get(0)));
+        }
+        return Map.copyOf(plans);
     }
 
     private static List<Set<UUID>> mergeOverlappingGroups(Collection<Set<UUID>> selected) {
@@ -751,8 +827,8 @@ public final class OpKit {
             ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
             if (container == null) return;
             CompoundTag fresh = readVerified(DiskScanner.sublevelDirs(this.server), uuid, plan.key());
-            if (fresh == null) {
-                SablePanel.LOGGER.warn("sablepanel: adopt {} aborted, entry slot changed since prepare", uuid);
+            if (!preparedTagMatches(plan.tag(), fresh)) {
+                SablePanel.LOGGER.warn("sablepanel: adopt {} aborted, entry changed since prepare", uuid);
                 return;
             }
             SubLevelData data = SubLevelSerializer.fromData(fresh);
@@ -776,6 +852,10 @@ public final class OpKit {
         } catch (Throwable t) {
             SablePanel.LOGGER.warn("sablepanel: prepared load {} failed", uuid, t);
         }
+    }
+
+    static boolean preparedTagMatches(CompoundTag expected, CompoundTag actual) {
+        return actual != null && expected.equals(actual);
     }
 
     static int clamp(int v, int lo, int hi) {
