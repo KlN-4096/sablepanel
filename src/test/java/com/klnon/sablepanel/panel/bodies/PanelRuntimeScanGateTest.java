@@ -7,8 +7,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.List;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -17,6 +20,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 扫描在跑,扫描期间的额外请求最多合并成一次补跑。
  */
 class PanelRuntimeScanGateTest {
+
+    @Test
+    void failedForceRestoreWaitsForIntentOrDiskChangesBeforeRetrying() {
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        PanelRuntime.ForceRestoreAttempt failed =
+                new PanelRuntime.ForceRestoreAttempt(List.of(first), 7);
+
+        assertFalse(PanelRuntime.shouldAttemptForceRestore(failed,
+                new PanelRuntime.ForceRestoreAttempt(List.of(first), 7)));
+        assertTrue(PanelRuntime.shouldAttemptForceRestore(failed,
+                new PanelRuntime.ForceRestoreAttempt(List.of(first), 8)));
+        assertTrue(PanelRuntime.shouldAttemptForceRestore(failed,
+                new PanelRuntime.ForceRestoreAttempt(List.of(second), 7)));
+    }
 
     @Test
     void concurrentPeriodicAndManualRequestsCollapseToOneRerun() throws Exception {

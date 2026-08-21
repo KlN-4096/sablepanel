@@ -37,10 +37,14 @@ class BodyIndexRuntimePositionTest {
         DiskScanner.EntryKey key = new DiskScanner.EntryKey("minecraft:overworld", 1, 2, 3, 4);
 
         long initialVersion = index.version();
+        assertEquals(0, index.diskRevision());
         assertTrue(index.updateDisk(List.of(entry(key, uuid, false))));
         assertTrue(index.version() > initialVersion);
+        assertEquals(1, index.diskRevision());
         assertFalse(index.updateDisk(List.of(entry(key, uuid, false))));
+        assertEquals(1, index.diskRevision(), "内容不变的周期扫描不能唤醒失败的常驻恢复");
         assertTrue(index.updateDisk(List.of(entry(key, uuid, true))));
+        assertEquals(2, index.diskRevision());
     }
 
     @Test

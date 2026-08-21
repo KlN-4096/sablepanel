@@ -63,6 +63,13 @@ public final class PanelRuntime implements AutoCloseable {
     private ExecutorService scanExecutor;
     private ScheduledFuture<?> heartbeatTask;
     private int ticksSinceRefresh;
+    private volatile ForceRestoreAttempt failedForceRestore;
+
+    record ForceRestoreAttempt(List<UUID> pending, long diskRevision) {
+        ForceRestoreAttempt {
+            pending = List.copyOf(pending);
+        }
+    }
 
     /** 世界加载前读取安全意图，确保 Sable 恢复常驻体时约束判据已经可用。 */
     public synchronized void prepareForServer() {
@@ -84,6 +91,7 @@ public final class PanelRuntime implements AutoCloseable {
             generation = this.lifecycleGeneration.incrementAndGet();
             this.stopping = false;
             this.refreshRequested.set(true);
+            this.failedForceRestore = null;
             BodyCostTracker.ENABLED = false;
             PhysicsTimer.ENABLED = false;
             PanelObserver.ENABLED = false;
@@ -320,12 +328,24 @@ public final class PanelRuntime implements AutoCloseable {
             }
         }
         if (!pending.isEmpty() && isLifecycleCurrent(generation)) {
+            long diskRevision = this.bodyIndex.diskRevision();
+            if (diskRevision == 0) return;
+            ForceRestoreAttempt attempt = new ForceRestoreAttempt(pending, diskRevision);
+            if (!shouldAttemptForceRestore(this.failedForceRestore, attempt)) return;
             try {
                 ops.teleport().restoreForcedIntents(pending);
+                this.failedForceRestore = null;
             } catch (Exception error) {
+                this.failedForceRestore = attempt;
                 SablePanel.LOGGER.warn("sablepanel: restoring {} force-load intents failed", pending.size(), error);
             }
+        } else if (pending.isEmpty()) {
+            this.failedForceRestore = null;
         }
+    }
+
+    static boolean shouldAttemptForceRestore(ForceRestoreAttempt failed, ForceRestoreAttempt current) {
+        return !current.equals(failed);
     }
 
     /**

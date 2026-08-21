@@ -224,17 +224,38 @@ public final class TeleportOps {
     }
 
     public void restoreForcedIntents(List<UUID> candidates) throws Exception {
-        restoreForcedIntents(this.kit.lock, candidates, ForceLoadService::requestedSnapshot,
+        restoreForcedIntentGroups(this.kit.lock, this.kit.forceLoadIntentGroups(candidates),
+                ForceLoadService::requestedSnapshot,
                 current -> setForcedExclusive(current, true), ForceLoadService::persist);
     }
 
     static void restoreForcedIntents(Object lock, Collection<UUID> candidates,
                                      Supplier<Set<UUID>> requested, ForcedIntentRestorer restore,
                                      Runnable persist) throws Exception {
+        restoreForcedIntentGroups(lock, List.of(List.copyOf(candidates)), requested, restore, persist);
+    }
+
+    static void restoreForcedIntentGroups(Object lock, Collection<List<UUID>> groups,
+                                          Supplier<Set<UUID>> requested,
+                                          ForcedIntentRestorer restore, Runnable persist) throws Exception {
         synchronized (lock) {
             try {
-                List<UUID> current = requestedRestoreCandidates(candidates, requested.get());
-                if (!current.isEmpty()) restore.run(current);
+                List<Throwable> failures = new ArrayList<>();
+                for (List<UUID> group : groups) {
+                    List<UUID> current = requestedRestoreCandidates(group, requested.get());
+                    if (current.isEmpty()) continue;
+                    try {
+                        restore.run(current);
+                    } catch (Throwable failure) {
+                        failures.add(failure);
+                    }
+                }
+                if (!failures.isEmpty()) {
+                    IllegalStateException failure = new IllegalStateException(
+                            failures.size() + " 个常驻意图组恢复失败");
+                    failures.forEach(failure::addSuppressed);
+                    throw failure;
+                }
             } finally {
                 persist.run();
             }

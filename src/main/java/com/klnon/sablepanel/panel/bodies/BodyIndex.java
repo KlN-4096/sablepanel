@@ -85,6 +85,7 @@ public final class BodyIndex {
 
     private volatile DiskState disk = DiskState.empty();
     private final AtomicLong version = new AtomicLong();
+    private final AtomicLong diskRevision = new AtomicLong();
     /** 主线程周期刷新:uuid -> 运行时摘要 */
     private volatile Map<UUID, RuntimeBody> runtime = Map.of();
     /** 主线程周期刷新:盘上无指针、但存在于 sable 内存 holding 表的 uuid */
@@ -132,12 +133,17 @@ public final class BodyIndex {
         boolean changed = previous.scanTime == 0 || !sameDiskEntries(previous.entries, snapshot);
         DiskLookup lookup = changed ? DiskLookup.from(snapshot) : previous.lookup;
         this.disk = new DiskState(snapshot, System.currentTimeMillis(), lookup);
+        if (changed) this.diskRevision.incrementAndGet();
         this.version.incrementAndGet();
         return changed;
     }
 
     public long version() {
         return this.version.get();
+    }
+
+    long diskRevision() {
+        return this.diskRevision.get();
     }
 
     private static boolean sameDiskEntries(List<DiskScanner.DiskEntry> previous,

@@ -119,13 +119,37 @@ public final class OpKit {
         Set<UUID> loadedMembers = new LinkedHashSet<>();
         runtime.values().forEach(loadedMembers::addAll);
         Map<UUID, String> selectedEntries = onMain(() -> activeEntriesOnMain(loadedMembers));
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
+                forceLoadPointers(scan);
+        Map<UUID, String> resolvedEntries = pointedForceLoadEntries(disk, selectedEntries, pointers);
         List<Set<UUID>> components = selectForceLoadCandidateGroupSets(
-                requested, disk, runtime, selectedEntries);
+                requested, disk, runtime, resolvedEntries);
         LinkedHashSet<UUID> members = new LinkedHashSet<>();
         components.forEach(members::addAll);
         Map<UUID, MemberPlan> plans = JobService.underLocate(
-                () -> prepareForceLoadPlans(scan, members, selectedEntries));
+                () -> prepareForceLoadPlans(scan, members, resolvedEntries, pointers));
         return new DependencySelection(requested, List.copyOf(members), components, plans);
+    }
+
+    List<List<UUID>> forceLoadIntentGroups(Collection<UUID> candidates) throws Exception {
+        List<String> warnings = new ArrayList<>();
+        ScanSession scan = strictScan(warnings);
+        if (!warnings.isEmpty()) {
+            throw new IllegalStateException("常驻意图磁盘扫描存在损坏: " + String.join("; ", warnings));
+        }
+        return forceLoadIntentGroups(scan.meta(), candidates);
+    }
+
+    static List<List<UUID>> forceLoadIntentGroups(
+            Map<UUID, List<DiskScanner.EntryMeta>> disk, Collection<UUID> candidates) {
+        List<UUID> requested = List.copyOf(new LinkedHashSet<>(candidates));
+        List<List<UUID>> groups = new ArrayList<>();
+        for (Set<UUID> component : DiskScanner.selectedDependencyComponents(disk, requested)) {
+            List<UUID> roots = requested.stream()
+                    .filter(component::contains).toList();
+            if (!roots.isEmpty()) groups.add(roots);
+        }
+        return List.copyOf(groups);
     }
 
     private DependencySelection dependencyGroups(Collection<UUID> roots, boolean mergeOverlaps) throws Exception {
@@ -237,10 +261,36 @@ public final class OpKit {
         throw new IllegalStateException("依赖成员存在多份副本，无法选择常驻版本: " + uuid);
     }
 
+    static Map<UUID, String> pointedForceLoadEntries(
+            Map<UUID, List<DiskScanner.EntryMeta>> disk, Map<UUID, String> activeEntries,
+            Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers) {
+        Map<UUID, String> selected = new LinkedHashMap<>(activeEntries);
+        for (Map.Entry<UUID, List<DiskScanner.EntryMeta>> item : disk.entrySet()) {
+            if (selected.containsKey(item.getKey()) || item.getValue().size() < 2) continue;
+            List<DiskScanner.EntryMeta> pointed = item.getValue().stream()
+                    .filter(copy -> !pointers.getOrDefault(copy.key(), List.of()).isEmpty()).toList();
+            if (pointed.size() == 1) selected.put(item.getKey(), pointed.get(0).key().id());
+        }
+        return selected;
+    }
+
+    private Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> forceLoadPointers(
+            ScanSession scan) throws Exception {
+        Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
+        scan.meta().values().forEach(copies -> copies.forEach(copy -> keys.add(copy.key())));
+        List<String> warnings = new ArrayList<>();
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers = JobService.underLocate(
+                () -> DiskScanner.locatePointersStrict(scan.dims(), keys, warnings));
+        if (!warnings.isEmpty()) {
+            throw new IllegalStateException("常驻候选指针扫描存在损坏: " + String.join("; ", warnings));
+        }
+        return pointers;
+    }
+
     private Map<UUID, MemberPlan> prepareForceLoadPlans(
-            ScanSession scan, Collection<UUID> members, Map<UUID, String> selectedEntries) throws Exception {
+            ScanSession scan, Collection<UUID> members, Map<UUID, String> selectedEntries,
+            Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers) throws Exception {
         Map<UUID, DiskScanner.EntryMeta> selected = new LinkedHashMap<>();
-        Map<DiskScanner.EntryKey, UUID> owners = new LinkedHashMap<>();
         Map<UUID, CompoundTag> tags = new LinkedHashMap<>();
         for (UUID uuid : members) {
             DiskScanner.EntryMeta entry = selectedForceLoadEntry(
@@ -253,14 +303,7 @@ public final class OpKit {
                 throw new IllegalStateException("常驻候选条目在准备期间发生变化: " + uuid);
             }
             selected.put(uuid, entry);
-            owners.put(entry.key(), uuid);
             tags.put(uuid, tag);
-        }
-        List<String> warnings = new ArrayList<>();
-        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointers =
-                DiskScanner.locatePointersStrict(scan.dims(), owners.keySet(), warnings);
-        if (!warnings.isEmpty()) {
-            throw new IllegalStateException("常驻候选指针扫描存在损坏: " + String.join("; ", warnings));
         }
         Map<UUID, MemberPlan> plans = new LinkedHashMap<>();
         for (Map.Entry<UUID, DiskScanner.EntryMeta> item : selected.entrySet()) {

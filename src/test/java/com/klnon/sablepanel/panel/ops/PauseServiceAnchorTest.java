@@ -278,6 +278,24 @@ class PauseServiceAnchorTest {
     }
 
     @Test
+    void backgroundRestoreContinuesWithIndependentGroupsAfterOneFails() {
+        Object lock = new Object();
+        UUID broken = UUID.randomUUID();
+        UUID healthy = UUID.randomUUID();
+        List<UUID> restored = new ArrayList<>();
+        AtomicBoolean persisted = new AtomicBoolean();
+
+        assertThrows(IllegalStateException.class, () -> TeleportOps.restoreForcedIntentGroups(
+                lock, List.of(List.of(broken), List.of(healthy)), () -> Set.of(broken, healthy), group -> {
+                    if (group.contains(broken)) throw new IllegalStateException("ambiguous copies");
+                    restored.addAll(group);
+                }, () -> persisted.set(true)));
+
+        assertEquals(List.of(healthy), restored);
+        assertTrue(persisted.get());
+    }
+
+    @Test
     void cancelRollbackRestoresTheCapturedTagInsteadOfStaleDiskData() {
         CompoundTag captured = new CompoundTag();
         captured.putInt("state", 2);

@@ -151,6 +151,41 @@ class OpKitLoadOrderTest {
     }
 
     @Test
+    void coldDuplicateUsesTheOnlyEntryWithHoldingEvidence() {
+        UUID root = UUID.randomUUID();
+        var first = meta(0, List.of());
+        var pointed = meta(1, List.of());
+        Map<UUID, List<com.klnon.sablepanel.panel.storage.DiskScanner.EntryMeta>> disk =
+                Map.of(root, List.of(first, pointed));
+        var location = new com.klnon.sablepanel.panel.storage.DiskScanner.LiveLocation(
+                pointed.key(), 12, -4);
+
+        Map<UUID, String> selected = OpKit.pointedForceLoadEntries(
+                disk, Map.of(), Map.of(pointed.key(), List.of(location)));
+
+        assertEquals(pointed.key().id(), selected.get(root));
+        assertEquals(Set.of(root), OpKit.directedDependencyClosure(Set.of(root), disk, selected));
+    }
+
+    @Test
+    void startupRestorePartitionsIndependentIntentGroups() {
+        UUID first = UUID.randomUUID();
+        UUID member = UUID.randomUUID();
+        UUID independent = UUID.randomUUID();
+        Map<UUID, List<com.klnon.sablepanel.panel.storage.DiskScanner.EntryMeta>> disk = Map.of(
+                first, List.of(meta(0, List.of(member))),
+                member, List.of(meta(1, List.of(first))),
+                independent, List.of(meta(2, List.of())));
+
+        List<List<UUID>> groups = OpKit.forceLoadIntentGroups(
+                disk, List.of(first, member, independent));
+
+        assertEquals(2, groups.size());
+        assertTrue(groups.stream().anyMatch(group -> Set.copyOf(group).equals(Set.of(first, member))));
+        assertTrue(groups.stream().anyMatch(group -> Set.copyOf(group).equals(Set.of(independent))));
+    }
+
+    @Test
     void cancelForceLoadUsesTheRootThatCoversTheWholeMergedComponent() {
         UUID balloon = UUID.randomUUID();
         UUID balloonPart = UUID.randomUUID();
