@@ -53,6 +53,31 @@ class OpKitLoadOrderTest {
     }
 
     @Test
+    void forceLoadAddsColdDependenciesButNotHistoricalInboundNeighbors() {
+        UUID root = UUID.randomUUID();
+        UUID loadedPart = UUID.randomUUID();
+        UUID coldDependency = UUID.randomUUID();
+        UUID historicalInbound = UUID.randomUUID();
+        Map<UUID, List<com.klnon.sablepanel.panel.storage.DiskScanner.EntryMeta>> disk = Map.of(
+                root, List.of(meta(0, List.of(loadedPart, coldDependency))),
+                loadedPart, List.of(meta(1, List.of(root))),
+                coldDependency, List.of(meta(2, List.of(root))),
+                historicalInbound, List.of(meta(3, List.of(root))));
+        Set<UUID> runtime = Set.of(root, loadedPart);
+        Map<UUID, String> selected = Map.of(
+                root, disk.get(root).get(0).key().id(),
+                loadedPart, disk.get(loadedPart).get(0).key().id(),
+                coldDependency, disk.get(coldDependency).get(0).key().id(),
+                historicalInbound, disk.get(historicalInbound).get(0).key().id());
+
+        List<Set<UUID>> groups = OpKit.selectForceLoadCandidateGroupSets(
+                List.of(root), disk, Map.of(root, runtime), selected);
+
+        assertEquals(List.of(Set.of(root, loadedPart, coldDependency)), groups);
+        assertFalse(groups.get(0).contains(historicalInbound));
+    }
+
+    @Test
     void asymmetricRuntimeChainsStayAnchoredToTheRequestedBody() {
         UUID balloon = UUID.randomUUID();
         UUID balloonPart = UUID.randomUUID();
@@ -160,6 +185,18 @@ class OpKitLoadOrderTest {
                 expected, Set.of(root, member, joinedLater), Set.of()));
         assertThrows(IllegalStateException.class, () -> OpKit.requireExactRuntimeGroup(
                 expected, Set.of(root), Set.of(member)));
+    }
+
+    @Test
+    void loadedGroupSelectionUsesOneRuntimeSnapshot() {
+        UUID root = UUID.randomUUID();
+        UUID member = UUID.randomUUID();
+        Set<UUID> current = Set.of(root, member);
+
+        List<Set<UUID>> groups = OpKit.selectDependencyGroupSets(
+                List.of(root), Map.of(), Map.of(root, current));
+
+        assertEquals(List.of(current), groups);
     }
 
     @Test

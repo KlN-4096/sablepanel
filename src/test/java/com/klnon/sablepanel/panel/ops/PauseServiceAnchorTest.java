@@ -149,6 +149,23 @@ class PauseServiceAnchorTest {
     }
 
     @Test
+    void teleportCorrectsASettledBoundingBoxOffset() {
+        AtomicReference<Vector3d> pose = new AtomicReference<>(new Vector3d(10, 20, 30));
+        AtomicReference<Vector3d> anchor = new AtomicReference<>(new Vector3d(12, 20, 33));
+        AtomicInteger moves = new AtomicInteger();
+        Vector3d desired = new Vector3d(100, 80, 300);
+
+        TeleportOps.alignBottomCenter(() -> new Vector3d(pose.get()), () -> new Vector3d(anchor.get()), target -> {
+            pose.set(new Vector3d(target));
+            if (moves.incrementAndGet() == 1) anchor.set(new Vector3d(100, 79.76, 300));
+            else anchor.set(new Vector3d(desired));
+        }, desired);
+
+        assertEquals(2, moves.get());
+        assertEquals(new Vector3d(98, 80.24, 297), pose.get());
+    }
+
+    @Test
     void teleportDiskVerificationUsesTheSamePositionTolerance() {
         var current = new com.klnon.sablepanel.panel.storage.DiskScanner.EntryKey("overworld", 0, 0, 0, 1);
         var stale = new com.klnon.sablepanel.panel.storage.DiskScanner.EntryKey("overworld", 0, 0, 0, 2);

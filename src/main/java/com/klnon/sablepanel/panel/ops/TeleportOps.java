@@ -38,6 +38,7 @@ import java.util.function.Supplier;
 /** 运行态操作:传送/暂停/常驻加载/在线玩家交互。sable 交互全部主线程执行。 */
 public final class TeleportOps {
     private static final double POSITION_EPSILON = 0.1;
+    private static final int POSITION_CORRECTION_ATTEMPTS = 3;
     private static final int FORCE_LOAD_QUIET_TICKS = 5;
     private static final int FORCE_LOAD_MAX_OBSERVED_TICKS = 100;
     private static final long FORCE_LOAD_POLL_MILLIS = 50;
@@ -75,6 +76,11 @@ public final class TeleportOps {
         boolean test(TicketRef ticket) throws Exception;
     }
 
+    @FunctionalInterface
+    interface PositionMover {
+        void move(Vector3d target);
+    }
+
     TeleportOps(OpKit kit) {
         this.kit = kit;
     }
@@ -89,24 +95,23 @@ public final class TeleportOps {
             // 直接设 pose 会让结构落点偏移十几格;按当前锚点差换算回 pose 再传送。
             requireFiniteTarget(x, y, z);
             Vector3d sourceAnchor = bottomCenter(sl.boundingBox());
-            Vector3d target = new Vector3d(x, y, z);
-            var position = sl.logicalPose().position();
-            target.add(position.x() - sourceAnchor.x, position.y() - sourceAnchor.y,
-                    position.z() - sourceAnchor.z);
             var pipeline = phys.getPipeline();
-            Pose3d original = new Pose3d(sl.logicalPose());
             Quaterniond orientation = new Quaterniond(sl.logicalPose().orientation());
             PauseService.moveOnMain(sl,
                     () -> {
-                        finishMove(() -> pipeline.teleport(sl, target, orientation),
-                                () -> pipeline.resetVelocity(sl), () -> updatePoseAndBounds(sl));
-                        requirePosition(sl, x, y, z);
+                        alignBottomCenter(() -> new Vector3d(sl.logicalPose().position()),
+                                () -> bottomCenter(sl.boundingBox()),
+                                target -> finishMove(() -> pipeline.teleport(sl, target, orientation),
+                                        () -> pipeline.resetVelocity(sl), () -> updatePoseAndBounds(sl)),
+                                new Vector3d(x, y, z));
                         persistLoadedBody(sl, x, y, z);
                     },
                     () -> {
-                        finishMove(() -> pipeline.teleport(sl, original.position(), original.orientation()),
-                                () -> pipeline.resetVelocity(sl), () -> updatePoseAndBounds(sl));
-                        requirePosition(sl, sourceAnchor.x, sourceAnchor.y, sourceAnchor.z);
+                        alignBottomCenter(() -> new Vector3d(sl.logicalPose().position()),
+                                () -> bottomCenter(sl.boundingBox()),
+                                target -> finishMove(() -> pipeline.teleport(sl, target, orientation),
+                                        () -> pipeline.resetVelocity(sl), () -> updatePoseAndBounds(sl)),
+                                sourceAnchor);
                         persistLoadedBody(sl, sourceAnchor.x, sourceAnchor.y, sourceAnchor.z);
                     });
             this.kit.audit("teleport", uuid, sl.getName(), x + "," + y + "," + z);
@@ -173,19 +178,25 @@ public final class TeleportOps {
 
     /** 整组物理暂停/恢复；暂停成功后清除组内全部线速度和角速度。 */
     public JsonObject setPaused(List<UUID> requested, boolean paused) throws Exception {
-        OpKit.DependencySelection selection = this.kit.dependencyGroups(requested);
-        List<UUID> uuids = selection.members();
+        List<UUID> uuids;
         try {
-            this.kit.onMain(() -> {
-                this.kit.requirePreparedDependencyGroupsOnMain(selection);
-                if (paused) {
-                    List<ServerSubLevel> bodies = requireLoadedGroup(uuids);
-                    pauseGroupAndStop(uuids, bodies);
-                } else {
+            if (paused) {
+                uuids = this.kit.onMain(() -> {
+                    OpKit.DependencySelection selection = this.kit.loadedDependencyGroupsOnMain(requested, true);
+                    List<UUID> members = selection.members();
+                    List<ServerSubLevel> bodies = requireLoadedGroup(members);
+                    pauseGroupAndStop(members, bodies);
+                    return members;
+                });
+            } else {
+                OpKit.DependencySelection selection = this.kit.dependencyGroups(requested);
+                uuids = selection.members();
+                this.kit.onMain(() -> {
+                    this.kit.requirePreparedDependencyGroupsOnMain(selection);
                     PauseService.applyOnMain(this.kit.server, uuids, false);
-                }
-                return null;
-            });
+                    return null;
+                });
+            }
         } finally {
             PauseService.persist();
         }
@@ -278,7 +289,7 @@ public final class TeleportOps {
         try {
             this.kit.onMainUntilComplete(() -> {
                 JsonArray failed = new JsonArray();
-                for (UUID uuid : anchors) {
+                for (UUID uuid : uuids) {
                     if (job != null) job.phase("挂常驻票");
                     try {
                         ServerSubLevel body = this.kit.ensureLoaded(uuid, plans);
@@ -582,16 +593,23 @@ public final class TeleportOps {
      * 后端只按体量给出 {@code heavy} 标记,拦不拦由用户决定(不设闸门是既定约定)。
      */
     public JsonObject setFrozen(List<UUID> requested, boolean frozen) throws Exception {
-        OpKit.DependencySelection selection = this.kit.dependencyGroups(requested);
-        List<UUID> uuids = selection.members();
-        this.kit.onMain(() -> {
-            this.kit.requirePreparedDependencyGroupsOnMain(selection);
-            if (frozen) {
-                requireLoadedGroup(uuids);
-            }
-            FreezeService.applyOnMain(uuids, frozen);
-            return null;
-        });
+        List<UUID> uuids;
+        if (frozen) {
+            uuids = this.kit.onMain(() -> {
+                List<UUID> members = this.kit.loadedDependencyGroupsOnMain(requested, true).members();
+                requireLoadedGroup(members);
+                FreezeService.applyOnMain(members, true);
+                return members;
+            });
+        } else {
+            OpKit.DependencySelection selection = this.kit.dependencyGroups(requested);
+            uuids = selection.members();
+            this.kit.onMain(() -> {
+                this.kit.requirePreparedDependencyGroupsOnMain(selection);
+                FreezeService.applyOnMain(uuids, false);
+                return null;
+            });
+        }
         for (UUID uuid : requested) this.kit.audit(frozen ? "freeze" : "thaw", uuid, null, null);
         JsonObject out = new JsonObject();
         out.addProperty("ok", true);
@@ -985,6 +1003,19 @@ public final class TeleportOps {
         updatePoseAndBounds.run();
     }
 
+    static void alignBottomCenter(Supplier<Vector3d> pose, Supplier<Vector3d> anchor,
+                                  PositionMover move, Vector3d desired) {
+        Vector3d actual = anchor.get();
+        for (int attempt = 0; attempt < POSITION_CORRECTION_ATTEMPTS; attempt++) {
+            Vector3d targetPose = pose.get().add(desired).sub(actual);
+            move.move(targetPose);
+            actual = anchor.get();
+            if (positionMatches(new double[]{actual.x, actual.y, actual.z},
+                    desired.x, desired.y, desired.z)) return;
+        }
+        throw new IllegalStateException("传送位置复核失败: " + actual.x + "," + actual.y + "," + actual.z);
+    }
+
     private static void updatePoseAndBounds(ServerSubLevel sl) {
         updatePoseAndBounds(sl::updateLastPose, sl::updateBoundingBox, sl::forceUpdateGlobalBounds);
     }
@@ -993,14 +1024,6 @@ public final class TeleportOps {
         updateLastPose.run();
         updateBoundingBox.run();
         syncLastBounds.run();
-    }
-
-    private static void requirePosition(ServerSubLevel sl, double x, double y, double z) {
-        Vector3d actual = bottomCenter(sl.boundingBox());
-        if (Math.abs(actual.x - x) > POSITION_EPSILON || Math.abs(actual.y - y) > POSITION_EPSILON
-                || Math.abs(actual.z - z) > POSITION_EPSILON) {
-            throw new IllegalStateException("传送位置复核失败: " + actual.x + "," + actual.y + "," + actual.z);
-        }
     }
 
     static Vector3d bottomCenter(BoundingBox3dc bounds) {

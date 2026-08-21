@@ -78,7 +78,28 @@ public final class OpKit {
     }
 
     DependencySelection forceLoadCandidates(Collection<UUID> roots) throws Exception {
-        return dependencyGroups(roots, true);
+        List<UUID> requested = List.copyOf(new LinkedHashSet<>(roots));
+        Map<UUID, Set<UUID>> runtime = runtimeDependencyGroups(requested);
+        Map<UUID, List<DiskScanner.EntryMeta>> disk = strictScan(new ArrayList<>()).meta();
+        Set<UUID> unknown = new LinkedHashSet<>();
+        for (UUID root : requested) {
+            if (!runtime.containsKey(root) && !disk.containsKey(root)) unknown.add(root);
+        }
+        if (!unknown.isEmpty()) throw new IllegalStateException("依赖组根成员不存在: " + unknown);
+
+        Set<UUID> loadedMembers = new LinkedHashSet<>();
+        runtime.values().forEach(loadedMembers::addAll);
+        Map<UUID, String> selectedEntries = onMain(() -> activeEntriesOnMain(loadedMembers));
+        for (UUID uuid : disk.keySet()) {
+            if (selectedEntries.containsKey(uuid)) continue;
+            DiskScanner.DiskEntry entry = this.index.findEntry(uuid);
+            if (entry != null) selectedEntries.put(uuid, entry.key().id());
+        }
+        List<Set<UUID>> components = selectForceLoadCandidateGroupSets(
+                requested, disk, runtime, selectedEntries);
+        LinkedHashSet<UUID> members = new LinkedHashSet<>();
+        components.forEach(members::addAll);
+        return new DependencySelection(requested, List.copyOf(members), components);
     }
 
     private DependencySelection dependencyGroups(Collection<UUID> roots, boolean mergeOverlaps) throws Exception {
@@ -135,10 +156,52 @@ public final class OpKit {
     static List<Set<UUID>> selectForceLoadGroupSets(Collection<UUID> roots,
                                                     Map<UUID, List<DiskScanner.EntryMeta>> disk,
                                                     Map<UUID, Set<UUID>> runtime) {
-        List<Set<UUID>> groups = new ArrayList<>();
+        List<Set<UUID>> selected = new ArrayList<>();
         for (UUID root : roots) {
-            Set<UUID> selected = selectDependencyGroupSets(List.of(root), disk, runtime).get(0);
-            Set<UUID> merged = new LinkedHashSet<>(selected);
+            selected.addAll(selectDependencyGroupSets(List.of(root), disk, runtime));
+        }
+        return mergeOverlappingGroups(selected);
+    }
+
+    static List<Set<UUID>> selectForceLoadCandidateGroupSets(
+            Collection<UUID> roots, Map<UUID, List<DiskScanner.EntryMeta>> disk,
+            Map<UUID, Set<UUID>> runtime, Map<UUID, String> selectedEntries) {
+        List<Set<UUID>> selected = new ArrayList<>();
+        for (UUID root : roots) {
+            Set<UUID> loaded = runtime.get(root);
+            if (loaded == null) {
+                selected.addAll(selectDependencyGroupSets(List.of(root), disk, runtime));
+            } else {
+                selected.add(directedDependencyClosure(loaded, disk, selectedEntries));
+            }
+        }
+        return mergeOverlappingGroups(selected);
+    }
+
+    static Set<UUID> directedDependencyClosure(Set<UUID> seeds,
+                                               Map<UUID, List<DiskScanner.EntryMeta>> disk,
+                                               Map<UUID, String> selectedEntries) {
+        LinkedHashSet<UUID> members = new LinkedHashSet<>(seeds);
+        List<UUID> pending = new ArrayList<>(seeds);
+        for (int index = 0; index < pending.size(); index++) {
+            UUID uuid = pending.get(index);
+            List<DiskScanner.EntryMeta> copies = disk.getOrDefault(uuid, List.of());
+            String selected = selectedEntries.get(uuid);
+            DiskScanner.EntryMeta current = copies.stream()
+                    .filter(copy -> copy.key().id().equals(selected)).findFirst()
+                    .orElse(copies.size() == 1 ? copies.get(0) : null);
+            if (current == null) continue;
+            for (UUID dependency : current.deps()) {
+                if (disk.containsKey(dependency) && members.add(dependency)) pending.add(dependency);
+            }
+        }
+        return Set.copyOf(members);
+    }
+
+    private static List<Set<UUID>> mergeOverlappingGroups(Collection<Set<UUID>> selected) {
+        List<Set<UUID>> groups = new ArrayList<>();
+        for (Set<UUID> group : selected) {
+            Set<UUID> merged = new LinkedHashSet<>(group);
             for (var iterator = groups.iterator(); iterator.hasNext();) {
                 Set<UUID> existing = iterator.next();
                 if (java.util.Collections.disjoint(existing, merged)) continue;
@@ -255,6 +318,20 @@ public final class OpKit {
         return Map.copyOf(groups);
     }
 
+    DependencySelection loadedDependencyGroupsOnMain(Collection<UUID> roots, boolean mergeOverlaps) {
+        List<UUID> requested = List.copyOf(new LinkedHashSet<>(roots));
+        Map<UUID, Set<UUID>> runtime = runtimeDependencyGroupsOnMain(requested);
+        Set<UUID> missing = new LinkedHashSet<>(requested);
+        missing.removeAll(runtime.keySet());
+        if (!missing.isEmpty()) throw new IllegalStateException("运行依赖组根成员未加载: " + missing);
+        List<Set<UUID>> components = mergeOverlaps
+                ? selectForceLoadGroupSets(requested, Map.of(), runtime)
+                : selectDependencyGroupSets(requested, Map.of(), runtime);
+        LinkedHashSet<UUID> members = new LinkedHashSet<>();
+        components.forEach(members::addAll);
+        return new DependencySelection(requested, List.copyOf(members), components);
+    }
+
     private static Set<UUID> loadingDependencyUuids(ServerSubLevel anchor) {
         if (anchor == null) return Set.of();
         Set<UUID> members = new LinkedHashSet<>();
@@ -306,6 +383,7 @@ public final class OpKit {
                 }
                 state.addProperty("paused", PauseService.isPaused(uuid));
                 state.addProperty("forced", ForceLoadService.isForcedOnMain(this.server, uuid));
+                state.addProperty("frozen", FreezeService.isFrozen(uuid));
                 String active = activeEntries.get(uuid);
                 if (active != null) state.addProperty("active", active);
                 out.add(uuid.toString(), state);
