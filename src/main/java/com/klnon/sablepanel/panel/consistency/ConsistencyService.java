@@ -186,20 +186,28 @@ public final class ConsistencyService {
         for (UUID uuid : paused) if (verified.paused.contains(uuid)) failedItems.add("paused:" + uuid);
         JsonArray failed = new JsonArray();
         failedItems.forEach(failed::add);
-        int total = pointerIds.size() + trackingIds.size() + forced.size() + paused.size();
-        int succeeded = total - failed.size();
+        int total = repairItemCount(selectedPointers.stream().map(PointerIssue::count).toList(),
+                trackingIds.size(), forced.size(), paused.size());
+        int succeededPointers = selectedPointers.stream()
+                .filter(issue -> !failedItems.contains("pointer:" + issue.id)).mapToInt(PointerIssue::count).sum();
+        int succeeded = succeededPointers
+                + (int) trackingIds.stream().filter(id -> !failedItems.contains("tracking:" + id)).count()
+                + (int) forced.stream().filter(uuid -> !failedItems.contains("forced:" + uuid)).count()
+                + (int) paused.stream().filter(uuid -> !failedItems.contains("paused:" + uuid)).count();
         JsonObject out = new JsonObject();
         out.addProperty("ok", succeeded);
         out.addProperty("total", total);
-        out.addProperty("pointers", selectedPointers.stream()
-                .filter(issue -> !failedItems.contains("pointer:" + issue.id)).mapToInt(PointerIssue::count).sum());
+        out.addProperty("pointers", succeededPointers);
         out.addProperty("tracking", trackingIds.stream()
                 .filter(id -> !failedItems.contains("tracking:" + id)).count());
         out.addProperty("forced", forced.stream()
                 .filter(uuid -> !failedItems.contains("forced:" + uuid)).count());
         out.addProperty("paused", paused.stream()
                 .filter(uuid -> !failedItems.contains("paused:" + uuid)).count());
-        if (!failed.isEmpty()) out.add("failed", failed);
+        if (!failed.isEmpty()) {
+            out.add("failed", failed);
+            out.addProperty("failed_count", total - succeeded);
+        }
         if (operationError != null) out.addProperty("warning", operationError);
         if (backup != null) out.addProperty("backup", backup.toString());
         JsonObject summary = new JsonObject();
@@ -211,6 +219,10 @@ public final class ConsistencyService {
         this.report = verified.withRepair(summary);
         out.add("report", this.report.toJson());
         return out;
+    }
+
+    static int repairItemCount(List<Integer> pointerCounts, int tracking, int forced, int paused) {
+        return pointerCounts.stream().mapToInt(Integer::intValue).sum() + tracking + forced + paused;
     }
 
     private RepairAttempt repairOnMain(Map<String, Path> dimensions, List<PointerIssue> pointers,
@@ -590,8 +602,9 @@ public final class ConsistencyService {
             JsonArray pausedArray = new JsonArray();
             this.paused.forEach(uuid -> pausedArray.add(uuid.toString()));
             out.add("stale_paused", pausedArray);
-            out.addProperty("issue_count", this.pointers.stream().mapToInt(PointerIssue::count).sum()
-                    + this.tracking.size() + this.forced.size() + this.paused.size());
+            out.addProperty("issue_count", repairItemCount(
+                    this.pointers.stream().map(PointerIssue::count).toList(),
+                    this.tracking.size(), this.forced.size(), this.paused.size()));
             out.addProperty("truncated", this.truncated);
             JsonArray warningArray = new JsonArray();
             this.warnings.forEach(warningArray::add);

@@ -1610,6 +1610,23 @@ test('一致性面板显示并提交失效追踪点', async () => {
   assert.equal(evalIn(sandbox, '__repairBody.tracking[0]'), '0123456789abcdef');
 });
 
+test('一致性面板的显示和确认都按实际悬空指针数计数', async () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    CONSISTENCY = {ready:true,scan_id:'scan-counts',issue_count:2,
+      dangling_pointers:[{id:'duplicate-pointer',target:'minecraft:overworld/0.0.0:1',
+        dim:'minecraft:overworld',chunk_x:0,chunk_z:0,count:2}],
+      stale_tracking_points:[],stale_forced:[],stale_paused:[]};
+    renderConsistency();
+    checkedValues = cls => cls==='cPointer' ? ['duplicate-pointer'] : [];
+    askModal = async (title,message) => { __repairMessage=message; return true; };
+    submitJob = async () => null;
+  `);
+  assert.match(evalIn(sandbox, "document.getElementById('consistencyBody').innerHTML"), />2<\/span>/);
+  await evalIn(sandbox, 'repairConsistency')();
+  assert.match(evalIn(sandbox, '__repairMessage'), /2 项/);
+});
+
 test('UI-03 旧会话的一致性等待不能在重新登录后继续', async () => {
   let consistencyCalls = 0;
   const { sandbox, state } = setup();

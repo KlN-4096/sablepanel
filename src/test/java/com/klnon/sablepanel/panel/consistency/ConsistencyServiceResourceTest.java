@@ -106,6 +106,11 @@ class ConsistencyServiceResourceTest {
         assertEquals("disk failure", failure.getMessage());
     }
 
+    @Test
+    void duplicatePointersCountAsSeparateRepairItems() {
+        assertEquals(6, ConsistencyService.repairItemCount(List.of(2, 1), 1, 1, 1));
+    }
+
     private static void writePointerFile(Path file, int count) throws Exception {
         writePointerFile(file, IntStream.range(0, count).toArray());
     }
