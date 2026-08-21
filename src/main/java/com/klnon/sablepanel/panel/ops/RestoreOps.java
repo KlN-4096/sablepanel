@@ -10,6 +10,7 @@ import com.klnon.sablepanel.SablePanel;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
+import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelData;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelSerializer;
@@ -193,19 +194,29 @@ public final class RestoreOps {
     }
 
     void restoreOperationalState(RecycleStore.RestoreGroup group) throws Exception {
-        List<UUID> forced = group.bodies().stream()
-                .filter(RecycleStore.RestoreBody::forced).map(RecycleStore.RestoreBody::uuid).toList();
-        List<UUID> paused = group.bodies().stream()
-                .filter(RecycleStore.RestoreBody::paused).map(RecycleStore.RestoreBody::uuid).toList();
+        List<UUID> groupUuids = group.bodies().stream().map(RecycleStore.RestoreBody::uuid).toList();
+        boolean restoreForced = group.bodies().stream().anyMatch(RecycleStore.RestoreBody::forced);
+        boolean restorePaused = group.bodies().stream().anyMatch(RecycleStore.RestoreBody::paused);
+        List<UUID> forced = restoreForced ? groupUuids : List.of();
+        List<UUID> paused = restorePaused ? groupUuids : List.of();
         Map<UUID, OpKit.MemberPlan> plans = forced.isEmpty() ? Map.of() : this.kit.prepareChain(forced);
         try {
             this.kit.onMainUntilComplete(() -> {
-                for (UUID uuid : forced) ForceLoadService.addOnMain(this.kit.ensureLoaded(uuid, plans));
-                if (!paused.isEmpty()) PauseService.applyOnMain(this.kit.server, paused, true);
+                for (UUID uuid : forced) {
+                    ForceLoadService.addOnMain(this.kit.ensureLoaded(uuid, plans));
+                }
+                if (!paused.isEmpty()) {
+                    PauseService.applyOnMain(this.kit.server, paused, true);
+                    for (UUID uuid : paused) {
+                        var body = this.kit.resolveLoaded(uuid);
+                        if (body != null) SubLevelPhysicsSystem.get(body.getLevel())
+                                .getPipeline().resetVelocity(body);
+                    }
+                }
                 for (RecycleStore.RestoreBody body : group.bodies()) {
                     boolean pausedState = PauseService.isPaused(body.uuid());
                     boolean forcedState = ForceLoadService.isForcedOnMain(this.kit.server, body.uuid());
-                    if (pausedState != body.paused() || forcedState != body.forced()) {
+                    if (pausedState != restorePaused || forcedState != restoreForced) {
                         throw new IllegalStateException("恢复后暂停/常驻状态不一致: " + body.uuid());
                     }
                 }

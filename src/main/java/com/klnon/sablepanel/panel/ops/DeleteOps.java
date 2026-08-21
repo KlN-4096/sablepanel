@@ -25,6 +25,28 @@ public final class DeleteOps {
     private final RestoreOps restore;
     private final RecycleStore recycle;
 
+    private record PreparedDelete(List<DeleteTx.DeleteComponent> components,
+                                  List<DeleteTx.DependencyRewrite> dependencyRewrites) {
+    }
+
+    private static final class DeleteRun {
+        final List<UUID> requested;
+        final boolean expandGroups;
+        final Map<UUID, DeleteTx.DeleteStatus> statuses = new LinkedHashMap<>();
+        final List<String> warnings = new ArrayList<>();
+        List<DeleteTx.DeleteComponent> components = List.of();
+        List<DeleteTx.DependencyRewrite> dependencyRewrites = List.of();
+        RecycleStore.Stage dependencyStage;
+        Set<UUID> dependencyTargets = Set.of();
+        Exception dependencyRollbackFailure;
+
+        DeleteRun(List<UUID> uuids, boolean expandGroups) {
+            this.requested = new ArrayList<>(new LinkedHashSet<>(uuids));
+            this.expandGroups = expandGroups;
+            for (UUID uuid : this.requested) this.statuses.put(uuid, new DeleteTx.DeleteStatus(uuid));
+        }
+    }
+
     DeleteOps(OpKit kit, DeleteTx tx, RestoreOps restore, RecycleStore recycle) {
         this.kit = kit;
         this.tx = tx;
@@ -43,47 +65,101 @@ public final class DeleteOps {
      *                     <p>
      *                     后者是给"清断链残骸"用的:残骸和主体在 sable 眼里是同一个依赖组
      *                     (轴承方块记着对方 UUID,甩开几百格也不撒手),展开就会把主体一起删掉。
-     *                     代价是幸存者的存档 {@code loading_dependencies} 里会留下死 UUID ——
-     *                     sable 的运行期依赖链是按包围盒相交重算的,下一次存盘会写成干净的表。
+     *                     删除事务会同时裁剪幸存者存档中的 {@code loading_dependencies},
+     *                     并在写入前暂存幸存者原 NBT，失败时回滚。
      */
     public JsonObject deleteBatch(List<UUID> uuids, boolean expandGroups) {
         synchronized (this.kit.lock) { return deleteBatchExclusive(uuids, expandGroups); }
     }
 
     private JsonObject deleteBatchExclusive(List<UUID> uuids, boolean expandGroups) {
-        List<UUID> requested = new ArrayList<>(new LinkedHashSet<>(uuids));
-        Map<UUID, DeleteTx.DeleteStatus> statuses = new LinkedHashMap<>();
-        for (UUID uuid : requested) statuses.put(uuid, new DeleteTx.DeleteStatus(uuid));
-        List<DeleteTx.DeleteComponent> components = List.of();
-        List<String> warnings = new ArrayList<>();
-
+        DeleteRun run = new DeleteRun(uuids, expandGroups);
         try {
-            components = prepareDeleteComponents(requested, expandGroups, warnings);
-            for (DeleteTx.DeleteComponent component : components) {
-                for (UUID target : component.targets) statuses.computeIfAbsent(target, DeleteTx.DeleteStatus::new);
-            }
-            if (statuses.size() > 500) throw new IllegalStateException("依赖组展开后超过 500 个物理体");
-            prepareDeleteSemantics(components, statuses);
-            stageDeleteBackups(components, statuses);
-            this.tx.executeDeleteComponents(components, statuses);
+            executeDeleteTransaction(run);
         } catch (Exception e) {
             String message = "删除事务失败: " + messageOf(e);
-            for (DeleteTx.DeleteStatus status : statuses.values()) status.fail(message);
+            for (DeleteTx.DeleteStatus status : run.statuses.values()) status.fail(message);
             SablePanel.LOGGER.warn("sablepanel: batch delete transaction failed", e);
         }
-        this.tx.verifyPermanentDeletion(components, statuses, warnings);
-        finalizeDeleteBackups(components, statuses, warnings);
-        for (DeleteTx.DeleteStatus status : statuses.values()) {
+        this.tx.verifyPermanentDeletion(run.components, run.statuses, run.warnings);
+        updateDependencyTargets(run, successfulDeleteTargets(run));
+        finalizeDeleteBackups(run.components, run.statuses, run.warnings);
+        updateDependencyTargets(run, successfulDeleteTargets(run));
+        finishDependencyBackup(run.dependencyStage, run.dependencyRollbackFailure, run.statuses);
+        for (DeleteTx.DeleteStatus status : run.statuses.values()) {
             if (!status.ok) this.kit.audit("delete_failed", status.uuid, null, String.join("; ", status.errors));
         }
-        JsonObject response = deleteResponse(new ArrayList<>(statuses.keySet()), statuses);
-        response.addProperty("requested", requested.size());
-        OpKit.attachWarnings(response, warnings);
+        JsonObject response = deleteResponse(new ArrayList<>(run.statuses.keySet()), run.statuses);
+        response.addProperty("requested", run.requested.size());
+        OpKit.attachWarnings(response, run.warnings);
         return response;
     }
 
-    private List<DeleteTx.DeleteComponent> prepareDeleteComponents(List<UUID> targets, boolean expandGroups,
-                                                                   List<String> warnings)
+    private void executeDeleteTransaction(DeleteRun run) throws Exception {
+        PreparedDelete prepared = prepareDeleteComponents(run.requested, run.expandGroups, run.warnings);
+        run.components = prepared.components();
+        run.dependencyRewrites = prepared.dependencyRewrites();
+        for (DeleteTx.DeleteComponent component : run.components) {
+            for (UUID target : component.targets) {
+                run.statuses.computeIfAbsent(target, DeleteTx.DeleteStatus::new);
+            }
+        }
+        if (run.statuses.size() > 500) throw new IllegalStateException("依赖组展开后超过 500 个物理体");
+        prepareDeleteSemantics(run.components, run.statuses);
+        stageDeleteBackups(run.components, run.statuses);
+        if (!run.dependencyRewrites.isEmpty()) {
+            run.dependencyStage = stageDependencyBackups(run.dependencyRewrites);
+        }
+        this.tx.executeDeleteComponents(run.components, run.statuses);
+    }
+
+    private void updateDependencyTargets(DeleteRun run, Set<UUID> desiredTargets) {
+        if (run.dependencyRewrites.isEmpty() || run.dependencyTargets.equals(desiredTargets)) return;
+        try {
+            DeleteTx.DependencyTransition transition = this.tx.prepareDependencyTransition(
+                    run.dependencyRewrites, run.dependencyTargets, desiredTargets, run.warnings);
+            if (!transition.before().isEmpty()) {
+                RecycleStore.Stage refreshed = stageDependencyBackups(transition.before());
+                RecycleStore.Stage previous = run.dependencyStage;
+                run.dependencyStage = refreshed;
+                this.recycle.discard(previous);
+            }
+            this.tx.applyDependencyTransition(transition);
+            run.dependencyTargets = Set.copyOf(desiredTargets);
+        } catch (Exception error) {
+            if (dependencyRecoveryRequired(run.dependencyTargets, error)) {
+                run.dependencyRollbackFailure = error;
+            }
+            Set<UUID> affected = new LinkedHashSet<>(run.dependencyTargets);
+            affected.addAll(desiredTargets);
+            for (UUID uuid : affected) {
+                DeleteTx.DeleteStatus status = run.statuses.get(uuid);
+                if (status != null) status.fail("幸存体依赖更新失败: " + messageOf(error));
+            }
+        }
+    }
+
+    static boolean dependencyRecoveryRequired(Set<UUID> previouslyApplied, Throwable error) {
+        return !previouslyApplied.isEmpty() || error.getSuppressed().length > 0;
+    }
+
+    private static Set<UUID> successfulDeleteTargets(DeleteRun run) {
+        return dependencyTargets(run.statuses, run.dependencyTargets);
+    }
+
+    static Set<UUID> dependencyTargets(Map<UUID, DeleteTx.DeleteStatus> statuses,
+                                       Set<UUID> previouslyApplied) {
+        Set<UUID> successful = new LinkedHashSet<>();
+        for (DeleteTx.DeleteStatus status : statuses.values()) {
+            boolean remainsDeleted = status.ok
+                    || (previouslyApplied.contains(status.uuid) && !status.restored);
+            if (remainsDeleted && (status.removed || status.alreadyAbsent)) successful.add(status.uuid);
+        }
+        return Set.copyOf(successful);
+    }
+
+    private PreparedDelete prepareDeleteComponents(List<UUID> targets, boolean expandGroups,
+                                                   List<String> warnings)
             throws Exception {
         ScanSession scan = this.kit.strictScan(warnings);
         // 纯运行时新体(刚生成、盘上还没有条目)先落一次盘再删:内存里的方块不落盘就无从备份
@@ -110,7 +186,36 @@ public final class DeleteOps {
             }
             components.add(component);
         }
-        return components;
+        List<DeleteTx.DependencyRewrite> rewrites = expandGroups ? List.of()
+                : this.tx.prepareDependencyRewrites(scan, selected, warnings);
+        return new PreparedDelete(List.copyOf(components), rewrites);
+    }
+
+    private RecycleStore.Stage stageDependencyBackups(List<DeleteTx.DependencyRewrite> rewrites) throws Exception {
+        return this.recycle.stage(dependencyBackupSources(rewrites), Map.of());
+    }
+
+    static List<RecycleStore.Source> dependencyBackupSources(List<DeleteTx.DependencyRewrite> rewrites) {
+        return rewrites.stream().map(rewrite -> new RecycleStore.Source(
+                rewrite.uuid(), rewrite.key().dim(), rewrite.key(), rewrite.original())).toList();
+    }
+
+    private void finishDependencyBackup(RecycleStore.Stage stage, Exception rollbackFailure,
+                                        Map<UUID, DeleteTx.DeleteStatus> statuses) {
+        if (stage == null) return;
+        if (rollbackFailure == null) {
+            this.recycle.discard(stage);
+            return;
+        }
+        try {
+            String groupId = this.recycle.commitRecoveryRequired(stage);
+            for (DeleteTx.DeleteStatus status : statuses.values()) {
+                status.fail("幸存体原 NBT 已保留在回收站: " + groupId);
+            }
+        } catch (Exception backupFailure) {
+            rollbackFailure.addSuppressed(backupFailure);
+            SablePanel.LOGGER.error("sablepanel: keeping survivor dependency backup failed", backupFailure);
+        }
     }
 
     /** 选择唯一规范副本并记录运行状态；内容不同的副本必须先由用户处理，删除不能猜。 */
@@ -222,6 +327,7 @@ public final class DeleteOps {
             try {
                 RecycleStore.RestoreGroup rollback = this.recycle.loadStage(component.stage);
                 this.restore.restoreGroupData(rollback, true, warnings);
+                for (UUID uuid : component.targets) statuses.get(uuid).restored = true;
                 this.tx.failComponent(component, statuses, "删除失败，已从临时事务自动恢复原依赖组");
                 restoredAny = true;
                 // 发生过 removeSubLevel 的组必须留下备份:sable 的 queuedDeletion 在 saveAll

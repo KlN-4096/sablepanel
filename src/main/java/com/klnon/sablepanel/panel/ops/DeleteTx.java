@@ -11,6 +11,9 @@ import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
 import dev.ryanhcode.sable.sublevel.storage.holding.GlobalSavedSubLevelPointer;
+import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelData;
+import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelSerializer;
+import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelStorage;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
@@ -60,11 +63,30 @@ final class DeleteTx {
                                Map<UUID, RecycleStore.OperationalState> states) {
     }
 
+    record DependencyRewrite(UUID uuid, DiskScanner.EntryKey key, CompoundTag original,
+                             CompoundTag updated, GlobalSavedSubLevelPointer pointer) {
+    }
+
+    @FunctionalInterface
+    interface RewriteStep {
+        void run() throws Exception;
+    }
+
+    record RewriteActions(RewriteStep verifyBefore, RewriteStep writeAfter,
+                          RewriteStep verifyAfter, RewriteStep rollback) {
+    }
+
+    record DependencyTransition(List<DependencyRewrite> before,
+                                List<DependencyRewrite> after) {
+    }
+
     static final class DeleteComponent {
         final Set<UUID> targets = new LinkedHashSet<>();
         final Map<UUID, List<DeleteCopy>> copies = new LinkedHashMap<>();
         final Map<UUID, DeleteCopy> canonical = new LinkedHashMap<>();
         final Map<UUID, RecycleStore.OperationalState> states = new LinkedHashMap<>();
+        Set<UUID> diskMembersSnapshot;
+        Set<UUID> runtimeMembersSnapshot;
         Map<UUID, String> activeSnapshot;
         RecycleStore.Stage stage;
         boolean stateCleared;
@@ -83,6 +105,7 @@ final class DeleteTx {
         String recycleGroup;
         boolean removed;
         boolean alreadyAbsent;
+        boolean restored;
         boolean ok;
         int remainingEntries;
         int remainingPointers;
@@ -154,6 +177,207 @@ final class DeleteTx {
         return result;
     }
 
+    List<DependencyRewrite> prepareDependencyRewrites(ScanSession scan, Set<UUID> targets,
+                                                      List<String> warnings) throws Exception {
+        Set<UUID> survivors = new LinkedHashSet<>();
+        for (Set<UUID> component : DiskScanner.selectedDependencyComponents(scan.meta(), List.copyOf(targets))) {
+            survivors.addAll(component);
+        }
+        survivors.removeAll(targets);
+        Map<UUID, List<DeleteCopy>> copies = readDeleteCopies(scan, survivors, warnings);
+        List<DependencyRewrite> rewrites = new ArrayList<>();
+        for (Map.Entry<UUID, List<DeleteCopy>> entry : copies.entrySet()) {
+            for (DeleteCopy copy : entry.getValue()) {
+                CompoundTag updated = pruneDependencies(copy.tag(), targets);
+                if (updated == null) continue;
+                GlobalSavedSubLevelPointer pointer = copy.pointers().isEmpty()
+                        ? fallbackPointer(copy.key(), copy.tag()) : toPointer(copy.pointers().get(0));
+                rewrites.add(new DependencyRewrite(entry.getKey(), copy.key(), copy.tag(), updated, pointer));
+            }
+        }
+        return List.copyOf(rewrites);
+    }
+
+    static CompoundTag pruneDependencies(CompoundTag source, Set<UUID> removed) {
+        Set<UUID> retained = new LinkedHashSet<>(DiskScanner.dependencies(source));
+        if (!retained.removeAll(removed)) return null;
+        return CopyOps.retainDependencies(source, retained);
+    }
+
+    static List<DependencyRewrite> dependencyState(List<DependencyRewrite> base, Set<UUID> removed) {
+        List<DependencyRewrite> state = new ArrayList<>();
+        for (DependencyRewrite rewrite : base) {
+            CompoundTag updated = pruneDependencies(rewrite.original(), removed);
+            state.add(new DependencyRewrite(rewrite.uuid(), rewrite.key(), rewrite.original(),
+                    updated == null ? rewrite.original() : updated, rewrite.pointer()));
+        }
+        return List.copyOf(state);
+    }
+
+    DependencyTransition prepareDependencyTransition(List<DependencyRewrite> base,
+                                                     Set<UUID> beforeRemoved,
+                                                     Set<UUID> afterRemoved,
+                                                     List<String> warnings) throws Exception {
+        Set<UUID> survivors = new LinkedHashSet<>();
+        for (DependencyRewrite rewrite : base) survivors.add(rewrite.uuid());
+        ScanSession scan = this.kit.freshScan(warnings);
+        Map<UUID, List<DeleteCopy>> current = readDeleteCopies(scan, survivors, warnings);
+        return rebaseDependencyTransition(base, current, beforeRemoved, afterRemoved);
+    }
+
+    void applyDependencyTransition(DependencyTransition transition) throws Exception {
+        if (transition.before().isEmpty()) return;
+        this.kit.onMainUntilComplete(() -> {
+            applyRewriteTransaction(new RewriteActions(
+                    () -> verifyDependencyTags(transition.before()),
+                    () -> writeDependencyTags(transition.after()),
+                    () -> verifyDependencyTags(transition.after()),
+                    () -> {
+                        writeDependencyTags(transition.before());
+                        verifyDependencyTags(transition.before());
+                    }));
+            return new JsonObject();
+        });
+    }
+
+    /**
+     * 删除阶段的 saveAll 可能搬动仍在运行的幸存体。依赖改写必须重新绑定最新槽位，
+     * 并以最新 NBT 为底稿，只替换依赖集合，不能把旧 pose/速度写回去。
+     */
+    static DependencyTransition rebaseDependencyTransition(
+            List<DependencyRewrite> base, Map<UUID, List<DeleteCopy>> current,
+            Set<UUID> beforeRemoved, Set<UUID> afterRemoved) {
+        if (beforeRemoved.isEmpty()) return rebaseForwardDependencyTransition(base, current, afterRemoved);
+        List<DependencyRewrite> before = new ArrayList<>();
+        List<DependencyRewrite> after = new ArrayList<>();
+        Map<UUID, List<DependencyRewrite>> preparedByUuid = new LinkedHashMap<>();
+        for (DependencyRewrite prepared : base) {
+            preparedByUuid.computeIfAbsent(prepared.uuid(), ignored -> new ArrayList<>()).add(prepared);
+        }
+        for (Map.Entry<UUID, List<DependencyRewrite>> entry : preparedByUuid.entrySet()) {
+            List<DeleteCopy> copies = current.getOrDefault(entry.getKey(), List.of());
+            if (copies.isEmpty()) {
+                throw new IllegalStateException("依赖裁剪目标副本已变化: " + entry.getKey());
+            }
+            for (DeleteCopy copy : copies) {
+                rebaseDependencyCopy(entry.getValue(), copy, beforeRemoved, afterRemoved, before, after);
+            }
+        }
+        return new DependencyTransition(List.copyOf(before), List.copyOf(after));
+    }
+
+    private static DependencyTransition rebaseForwardDependencyTransition(
+            List<DependencyRewrite> base, Map<UUID, List<DeleteCopy>> current, Set<UUID> removed) {
+        List<DependencyRewrite> before = new ArrayList<>();
+        List<DependencyRewrite> after = new ArrayList<>();
+        Set<UUID> survivors = new LinkedHashSet<>();
+        for (DependencyRewrite prepared : base) survivors.add(prepared.uuid());
+        for (UUID uuid : survivors) {
+            List<DeleteCopy> copies = current.getOrDefault(uuid, List.of());
+            if (copies.isEmpty()) throw new IllegalStateException("依赖裁剪目标副本已变化: " + uuid);
+            for (DeleteCopy copy : copies) {
+                CompoundTag updated = pruneDependencies(copy.tag(), removed);
+                if (updated != null) addDependencyRewrite(uuid, copy, updated, before, after);
+            }
+        }
+        return new DependencyTransition(List.copyOf(before), List.copyOf(after));
+    }
+
+    private static void rebaseDependencyCopy(List<DependencyRewrite> preparedCopies, DeleteCopy copy,
+                                             Set<UUID> beforeRemoved, Set<UUID> afterRemoved,
+                                             List<DependencyRewrite> before, List<DependencyRewrite> after) {
+        Set<UUID> currentDependencies = new LinkedHashSet<>(DiskScanner.dependencies(copy.tag()));
+        DependencyRewrite prepared = preparedCopies.stream()
+                .filter(candidate -> currentDependencies.equals(dependencyState(candidate.original(), beforeRemoved))
+                        || currentDependencies.equals(dependencyState(candidate.original(), afterRemoved)))
+                .sorted(Comparator.comparing((DependencyRewrite candidate) -> !candidate.key().equals(copy.key()))
+                        .thenComparing(candidate -> candidate.key().id()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException(
+                        "依赖裁剪目标副本已变化: " + preparedCopies.get(0).uuid()));
+        Set<UUID> expectedDependencies = dependencyState(prepared.original(), beforeRemoved);
+        Set<UUID> desiredDependencies = dependencyState(prepared.original(), afterRemoved);
+        if (expectedDependencies.equals(desiredDependencies)) return;
+        if (currentDependencies.equals(desiredDependencies)) return;
+        CompoundTag updated = CopyOps.retainDependencies(copy.tag(), desiredDependencies);
+        addDependencyRewrite(prepared.uuid(), copy, updated, before, after);
+    }
+
+    private static void addDependencyRewrite(UUID uuid, DeleteCopy copy, CompoundTag updated,
+                                             List<DependencyRewrite> before, List<DependencyRewrite> after) {
+        GlobalSavedSubLevelPointer pointer = copy.pointers().isEmpty()
+                ? fallbackPointer(copy.key(), copy.tag()) : toPointer(copy.pointers().get(0));
+        before.add(new DependencyRewrite(uuid, copy.key(), copy.tag(), copy.tag(), pointer));
+        after.add(new DependencyRewrite(uuid, copy.key(), copy.tag(), updated, pointer));
+    }
+
+    private static Set<UUID> dependencyState(CompoundTag source, Set<UUID> removed) {
+        Set<UUID> dependencies = new LinkedHashSet<>(DiskScanner.dependencies(source));
+        dependencies.removeAll(removed);
+        return Set.copyOf(dependencies);
+    }
+
+    static void applyRewriteTransaction(RewriteActions actions) throws Exception {
+        actions.verifyBefore().run();
+        try {
+            actions.writeAfter().run();
+            actions.verifyAfter().run();
+        } catch (Throwable failure) {
+            try {
+                actions.rollback().run();
+            } catch (Throwable rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            if (failure instanceof Exception exception) throw exception;
+            throw new IllegalStateException("幸存体依赖裁剪失败", failure);
+        }
+    }
+
+    private static DependencyTransition changedDependencyRewrites(List<DependencyRewrite> before,
+                                                                  List<DependencyRewrite> after) {
+        if (before.size() != after.size()) throw new IllegalArgumentException("依赖改写状态不匹配");
+        List<DependencyRewrite> changedBefore = new ArrayList<>();
+        List<DependencyRewrite> changedAfter = new ArrayList<>();
+        for (int index = 0; index < before.size(); index++) {
+            DependencyRewrite previous = before.get(index);
+            DependencyRewrite next = after.get(index);
+            boolean sameTarget = previous.uuid().equals(next.uuid()) && previous.key().equals(next.key())
+                    && java.util.Objects.equals(previous.pointer(), next.pointer());
+            if (!sameTarget) throw new IllegalArgumentException("依赖改写目标不匹配");
+            if (previous.updated().equals(next.updated())) continue;
+            changedBefore.add(previous);
+            changedAfter.add(next);
+        }
+        return new DependencyTransition(List.copyOf(changedBefore), List.copyOf(changedAfter));
+    }
+
+    private void writeDependencyTags(List<DependencyRewrite> rewrites) throws Exception {
+        Set<SubLevelStorage> touched = new LinkedHashSet<>();
+        for (DependencyRewrite rewrite : rewrites) {
+            ServerLevel level = this.kit.levelOf(rewrite.key().dim());
+            ServerSubLevelContainer container = level == null ? null : SubLevelContainer.getContainer(level);
+            if (container == null) throw new IllegalStateException("依赖裁剪目标维度不可用: " + rewrite.key().dim());
+            SubLevelData data = SubLevelSerializer.fromData(rewrite.updated());
+            if (data == null || !rewrite.uuid().equals(data.uuid())) {
+                throw new IllegalStateException("依赖裁剪 NBT 无法解析: " + rewrite.uuid());
+            }
+            SubLevelStorage storage = container.getHoldingChunkMap().getStorage();
+            storage.attemptSaveSubLevel(rewrite.pointer(), data);
+            touched.add(storage);
+        }
+        for (SubLevelStorage storage : touched) storage.flush();
+    }
+
+    private void verifyDependencyTags(List<DependencyRewrite> rewrites) {
+        Map<String, Path> dims = DiskScanner.sublevelDirs(this.kit.server);
+        for (DependencyRewrite rewrite : rewrites) {
+            CompoundTag current = OpKit.readVerified(dims, rewrite.uuid(), rewrite.key());
+            if (!rewrite.updated().equals(current)) {
+                throw new IllegalStateException("依赖裁剪槽位复核失败: " + rewrite.key().id());
+            }
+        }
+    }
+
     void executeDeleteComponents(List<DeleteComponent> components,
                                          Map<UUID, DeleteStatus> statuses) throws Exception {
         // 磁盘侧确认校验留在作业线程:全量重扫+整组重读在大存档上是秒级 IO,从前整段占着主线程。
@@ -217,6 +441,8 @@ final class DeleteTx {
         }
         UUID seed = component.targets.iterator().next();
         Set<UUID> currentMembers = CopyVersionScanner.members(scan.meta(), seed);
+        Set<UUID> expectedMembers = component.diskMembersSnapshot == null
+                ? component.targets : component.diskMembersSnapshot;
         Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>> expectedEntries = new LinkedHashMap<>();
         Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>> currentEntries = new LinkedHashMap<>();
         Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> expectedPointers = new LinkedHashMap<>();
@@ -243,12 +469,15 @@ final class DeleteTx {
             throw new IOException("删除前指针校验失败: " + String.join("; ", warnings));
         }
         requireUnchangedDiskSnapshot(
-                new DiskSnapshot(component.targets, expectedEntries, expectedPointers),
+                new DiskSnapshot(expectedMembers, expectedEntries, expectedPointers),
                 new DiskSnapshot(currentMembers, currentEntries, currentPointers));
     }
 
     /** 主线程(执行块内):确认快照的运行态校验 —— active 指针/暂停/常驻只能在主线程读 */
     void validateOperationalSnapshotOnMain(DeleteComponent component) {
+        if (component.runtimeMembersSnapshot != null) {
+            this.kit.requireLoadedDependencyGroupOnMain(component.runtimeMembersSnapshot);
+        }
         Map<UUID, RecycleStore.OperationalState> currentStates = new LinkedHashMap<>();
         for (UUID uuid : component.targets) {
             currentStates.put(uuid, new RecycleStore.OperationalState(
