@@ -7,16 +7,22 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.panel.audit.EventLog;
 import com.klnon.sablepanel.SablePanel;
+import com.klnon.sablepanel.mixin.HoldingChunkAccessor;
+import com.klnon.sablepanel.mixin.HoldingChunkMapAccessor;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
+import dev.ryanhcode.sable.sublevel.storage.HoldingSubLevel;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelData;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelSerializer;
+import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelStorage;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -145,11 +151,16 @@ public final class RestoreOps {
     }
 
     void restoreGroupData(RecycleStore.RestoreGroup group, boolean replaceExisting,
-                                  List<String> warnings) throws Exception {
+                          List<String> warnings) throws Exception {
         Set<UUID> targets = new LinkedHashSet<>();
         for (RecycleStore.RestoreBody body : group.bodies()) targets.add(body.uuid());
-        if (replaceExisting) purgeRestoreTargets(targets, warnings);
         ScanSession scan = this.kit.strictScan(warnings);
+        requireExternalDependenciesPresent(group, scan.meta());
+        if (replaceExisting) {
+            purgeRestoreTargets(targets, warnings);
+            scan = this.kit.strictScan(warnings);
+            requireExternalDependenciesPresent(group, scan.meta());
+        }
         Map<UUID, Integer> existingEntries = new HashMap<>();
         for (UUID uuid : targets) existingEntries.put(uuid, scan.entriesOf(uuid).size());
         if (!replaceExisting) requireRestoreTargetsFree(targets, existingEntries);
@@ -182,6 +193,23 @@ public final class RestoreOps {
         }
     }
 
+    static void requireExternalDependenciesPresent(
+            RecycleStore.RestoreGroup group, Map<UUID, List<DiskScanner.EntryMeta>> entries) {
+        Set<UUID> members = new LinkedHashSet<>();
+        for (RecycleStore.RestoreBody body : group.bodies()) members.add(body.uuid());
+        Map<UUID, Integer> unavailable = new LinkedHashMap<>();
+        for (RecycleStore.RestoreBody body : group.bodies()) {
+            for (UUID dependency : DiskScanner.dependencies(body.tag())) {
+                if (members.contains(dependency)) continue;
+                int copies = entries.getOrDefault(dependency, List.of()).size();
+                if (copies != 1) unavailable.put(dependency, copies);
+            }
+        }
+        if (!unavailable.isEmpty()) {
+            throw new IllegalStateException("回收组的外部依赖缺失或存在副本: " + unavailable);
+        }
+    }
+
     private void requireRestoreTargetsFree(Set<UUID> targets, Map<UUID, Integer> existingEntries) throws Exception {
         JsonObject runtime = this.kit.readRuntimeStates(targets);
         for (UUID uuid : targets) {
@@ -196,9 +224,10 @@ public final class RestoreOps {
     }
 
     void restoreOperationalState(RecycleStore.RestoreGroup group) throws Exception {
-        List<UUID> groupUuids = group.bodies().stream().map(RecycleStore.RestoreBody::uuid).toList();
+        List<UUID> groupUuids = restoreOrder(restoreDependencies(group));
         boolean restoreForced = group.bodies().stream().anyMatch(RecycleStore.RestoreBody::forced);
         boolean restorePaused = group.bodies().stream().anyMatch(RecycleStore.RestoreBody::paused);
+        boolean restoreFrozen = group.bodies().stream().anyMatch(RecycleStore.RestoreBody::frozen);
         List<UUID> forced = restoreForced ? groupUuids : List.of();
         List<UUID> paused = restorePaused ? groupUuids : List.of();
         Map<UUID, OpKit.MemberPlan> plans = forced.isEmpty() ? Map.of() : this.kit.prepareChain(forced);
@@ -215,11 +244,14 @@ public final class RestoreOps {
                                 .getPipeline().resetVelocity(body);
                     }
                 }
+                FreezeService.applyOnMain(groupUuids, restoreFrozen);
                 for (RecycleStore.RestoreBody body : group.bodies()) {
                     boolean pausedState = PauseService.isPaused(body.uuid());
                     boolean forcedState = ForceLoadService.isForcedOnMain(this.kit.server, body.uuid());
-                    if (pausedState != restorePaused || forcedState != restoreForced) {
-                        throw new IllegalStateException("恢复后暂停/常驻状态不一致: " + body.uuid());
+                    boolean frozenState = FreezeService.isFrozen(body.uuid());
+                    if (pausedState != restorePaused || forcedState != restoreForced
+                            || frozenState != restoreFrozen) {
+                        throw new IllegalStateException("恢复后暂停/冻结/常驻状态不一致: " + body.uuid());
                     }
                 }
                 return new JsonObject();
@@ -236,7 +268,10 @@ public final class RestoreOps {
                                           List<ServerSubLevel> created,
                                           Set<ServerLevel> touched) throws Exception {
         try {
-            for (RecycleStore.RestoreBody body : group.bodies()) {
+            Map<UUID, RecycleStore.RestoreBody> bodies = new LinkedHashMap<>();
+            for (RecycleStore.RestoreBody body : group.bodies()) bodies.put(body.uuid(), body);
+            for (UUID uuid : restoreOrder(restoreDependencies(group))) {
+                RecycleStore.RestoreBody body = bodies.get(uuid);
                 boolean exists = existingEntries.getOrDefault(body.uuid(), 0) > 0
                         || this.kit.resolveLoaded(body.uuid()) != null || this.kit.isHolding(body.uuid());
                 if (exists) throw new IllegalStateException("UUID 已存在，未恢复该依赖组: " + body.uuid());
@@ -254,6 +289,7 @@ public final class RestoreOps {
                 touched.add(level);
             }
             OpKit.saveAllLevels(touched);
+            replaceHoldingSnapshots(group);
         } catch (Throwable error) {
             cleanupFailedRestore(created, touched);
             if (error instanceof Exception exception) throw exception;
@@ -262,6 +298,93 @@ public final class RestoreOps {
         JsonObject out = new JsonObject();
         out.addProperty("restored", created.size());
         return out;
+    }
+
+    private static Map<UUID, Collection<UUID>> restoreDependencies(RecycleStore.RestoreGroup group) {
+        Set<UUID> members = new LinkedHashSet<>();
+        for (RecycleStore.RestoreBody body : group.bodies()) members.add(body.uuid());
+        Map<UUID, Collection<UUID>> dependencies = new LinkedHashMap<>();
+        for (RecycleStore.RestoreBody body : group.bodies()) {
+            dependencies.put(body.uuid(), DiskScanner.dependencies(body.tag()).stream()
+                    .filter(members::contains).toList());
+        }
+        return dependencies;
+    }
+
+    private void replaceHoldingSnapshots(RecycleStore.RestoreGroup group) throws Exception {
+        Set<SubLevelStorage> touched = new LinkedHashSet<>();
+        try {
+            for (RecycleStore.RestoreBody body : group.bodies()) {
+                ServerLevel level = restoreLevel(body.dimension());
+                ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+                if (container == null) throw new IllegalStateException("恢复目标维度没有物理体容器");
+                var holdingMap = container.getHoldingChunkMap();
+                HoldingSubLevel previous = holdingMap.getHoldingSubLevel(body.uuid());
+                ServerSubLevel loaded = this.kit.resolveLoaded(body.uuid());
+                var pointer = previous != null ? previous.pointer()
+                        : loaded != null ? loaded.getLastSerializationPointer() : null;
+                if (pointer == null) throw new IllegalStateException("恢复后存储指针缺失: " + body.uuid());
+                SubLevelData exactData = SubLevelSerializer.fromData(body.tag().copy());
+                if (exactData == null || !body.uuid().equals(exactData.uuid())) {
+                    throw new IllegalStateException("回收站 NBT 无法解析: " + body.uuid());
+                }
+                HoldingSubLevel exact = new HoldingSubLevel(exactData, pointer);
+                HoldingChunkMapAccessor map = (HoldingChunkMapAccessor) (Object) holdingMap;
+                var chunk = map.sablepanel$loadedHoldingChunks().get(pointer.chunkPos().toLong());
+                if (chunk != null) {
+                    if (loaded != null) container.removeSubLevel(loaded, SubLevelRemovalReason.UNLOADED);
+                    for (var loadedChunk : map.sablepanel$loadedHoldingChunks().values()) {
+                        var records = ((HoldingChunkAccessor) (Object) loadedChunk)
+                                .sablepanel$loadedHoldingSubLevels();
+                        records.remove(body.uuid());
+                    }
+                    ((HoldingChunkAccessor) (Object) chunk).sablepanel$loadedHoldingSubLevels()
+                            .put(body.uuid(), exact);
+                    map.sablepanel$allHoldingSubLevels().put(body.uuid(), exact);
+                } else if (loaded == null) {
+                    throw new IllegalStateException("恢复后运行体与 holding 区块均缺失: " + body.uuid());
+                }
+                SubLevelStorage storage = holdingMap.getStorage();
+                storage.attemptSaveSubLevel(pointer, exactData);
+                touched.add(storage);
+            }
+            for (SubLevelStorage storage : touched) storage.flush();
+        } finally {
+            DiskScanner.invalidateCache();
+        }
+    }
+
+    /**
+     * Sable 会在保存时按已经加载的运行链重建依赖。先创建依赖者，再创建它依赖的体，
+     * 才能保留非对称依赖图；环内顺序只需稳定，不影响成员集合。
+     */
+    static List<UUID> restoreOrder(Map<UUID, ? extends Collection<UUID>> dependencies) {
+        LinkedHashSet<UUID> dependencyFirst = new LinkedHashSet<>();
+        Set<UUID> visiting = new LinkedHashSet<>();
+        Set<UUID> visited = new LinkedHashSet<>();
+        for (UUID uuid : dependencies.keySet()) {
+            visitDependencies(uuid, dependencies, visiting, visited, dependencyFirst);
+        }
+        List<UUID> order = new ArrayList<>(dependencyFirst);
+        Collections.reverse(order);
+        return List.copyOf(order);
+    }
+
+    private static void visitDependencies(UUID uuid,
+                                          Map<UUID, ? extends Collection<UUID>> dependencies,
+                                          Set<UUID> visiting, Set<UUID> visited,
+        LinkedHashSet<UUID> dependencyFirst) {
+        if (visited.contains(uuid) || !visiting.add(uuid)) return;
+        Collection<UUID> direct = dependencies.get(uuid);
+        if (direct == null) direct = List.of();
+        for (UUID dependency : direct) {
+            if (dependencies.containsKey(dependency)) {
+                visitDependencies(dependency, dependencies, visiting, visited, dependencyFirst);
+            }
+        }
+        visiting.remove(uuid);
+        visited.add(uuid);
+        dependencyFirst.add(uuid);
     }
 
     private void cleanupFailedRestore(List<ServerSubLevel> created, Set<ServerLevel> touched) {
@@ -310,8 +433,10 @@ public final class RestoreOps {
                 throw new IllegalStateException("恢复后维度不一致: " + uuid);
             }
             Set<UUID> expectedDependencies = new LinkedHashSet<>(DiskScanner.dependencies(body.tag()));
-            if (!new LinkedHashSet<>(restored.deps()).equals(expectedDependencies)) {
-                throw new IllegalStateException("恢复后依赖关系不一致: " + uuid);
+            Set<UUID> actualDependencies = new LinkedHashSet<>(restored.deps());
+            if (!actualDependencies.equals(expectedDependencies)) {
+                throw new IllegalStateException("恢复后依赖关系不一致: " + uuid
+                        + ", 期望 " + expectedDependencies + ", 实际 " + actualDependencies);
             }
             int pointerCount = 0;
             for (DiskScanner.EntryMeta copy : copies) {

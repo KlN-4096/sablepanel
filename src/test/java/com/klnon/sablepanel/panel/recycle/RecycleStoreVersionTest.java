@@ -156,11 +156,12 @@ class RecycleStoreVersionTest {
         RecycleStore.Source source = source(uuid, 7);
 
         String id = store.commit(store.stage(List.of(source), Map.of(
-                uuid, new RecycleStore.OperationalState(true, true))));
+                uuid, new RecycleStore.OperationalState(true, true, true))));
         RecycleStore.RestoreBody body = store.loadGroup(id).bodies().get(0);
 
         assertTrue(body.paused());
         assertTrue(body.forced());
+        assertTrue(body.frozen());
     }
 
     @Test

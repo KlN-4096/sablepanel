@@ -118,10 +118,11 @@ class CopyOpsResolutionTest {
                 CopyOps.resolutionSources(version, "runtime", snapshots);
         var restored = CopyOps.restoreSelection(version, "runtime", snapshots,
                 Map.of(this.target, new com.klnon.sablepanel.panel.recycle.RecycleStore.OperationalState(
-                        false, false)), "selection");
+                        false, false, true)), "selection");
 
         assertEquals("live", sources.get(0).tag().getString("state"));
         assertEquals("live", restored.bodies().get(0).tag().getString("state"));
+        org.junit.jupiter.api.Assertions.assertTrue(restored.bodies().get(0).frozen());
     }
 
     @Test

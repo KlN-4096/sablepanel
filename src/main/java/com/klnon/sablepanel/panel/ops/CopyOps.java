@@ -509,7 +509,8 @@ public final class CopyOps {
         for (UUID uuid : targets) {
             JsonObject state = metadata.getAsJsonObject(uuid.toString());
             states.put(uuid, new RecycleStore.OperationalState(
-                    state.get("paused").getAsBoolean(), state.get("forced").getAsBoolean()));
+                    state.get("paused").getAsBoolean(), state.get("forced").getAsBoolean(),
+                    state.get("frozen").getAsBoolean()));
         }
         return states;
     }
@@ -526,10 +527,10 @@ public final class CopyOps {
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
         List<RecycleStore.RestoreBody> bodies = version.copies().stream().map(copy -> {
             RecycleStore.OperationalState state = states.getOrDefault(copy.uuid(),
-                    new RecycleStore.OperationalState(false, false));
+                    new RecycleStore.OperationalState(false, false, false));
             CompoundTag tag = version.complete() ? copy.tag() : retainDependencies(copy.tag(), retained);
             return new RecycleStore.RestoreBody(copy.uuid(), copy.key().dim(), tag,
-                    state.paused(), state.forced());
+                    state.paused(), state.forced(), state.frozen());
         }).toList();
         return new RecycleStore.RestoreGroup(id, "pending", false, bodies);
     }
@@ -558,9 +559,9 @@ public final class CopyOps {
         }
         List<RecycleStore.RestoreBody> bodies = runtimeSnapshots.entrySet().stream().map(entry -> {
             RecycleStore.OperationalState state = states.getOrDefault(entry.getKey(),
-                    new RecycleStore.OperationalState(false, false));
+                    new RecycleStore.OperationalState(false, false, false));
             return new RecycleStore.RestoreBody(entry.getKey(), entry.getValue().dimension(),
-                    entry.getValue().tag(), state.paused(), state.forced());
+                    entry.getValue().tag(), state.paused(), state.forced(), state.frozen());
         }).toList();
         return new RecycleStore.RestoreGroup(id, "pending", false, bodies);
     }

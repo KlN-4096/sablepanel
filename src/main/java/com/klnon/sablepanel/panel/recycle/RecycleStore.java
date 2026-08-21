@@ -71,7 +71,7 @@ public final class RecycleStore {
     public record Source(UUID uuid, String dimension, DiskScanner.EntryKey key, CompoundTag tag) {
     }
 
-    public record OperationalState(boolean paused, boolean forced) {
+    public record OperationalState(boolean paused, boolean forced, boolean frozen) {
     }
 
     public record StageRequest(List<Source> sources, Map<UUID, OperationalState> states) {
@@ -85,7 +85,7 @@ public final class RecycleStore {
     }
 
     public record RestoreBody(UUID uuid, String dimension, CompoundTag tag,
-                              boolean paused, boolean forced) {
+                              boolean paused, boolean forced, boolean frozen) {
     }
 
     public record RestoreGroup(String id, String state, boolean oldVersion, List<RestoreBody> bodies) {
@@ -569,7 +569,7 @@ public final class RecycleStore {
             Source primary = entry.getValue().get(0);
             DiskScanner.DiskEntry summary = DiskScanner.summarize(primary.key, primary.tag);
             JsonObject body = bodyJson(primary, summary,
-                    states.getOrDefault(primary.uuid, new OperationalState(false, false)));
+                    states.getOrDefault(primary.uuid, new OperationalState(false, false, false)));
             body.addProperty("backup_count", entry.getValue().size());
             body.add("backups", new JsonArray());
             bodies.add(body);
@@ -596,6 +596,7 @@ public final class RecycleStore {
         body.addProperty("dim", blankDimension(source.dimension));
         body.addProperty("paused", state.paused());
         body.addProperty("forced", state.forced());
+        body.addProperty("frozen", state.frozen());
         if (summary == null) return body;
         if (summary.name() != null) body.addProperty("name", summary.name());
         body.addProperty("blocks", summary.blocks());
@@ -649,7 +650,8 @@ public final class RecycleStore {
             String dimension = body.has("dim") ? blankDimension(body.get("dim").getAsString()) : DEFAULT_DIMENSION;
             boolean paused = body.get("paused").getAsBoolean();
             boolean forced = body.get("forced").getAsBoolean();
-            bodies.add(new RestoreBody(uuid, dimension, tag, paused, forced));
+            boolean frozen = body.has("frozen") && body.get("frozen").getAsBoolean();
+            bodies.add(new RestoreBody(uuid, dimension, tag, paused, forced, frozen));
         }
         if (bodies.isEmpty()) throw new IOException("回收组为空");
         String state = manifest.has("state") ? manifest.get("state").getAsString() : "deleted";

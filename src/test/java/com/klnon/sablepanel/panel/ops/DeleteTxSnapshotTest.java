@@ -88,6 +88,59 @@ class DeleteTxSnapshotTest {
     }
 
     @Test
+    void everyKnownHoldingPointerIsQueuedEvenAfterRemovingTheLoadedBody() {
+        DiskScanner.LiveLocation pointer = new DiskScanner.LiveLocation(this.key, 17, -9);
+        DeleteTx.DeleteCopy copy = new DeleteTx.DeleteCopy(this.key, new CompoundTag(), 1,
+                List.of(pointer, pointer));
+
+        assertEquals(List.of(DeleteTx.toPointer(pointer), DeleteTx.toPointer(pointer)),
+                DeleteTx.deletionPointers(List.of(copy)));
+    }
+
+    @Test
+    void finalVerificationRepairsOnlyPointersWhoseDeletedEntryIsAlreadyEmpty() {
+        DeleteTx.DeleteStatus removed = new DeleteTx.DeleteStatus(this.target);
+        removed.removed = true;
+        removed.entryKeys.add(this.key);
+        Map<UUID, DeleteTx.DeleteStatus> statuses = Map.of(this.target, removed);
+
+        assertTrue(DeleteTx.hasDanglingDeletedPointers(
+                new DeleteTx.DiskVerification(Map.of(this.target, 0), Map.of(this.key, 1)), statuses));
+        org.junit.jupiter.api.Assertions.assertFalse(DeleteTx.hasDanglingDeletedPointers(
+                new DeleteTx.DiskVerification(Map.of(this.target, 1), Map.of(this.key, 1)), statuses));
+        org.junit.jupiter.api.Assertions.assertFalse(DeleteTx.hasDanglingDeletedPointers(
+                new DeleteTx.DiskVerification(Map.of(this.target, 0), Map.of()), statuses));
+    }
+
+    @Test
+    void danglingPointerCleanupRechecksSlotOwnershipAndExactPointerCounts() {
+        DiskScanner.LiveLocation first = new DiskScanner.LiveLocation(this.key, 17, -9);
+        DiskScanner.LiveLocation second = new DiskScanner.LiveLocation(this.key, 18, -9);
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> expected =
+                Map.of(this.key, List.of(first, first, second));
+
+        assertDoesNotThrow(() -> DeleteTx.requirePointerCleanupSnapshot(
+                Set.of(this.key), Set.of(), expected, Map.of(this.key, List.of(second, first, first))));
+        assertThrows(IllegalStateException.class, () -> DeleteTx.requirePointerCleanupSnapshot(
+                Set.of(this.key), Set.of(this.key), expected, expected));
+        assertThrows(IllegalStateException.class, () -> DeleteTx.requirePointerCleanupSnapshot(
+                Set.of(this.key), Set.of(), expected, Map.of(this.key, List.of(first, second))));
+    }
+
+    @Test
+    void deletionDoesNotClaimPointersAfterTheStorageSlotWasReused() {
+        UUID replacement = UUID.randomUUID();
+        Map<DiskScanner.EntryKey, Integer> pointers = Map.of(this.key, 1);
+        Map<DiskScanner.EntryKey, UUID> original = Map.of(this.key, this.target);
+
+        assertEquals(Map.of(this.key, 1), DeleteTx.targetPointerCounts(pointers, original, Map.of()));
+        assertEquals(Map.of(this.key, 1), DeleteTx.targetPointerCounts(
+                pointers, original, Map.of(this.key, this.target)));
+        assertEquals(Map.of(), DeleteTx.targetPointerCounts(
+                pointers, original, Map.of(this.key, replacement)));
+    }
+
+    @Test
     void detachedCleanupPrunesOnlyDeletedDependenciesWithoutMutatingSource() {
         UUID kept = UUID.randomUUID();
         CompoundTag source = new CompoundTag();
@@ -138,6 +191,19 @@ class DeleteTxSnapshotTest {
         deleted.restored = true;
         assertEquals(Set.of(), DeleteOps.dependencyTargets(
                 Map.of(this.target, deleted), Set.of(this.target)));
+    }
+
+    @Test
+    void survivorDependenciesAdvanceAsSoonAsSableExecutedTheDelete() {
+        UUID untouchedUuid = UUID.randomUUID();
+        DeleteTx.DeleteStatus removed = new DeleteTx.DeleteStatus(this.target);
+        removed.removed = true;
+        DeleteTx.DeleteStatus absent = new DeleteTx.DeleteStatus(UUID.randomUUID());
+        absent.alreadyAbsent = true;
+        DeleteTx.DeleteStatus untouched = new DeleteTx.DeleteStatus(untouchedUuid);
+
+        assertEquals(Set.of(this.target, absent.uuid), DeleteOps.executedDeleteTargets(
+                Map.of(this.target, removed, absent.uuid, absent, untouchedUuid, untouched)));
     }
 
     @Test
@@ -323,7 +389,7 @@ class DeleteTxSnapshotTest {
 
     private DeleteTx.OperationalSnapshot operational(String active, boolean paused) {
         return new DeleteTx.OperationalSnapshot(Map.of(this.target, active),
-                Map.of(this.target, new RecycleStore.OperationalState(paused, false)));
+                Map.of(this.target, new RecycleStore.OperationalState(paused, false, false)));
     }
 
     private static CompoundTag dependencyTag(UUID uuid, int poseX, UUID... dependencies) {

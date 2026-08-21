@@ -81,6 +81,7 @@ public final class DeleteOps {
             for (DeleteTx.DeleteStatus status : run.statuses.values()) status.fail(message);
             SablePanel.LOGGER.warn("sablepanel: batch delete transaction failed", e);
         }
+        updateDependencyTargets(run, executedDeleteTargets(run.statuses));
         this.tx.verifyPermanentDeletion(run.components, run.statuses, run.warnings);
         updateDependencyTargets(run, successfulDeleteTargets(run));
         finalizeDeleteBackups(run.components, run.statuses, run.warnings);
@@ -126,6 +127,7 @@ public final class DeleteOps {
             }
             this.tx.applyDependencyTransition(transition);
             run.dependencyTargets = Set.copyOf(desiredTargets);
+            this.kit.rescan.run();
         } catch (Exception error) {
             if (dependencyRecoveryRequired(run.dependencyTargets, error)) {
                 run.dependencyRollbackFailure = error;
@@ -145,6 +147,14 @@ public final class DeleteOps {
 
     private static Set<UUID> successfulDeleteTargets(DeleteRun run) {
         return dependencyTargets(run.statuses, run.dependencyTargets);
+    }
+
+    static Set<UUID> executedDeleteTargets(Map<UUID, DeleteTx.DeleteStatus> statuses) {
+        Set<UUID> removed = new LinkedHashSet<>();
+        for (DeleteTx.DeleteStatus status : statuses.values()) {
+            if (status.removed || status.alreadyAbsent) removed.add(status.uuid);
+        }
+        return Set.copyOf(removed);
     }
 
     static Set<UUID> dependencyTargets(Map<UUID, DeleteTx.DeleteStatus> statuses,
@@ -239,7 +249,8 @@ public final class DeleteOps {
                 }
                 JsonObject state = runtime.getAsJsonObject(uuid.toString());
                 component.states.put(uuid, new RecycleStore.OperationalState(
-                        state.get("paused").getAsBoolean(), state.get("forced").getAsBoolean()));
+                        state.get("paused").getAsBoolean(), state.get("forced").getAsBoolean(),
+                        state.get("frozen").getAsBoolean()));
             }
             if (conflict) {
                 this.tx.failComponent(component, statuses, "依赖组存在内容不同的副本，请先处理副本后重试删除");

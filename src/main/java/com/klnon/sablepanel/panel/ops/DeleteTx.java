@@ -11,6 +11,8 @@ import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
 import dev.ryanhcode.sable.sublevel.storage.holding.GlobalSavedSubLevelPointer;
+import dev.ryanhcode.sable.sublevel.storage.holding.SavedSubLevelPointer;
+import dev.ryanhcode.sable.sublevel.storage.holding.SubLevelHoldingChunk;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelData;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelSerializer;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelStorage;
@@ -143,7 +145,6 @@ final class DeleteTx {
         final Map<UUID, DeleteStatus> statuses;
         final DeleteFlush flush;
         final Map<UUID, ServerSubLevel> removedBodies = new LinkedHashMap<>();
-        final Map<UUID, List<GlobalSavedSubLevelPointer>> handledPointers = new LinkedHashMap<>();
 
         DeleteExecution(DeleteComponent component, Map<UUID, DeleteStatus> statuses, DeleteFlush flush) {
             this.component = component;
@@ -365,7 +366,11 @@ final class DeleteTx {
             storage.attemptSaveSubLevel(rewrite.pointer(), data);
             touched.add(storage);
         }
-        for (SubLevelStorage storage : touched) storage.flush();
+        try {
+            for (SubLevelStorage storage : touched) storage.flush();
+        } finally {
+            DiskScanner.invalidateCache();
+        }
     }
 
     private void verifyDependencyTags(List<DependencyRewrite> rewrites) {
@@ -399,6 +404,7 @@ final class DeleteTx {
                 }
                 return new JsonObject();
             });
+            cleanupDanglingPointers(statuses);
         } finally {
             PauseService.persist();
             ForceLoadService.persist();
@@ -482,7 +488,8 @@ final class DeleteTx {
         Map<UUID, RecycleStore.OperationalState> currentStates = new LinkedHashMap<>();
         for (UUID uuid : component.targets) {
             currentStates.put(uuid, new RecycleStore.OperationalState(
-                    PauseService.isPaused(uuid), ForceLoadService.isForcedOnMain(this.kit.server, uuid)));
+                    PauseService.isPaused(uuid), ForceLoadService.isForcedOnMain(this.kit.server, uuid),
+                    FreezeService.isFrozen(uuid)));
         }
         requireUnchangedOperationalSnapshot(
                 new OperationalSnapshot(component.activeSnapshot, component.states),
@@ -537,10 +544,12 @@ final class DeleteTx {
 
     void clearOperationalStateOnMain(Collection<UUID> targets) {
         PauseService.applyOnMain(this.kit.server, targets, false);
+        FreezeService.applyOnMain(targets, false);
         for (UUID uuid : targets) ForceLoadService.removeOnMain(this.kit.server, uuid);
         for (UUID uuid : targets) {
-            if (PauseService.isPaused(uuid) || ForceLoadService.isForcedOnMain(this.kit.server, uuid)) {
-                throw new IllegalStateException("删除前未能清理暂停/常驻状态: " + uuid);
+            if (PauseService.isPaused(uuid) || FreezeService.isFrozen(uuid)
+                    || ForceLoadService.isForcedOnMain(this.kit.server, uuid)) {
+                throw new IllegalStateException("删除前未能清理暂停/冻结/常驻状态: " + uuid);
             }
         }
     }
@@ -634,9 +643,6 @@ final class DeleteTx {
         if (this.kit.resolveLoaded(uuid) != null) throw new IllegalStateException("removeSubLevel 后仍在容器中");
         execution.statuses.get(uuid).removed = true;
         execution.removedBodies.put(uuid, body);
-        if (pointer != null) {
-            execution.handledPointers.computeIfAbsent(uuid, ignored -> new ArrayList<>()).add(pointer);
-        }
     }
 
     /**
@@ -715,42 +721,179 @@ final class DeleteTx {
     }
 
     void queueRemainingCopies(DeleteExecution execution, UUID uuid, ServerSubLevel removedBody) {
-        List<GlobalSavedSubLevelPointer> unconsumed = new ArrayList<>(
-                execution.handledPointers.getOrDefault(uuid, List.of()));
         Map<String, Path> dims = DiskScanner.sublevelDirs(this.kit.server);
-        for (DeleteCopy copy : execution.component.copies.getOrDefault(uuid, List.of())) {
+        List<DeleteCopy> copies = execution.component.copies.getOrDefault(uuid, List.of());
+        for (DeleteCopy copy : copies) {
             // sable 清槽(attemptSaveSubLevel(ptr,null))不验 uuid,入队前必须重读槽位确认还是目标,
             // 否则会静默清掉无辜体的条目(此处在主线程,sable 不会并发写盘)
             CompoundTag fresh = OpKit.readVerified(dims, uuid, copy.key());
             if (fresh == null) {
                 throw new IllegalStateException("条目 " + copy.key().id() + " 在删除前被 sable 搬迁，已中止并回滚");
             }
-            List<GlobalSavedSubLevelPointer> pointers = new ArrayList<>();
-            if (copy.pointers().isEmpty()) {
-                pointers.add(fallbackPointer(copy.key(), copy.tag()));
-            } else {
-                for (DiskScanner.LiveLocation location : copy.pointers()) pointers.add(toPointer(location));
-            }
-            for (GlobalSavedSubLevelPointer pointer : pointers) {
-                int handledIndex = unconsumed.indexOf(pointer);
-                if (handledIndex >= 0) {
-                    unconsumed.remove(handledIndex);
-                    // 这一份指望 removeSubLevel 已经清掉了槽位和 holding 指针,不再单独排删除
-                    SablePanel.LOGGER.debug("sablepanel: delete {} skip(handled) key={} ptr={}",
-                            uuid, copy.key().id(), pointer);
-                    continue;
-                }
-                SablePanel.LOGGER.debug("sablepanel: delete {} queueDeletion key={} ptr={}",
-                        uuid, copy.key().id(), pointer);
-                ServerLevel level = this.kit.levelOf(copy.key().dim());
-                ServerSubLevelContainer container = level == null ? null : SubLevelContainer.getContainer(level);
-                if (container == null) throw new IllegalStateException("存储副本所在维度不可用: " + copy.key().dim());
-                execution.flush.touched().add(level);
-                execution.flush.targetsByLevel().computeIfAbsent(level, ignored -> new LinkedHashSet<>()).add(uuid);
+            ServerLevel level = this.kit.levelOf(copy.key().dim());
+            ServerSubLevelContainer container = level == null ? null : SubLevelContainer.getContainer(level);
+            if (container == null) throw new IllegalStateException("存储副本所在维度不可用: " + copy.key().dim());
+            execution.flush.touched().add(level);
+            execution.flush.targetsByLevel().computeIfAbsent(level, ignored -> new LinkedHashSet<>()).add(uuid);
+            for (GlobalSavedSubLevelPointer pointer : deletionPointers(List.of(copy))) {
+                SablePanel.LOGGER.debug("sablepanel: delete {} queueDeletion ptr={}", uuid, pointer);
                 removedBody.setLastSerializationPointer(pointer);
                 container.getHoldingChunkMap().queueDeletion(removedBody);
             }
+            removePointerReferences(container, copy);
         }
+    }
+
+    private static void removePointerReferences(ServerSubLevelContainer container, DeleteCopy copy) {
+        if (copy.pointers().isEmpty()) return;
+        var map = container.getHoldingChunkMap();
+        var loaded = ((com.klnon.sablepanel.mixin.HoldingChunkMapAccessor) (Object) map)
+                .sablepanel$loadedHoldingChunks();
+        SavedSubLevelPointer local = new SavedSubLevelPointer(
+                (short) copy.key().storage(), (short) copy.key().index());
+        Set<Long> chunks = new LinkedHashSet<>();
+        for (DiskScanner.LiveLocation location : copy.pointers()) {
+            chunks.add(new ChunkPos(location.chunkX(), location.chunkZ()).toLong());
+        }
+        for (long packed : chunks) {
+            ChunkPos position = new ChunkPos(packed);
+            SubLevelHoldingChunk chunk = loaded.get(packed);
+            if (chunk == null) chunk = map.getStorage().attemptLoadHoldingChunk(position);
+            if (chunk == null) throw new IllegalStateException("holding 元数据已变化: " + position);
+            chunk.getSubLevelPointers().removeIf(local::equals);
+            map.getStorage().attemptSaveHoldingChunk(position, chunk);
+        }
+    }
+
+    private void cleanupDanglingPointers(Map<UUID, DeleteStatus> statuses) throws Exception {
+        Set<DiskScanner.EntryKey> candidates = new LinkedHashSet<>();
+        Map<DiskScanner.EntryKey, DeleteCopy> copies = new LinkedHashMap<>();
+        Map<DiskScanner.EntryKey, UUID> originalOwners = new LinkedHashMap<>();
+        for (DeleteStatus status : statuses.values()) {
+            if (!status.removed) continue;
+            for (DiskScanner.EntryKey key : status.entryKeys) {
+                CompoundTag tag = status.entryTags.get(key);
+                if (tag == null) continue;
+                candidates.add(key);
+                copies.putIfAbsent(key, new DeleteCopy(key, tag, 0, List.of()));
+                originalOwners.putIfAbsent(key, status.uuid);
+            }
+        }
+        if (candidates.isEmpty()) return;
+        Map<String, Path> dimensions = DiskScanner.sublevelDirs(this.kit.server);
+        Set<DiskScanner.EntryKey> occupied = DiskScanner.occupiedEntrySlots(dimensions, candidates);
+        Set<DiskScanner.EntryKey> empty = new LinkedHashSet<>(candidates);
+        empty.removeAll(occupied);
+        if (empty.isEmpty()) return;
+        List<String> warnings = new ArrayList<>();
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> current = JobService.underLocate(
+                () -> DiskScanner.locatePointersStrict(dimensions, empty, warnings));
+        if (!warnings.isEmpty()) {
+            throw new IOException("删除后指针定位失败: " + String.join("; ", warnings));
+        }
+        this.kit.onMainUntilComplete(() -> {
+            List<String> recheckWarnings = new ArrayList<>();
+            Set<DiskScanner.EntryKey> occupiedNow = new LinkedHashSet<>(
+                    DiskScanner.occupiedEntrySlots(dimensions, empty));
+            occupiedNow.addAll(occupiedRuntimeSlotsOnMain(empty, originalOwners));
+            Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> pointersNow =
+                    DiskScanner.locatePointersStrict(dimensions, empty, recheckWarnings);
+            if (!recheckWarnings.isEmpty()) {
+                throw new IOException("删除后指针复核失败: " + String.join("; ", recheckWarnings));
+            }
+            requirePointerCleanupSnapshot(empty, occupiedNow, current, pointersNow);
+            Set<SubLevelStorage> touched = new LinkedHashSet<>();
+            for (DiskScanner.EntryKey key : empty) {
+                List<DiskScanner.LiveLocation> locations = current.getOrDefault(key, List.of());
+                if (locations.isEmpty()) continue;
+                DeleteCopy prepared = copies.get(key);
+                DeleteCopy fresh = new DeleteCopy(key, prepared.tag(), prepared.blocks(), locations);
+                ServerLevel level = this.kit.levelOf(key.dim());
+                ServerSubLevelContainer container = level == null ? null : SubLevelContainer.getContainer(level);
+                if (container == null) throw new IllegalStateException("删除后指针清理维度不可用: " + key.dim());
+                removePointerReferences(container, fresh);
+                touched.add(container.getHoldingChunkMap().getStorage());
+            }
+            for (SubLevelStorage storage : touched) storage.flush();
+            return new JsonObject();
+        });
+        warnings.clear();
+        Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> remaining = JobService.underLocate(
+                () -> DiskScanner.locatePointersStrict(dimensions, empty, warnings));
+        if (!warnings.isEmpty()) {
+            throw new IOException("删除后指针复核失败: " + String.join("; ", warnings));
+        }
+        for (DiskScanner.EntryKey key : empty) {
+            int count = remaining.getOrDefault(key, List.of()).size();
+            if (count > 0) throw new IllegalStateException("删除后仍有 " + count + " 个 holding 指针: " + key.id());
+        }
+    }
+
+    private Set<DiskScanner.EntryKey> occupiedRuntimeSlotsOnMain(
+            Set<DiskScanner.EntryKey> candidates, Map<DiskScanner.EntryKey, UUID> originalOwners) {
+        Set<DiskScanner.EntryKey> occupied = new LinkedHashSet<>();
+        for (ServerLevel level : this.kit.server.getAllLevels()) {
+            ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+            if (container == null) continue;
+            String dimension = level.dimension().location().toString();
+            for (ServerSubLevel body : List.copyOf(container.getAllSubLevels())) {
+                GlobalSavedSubLevelPointer pointer = body.getLastSerializationPointer();
+                if (pointer == null) continue;
+                DiskScanner.EntryKey key = OpKit.entryKey(dimension, pointer);
+                if (candidates.contains(key)) occupied.add(key);
+            }
+            var allHolding = ((com.klnon.sablepanel.mixin.HoldingChunkMapAccessor) (Object)
+                    container.getHoldingChunkMap()).sablepanel$allHoldingSubLevels();
+            allHolding.forEach((uuid, holding) -> {
+                DiskScanner.EntryKey key = OpKit.entryKey(dimension, holding.pointer());
+                if (candidates.contains(key) && !uuid.equals(originalOwners.get(key))) occupied.add(key);
+            });
+        }
+        return occupied;
+    }
+
+    static void requirePointerCleanupSnapshot(
+            Set<DiskScanner.EntryKey> candidates, Set<DiskScanner.EntryKey> occupied,
+            Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> expected,
+            Map<DiskScanner.EntryKey, List<DiskScanner.LiveLocation>> actual) {
+        Set<DiskScanner.EntryKey> reused = new LinkedHashSet<>(candidates);
+        reused.retainAll(occupied);
+        if (!reused.isEmpty()) throw new IllegalStateException("指针清理前存储槽已被复用: " + reused);
+        for (DiskScanner.EntryKey key : candidates) {
+            if (!pointerLocationCounts(expected.getOrDefault(key, List.of())).equals(
+                    pointerLocationCounts(actual.getOrDefault(key, List.of())))) {
+                throw new IllegalStateException("指针清理前 holding 元数据已变化: " + key.id());
+            }
+        }
+    }
+
+    private static Map<DiskScanner.LiveLocation, Integer> pointerLocationCounts(
+            Collection<DiskScanner.LiveLocation> locations) {
+        Map<DiskScanner.LiveLocation, Integer> counts = new LinkedHashMap<>();
+        for (DiskScanner.LiveLocation location : locations) counts.merge(location, 1, Integer::sum);
+        return counts;
+    }
+
+    static boolean hasDanglingDeletedPointers(DiskVerification disk,
+                                              Map<UUID, DeleteStatus> statuses) {
+        for (DeleteStatus status : statuses.values()) {
+            if (!status.removed || disk.entries().getOrDefault(status.uuid, 0) > 0) continue;
+            int pointers = 0;
+            for (DiskScanner.EntryKey key : status.entryKeys) {
+                pointers += disk.pointers().getOrDefault(key, 0);
+            }
+            if (pointers > 0) return true;
+        }
+        return false;
+    }
+
+    static List<GlobalSavedSubLevelPointer> deletionPointers(Collection<DeleteCopy> copies) {
+        List<GlobalSavedSubLevelPointer> pointers = new ArrayList<>();
+        for (DeleteCopy copy : copies) {
+            if (copy.pointers().isEmpty()) pointers.add(fallbackPointer(copy.key(), copy.tag()));
+            else for (DiskScanner.LiveLocation location : copy.pointers()) pointers.add(toPointer(location));
+        }
+        return List.copyOf(pointers);
     }
 
     void markPartialDelete(DeleteExecution execution) {
@@ -783,6 +926,7 @@ final class DeleteTx {
             try {
                 ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
                 if (container == null) throw new IllegalStateException("物理体容器不存在");
+                container.getHoldingChunkMap().getStorage().flush();
                 dropHoldingRecords(level, flush.targetsByLevel().getOrDefault(level, Set.of()));
                 dropInvalidHoldingRecords(level);
                 container.getHoldingChunkMap().saveAll();
@@ -817,6 +961,10 @@ final class DeleteTx {
         JsonObject runtime;
         try {
             disk = scanRemainingEntries(statuses, warnings);
+            if (hasDanglingDeletedPointers(disk, statuses)) {
+                cleanupDanglingPointers(statuses);
+                disk = scanRemainingEntries(statuses, warnings);
+            }
             runtime = this.kit.readRuntimeStates(statuses.keySet());
         } catch (Exception error) {
             String message = "删除后验收失败: " + messageOf(error);
@@ -836,11 +984,13 @@ final class DeleteTx {
             boolean holding = state != null && state.get("holding").getAsBoolean();
             boolean paused = state != null && state.get("paused").getAsBoolean();
             boolean forced = state != null && state.get("forced").getAsBoolean();
+            boolean frozen = state != null && state.get("frozen").getAsBoolean();
             if (status.remainingEntries > 0) status.fail("仍有 " + status.remainingEntries + " 个磁盘条目");
             if (status.remainingPointers > 0) status.fail("仍有 " + status.remainingPointers + " 个 holding 指针");
             if (loaded) status.fail("运行时物理体仍存在");
             if (holding) status.fail("holding 中仍存在");
             if (paused) status.fail("暂停状态仍存在");
+            if (frozen) status.fail("冻结状态仍存在");
             if (forced) status.fail("常驻加载票仍存在");
             if (!status.removed && !status.alreadyAbsent) status.fail("未执行删除");
         }
@@ -893,13 +1043,21 @@ final class DeleteTx {
         ScanSession scan = this.kit.freshScan(warnings);
         Set<DiskScanner.EntryKey> keys = new LinkedHashSet<>();
         Map<UUID, Integer> entries = new HashMap<>();
+        Map<DiskScanner.EntryKey, UUID> originalOwners = new LinkedHashMap<>();
         for (DeleteStatus status : statuses.values()) {
             keys.addAll(status.entryKeys);
+            for (DiskScanner.EntryKey key : status.entryKeys) originalOwners.put(key, status.uuid);
             entries.put(status.uuid, scan.entriesOf(status.uuid).size());
         }
-        Map<DiskScanner.EntryKey, Integer> pointerCounts = new HashMap<>();
+        Map<DiskScanner.EntryKey, UUID> currentOwners = new LinkedHashMap<>();
+        for (Map.Entry<UUID, List<DiskScanner.EntryMeta>> entry : scan.meta().entrySet()) {
+            for (DiskScanner.EntryMeta copy : entry.getValue()) currentOwners.put(copy.key(), entry.getKey());
+        }
+        Map<DiskScanner.EntryKey, Integer> rawPointerCounts = new HashMap<>();
         JobService.underLocate(() -> DiskScanner.locatePointersStrict(scan.dims(), keys, warnings))
-                .forEach((key, locations) -> pointerCounts.put(key, locations.size()));
+                .forEach((key, locations) -> rawPointerCounts.put(key, locations.size()));
+        Map<DiskScanner.EntryKey, Integer> pointerCounts = new HashMap<>(
+                targetPointerCounts(rawPointerCounts, originalOwners, currentOwners));
         /* 验收失败时把「到底哪个槽位还剩着」打出来。「仍有 N 个磁盘条目」单看数字定位不了 ——
            排查这条错时最想知道的是残留的是规范副本(指望 removeSubLevel 清)还是排了队的那份。 */
         for (DeleteStatus status : statuses.values()) {
@@ -910,6 +1068,19 @@ final class DeleteTx {
                     status.entryKeys.stream().map(DiskScanner.EntryKey::id).toList(), pointerCounts);
         }
         return new DiskVerification(entries, pointerCounts);
+    }
+
+    static Map<DiskScanner.EntryKey, Integer> targetPointerCounts(
+            Map<DiskScanner.EntryKey, Integer> pointers,
+            Map<DiskScanner.EntryKey, UUID> originalOwners,
+            Map<DiskScanner.EntryKey, UUID> currentOwners) {
+        Map<DiskScanner.EntryKey, Integer> remaining = new LinkedHashMap<>();
+        for (Map.Entry<DiskScanner.EntryKey, Integer> entry : pointers.entrySet()) {
+            UUID current = currentOwners.get(entry.getKey());
+            UUID original = originalOwners.get(entry.getKey());
+            if (current == null || current.equals(original)) remaining.put(entry.getKey(), entry.getValue());
+        }
+        return Map.copyOf(remaining);
     }
 
     DeleteComponent prepareExactDeleteComponent(Set<UUID> targets, List<String> warnings)
@@ -945,7 +1116,8 @@ final class DeleteTx {
             }
             JsonObject state = runtime.getAsJsonObject(uuid.toString());
             if (state != null && (state.get("loaded").getAsBoolean() || state.get("holding").getAsBoolean()
-                    || state.get("paused").getAsBoolean() || state.get("forced").getAsBoolean())) {
+                    || state.get("paused").getAsBoolean() || state.get("frozen").getAsBoolean()
+                    || state.get("forced").getAsBoolean())) {
                 throw new IllegalStateException("回滚前运行时或操作状态仍存在: " + uuid);
             }
         }
