@@ -262,14 +262,17 @@ public final class TeleportOps {
         // 而作业还报 ok。挂票和摘票必须保持相同的整组语义。
         Set<UUID> forcedSnapshot = forced ? Set.of()
                 : this.kit.onMainUntilComplete(() -> ForceLoadService.forcedOnMain(this.kit.server));
-        OpKit.DependencySelection selection = forced
-                ? this.kit.forceLoadCandidates(requested)
-                : this.kit.forcedDisableGroups(requested, forcedSnapshot);
         // 但整组语义只到组边界为止,依赖组之间是独立事务。2026-08-22 job#15:取消常驻 117 体一单,
         // 一个 4 体组在快照与复核的窗口里长出新成员,其余 113 个体全部连坐失败,重试才整单通过。
         // 每组各自成败、失败原因逐组带回;单组失败保持原始异常语义(单体按钮/自动修复靠它导流)。
+        // 常驻加载的候选决议同理:缺根/链上多副本降级进 failures,不再整单拦在分组之前。
         List<UUID> succeeded = new ArrayList<>();
         List<String> failures = new ArrayList<>();
+        OpKit.DependencySelection selection = forced
+                ? this.kit.forceLoadCandidates(requested, failures)
+                : this.kit.forcedDisableGroups(requested, forcedSnapshot);
+        // 决议阶段有降级失败时那一单实质是多部分操作,不再走单组原样重抛
+        int preflightFailures = failures.size();
         Exception firstFailure = null;
         // 界内宇宙=整批选择的成员集:T1 分组过期(选组时脱开、执行时又挂回)导致链跨组时,
         // 跨的仍是同批成员,放行;真正的局外体才触发中止。
@@ -301,7 +304,9 @@ public final class TeleportOps {
                 }
             }
         }
-        if (selection.components().size() == 1 && firstFailure != null) throw firstFailure;
+        if (preflightFailures == 0 && selection.components().size() == 1 && firstFailure != null) {
+            throw firstFailure;
+        }
         return forcedBatchResponse(forced, selection.components().size(), requested.size(),
                 succeeded, failures);
     }

@@ -97,7 +97,8 @@ public final class OpKit {
                 .filter(component -> component.stream().anyMatch(requested::contains)).toList();
     }
 
-    DependencySelection forceLoadCandidates(Collection<UUID> roots) throws Exception {
+    /** 决议阶段的根级病灶(缺根/链上多副本)降级进 failures,幸存链照常成组;全扫描损坏仍整单抛。 */
+    DependencySelection forceLoadCandidates(Collection<UUID> roots, List<String> failures) throws Exception {
         List<UUID> requested = List.copyOf(new LinkedHashSet<>(roots));
         Map<UUID, Set<UUID>> runtime = runtimeDependencyGroups(requested);
         List<String> warnings = new ArrayList<>();
@@ -106,11 +107,7 @@ public final class OpKit {
             throw new IllegalStateException("常驻候选磁盘扫描存在损坏: " + String.join("; ", warnings));
         }
         Map<UUID, List<DiskScanner.EntryMeta>> disk = scan.meta();
-        Set<UUID> unknown = new LinkedHashSet<>();
-        for (UUID root : requested) {
-            if (!runtime.containsKey(root) && !disk.containsKey(root)) unknown.add(root);
-        }
-        if (!unknown.isEmpty()) throw new IllegalStateException("依赖组根成员不存在: " + unknown);
+        List<UUID> known = knownForceLoadRoots(requested, runtime, disk, failures);
 
         Set<UUID> loadedMembers = new LinkedHashSet<>();
         runtime.values().forEach(loadedMembers::addAll);
@@ -119,12 +116,25 @@ public final class OpKit {
                 forceLoadPointers(scan);
         Map<UUID, String> resolvedEntries = pointedForceLoadEntries(disk, selectedEntries, pointers);
         List<Set<UUID>> components = selectForceLoadCandidateGroupSets(
-                requested, disk, runtime, resolvedEntries);
+                known, disk, runtime, resolvedEntries, failures);
         LinkedHashSet<UUID> members = new LinkedHashSet<>();
         components.forEach(members::addAll);
         Map<UUID, MemberPlan> plans = JobService.underLocate(
                 () -> prepareForceLoadPlans(scan, members, resolvedEntries, pointers));
-        return new DependencySelection(requested, List.copyOf(members), components, plans);
+        return new DependencySelection(known, List.copyOf(members), components, plans);
+    }
+
+    /** 2026-08-22 job#5/#13:勾选残留刚删除的体,几个死 UUID 曾让整单连坐 —— 缺根剔除并报,活根继续。 */
+    static List<UUID> knownForceLoadRoots(List<UUID> requested, Map<UUID, Set<UUID>> runtime,
+                                          Map<UUID, List<DiskScanner.EntryMeta>> disk,
+                                          List<String> failures) {
+        Set<UUID> unknown = new LinkedHashSet<>();
+        for (UUID root : requested) {
+            if (!runtime.containsKey(root) && !disk.containsKey(root)) unknown.add(root);
+        }
+        if (unknown.isEmpty()) return requested;
+        failures.add("依赖组根成员不存在: " + shortUuids(unknown));
+        return requested.stream().filter(root -> !unknown.contains(root)).toList();
     }
 
     List<List<UUID>> forceLoadIntentGroups(Collection<UUID> candidates) throws Exception {
@@ -201,15 +211,28 @@ public final class OpKit {
         return mergeOverlappingGroups(selected);
     }
 
+    /**
+     * 闭包展开抛错(链上有多副本/活动条目失配)= 那条链装不完整,按整组语义整链剔除,
+     * 只让该根进失败明细;多个根撞同一病灶时按病因聚合成一条。2026-08-22 job#7/#14:
+     * 一个多副本依赖成员曾让 285/119 个体整单连坐。
+     */
     static List<Set<UUID>> selectForceLoadCandidateGroupSets(
             Collection<UUID> roots, Map<UUID, List<DiskScanner.EntryMeta>> disk,
-            Map<UUID, Set<UUID>> runtime, Map<UUID, String> selectedEntries) {
+            Map<UUID, Set<UUID>> runtime, Map<UUID, String> selectedEntries, List<String> failures) {
         List<Set<UUID>> selected = new ArrayList<>();
+        Map<String, Set<UUID>> rejected = new LinkedHashMap<>();
         for (UUID root : roots) {
             Set<UUID> loaded = runtime.get(root);
-            selected.add(directedDependencyClosure(loaded == null ? Set.of(root) : loaded,
-                    disk, selectedEntries));
+            try {
+                selected.add(directedDependencyClosure(loaded == null ? Set.of(root) : loaded,
+                        disk, selectedEntries));
+            } catch (IllegalStateException failure) {
+                rejected.computeIfAbsent(String.valueOf(failure.getMessage()),
+                        cause -> new LinkedHashSet<>()).add(root);
+            }
         }
+        rejected.forEach((cause, affected) ->
+                failures.add(cause + " (影响根 " + shortUuids(affected) + ")"));
         return mergeOverlappingGroups(selected);
     }
 

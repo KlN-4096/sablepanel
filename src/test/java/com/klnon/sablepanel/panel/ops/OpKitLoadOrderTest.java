@@ -84,7 +84,7 @@ class OpKitLoadOrderTest {
                 historicalInbound, disk.get(historicalInbound).get(0).key().id());
 
         List<Set<UUID>> groups = OpKit.selectForceLoadCandidateGroupSets(
-                List.of(root), disk, Map.of(root, runtime), selected);
+                List.of(root), disk, Map.of(root, runtime), selected, new ArrayList<>());
 
         assertEquals(List.of(Set.of(root, loadedPart, coldDependency)), groups);
         assertFalse(groups.get(0).contains(historicalInbound));
@@ -147,8 +147,58 @@ class OpKitLoadOrderTest {
                 Set.of(root), disk, Map.of(root, "missing-entry")));
         assertThrows(IllegalStateException.class, () -> OpKit.directedDependencyClosure(
                 Set.of(root), Map.of(), Map.of(root, "missing-entry")));
-        assertThrows(IllegalStateException.class, () -> OpKit.selectForceLoadCandidateGroupSets(
-                List.of(root), disk, Map.of(), Map.of()));
+        // 闭包单元照常抛;成组层把它降级为该根的失败明细,不再整单连坐
+        List<String> failures = new ArrayList<>();
+        assertEquals(List.of(), OpKit.selectForceLoadCandidateGroupSets(
+                List.of(root), disk, Map.of(), Map.of(), failures));
+        assertEquals(1, failures.size());
+    }
+
+    @Test
+    void forceLoadSelectionDropsMissingRootsInsteadOfFailingTheBatch() {
+        // 2026-08-22 job#5/#13:勾选残留刚删除的体,几个死 UUID 让 288/285 个活体整单连坐
+        UUID living = UUID.randomUUID();
+        UUID deleted = UUID.randomUUID();
+        Map<UUID, List<com.klnon.sablepanel.panel.storage.DiskScanner.EntryMeta>> disk =
+                Map.of(living, List.of(meta(0, List.of())));
+        List<String> failures = new ArrayList<>();
+
+        List<UUID> known = OpKit.knownForceLoadRoots(
+                List.of(living, deleted), Map.of(), disk, failures);
+
+        assertEquals(List.of(living), known);
+        assertEquals(1, failures.size());
+        assertTrue(failures.get(0).contains("依赖组根成员不存在"));
+        assertTrue(failures.get(0).contains(deleted.toString().substring(0, 8)));
+        assertEquals(List.of(living, deleted),
+                OpKit.knownForceLoadRoots(List.of(living, deleted),
+                        Map.of(deleted, Set.of(deleted)), disk, new ArrayList<>()));
+    }
+
+    @Test
+    void forceLoadSelectionSurvivesAPoisonedChainAndReportsIt() {
+        // 2026-08-22 job#7/#14:一条链的依赖成员(糖音气球)多副本,285/119 个体整单连坐;
+        // 两个根撞同一病灶时按病因聚合成一条失败明细
+        UUID cleanRoot = UUID.randomUUID();
+        UUID poisonedRoot = UUID.randomUUID();
+        UUID otherPoisonedRoot = UUID.randomUUID();
+        UUID balloon = UUID.randomUUID();
+        Map<UUID, List<com.klnon.sablepanel.panel.storage.DiskScanner.EntryMeta>> disk = Map.of(
+                cleanRoot, List.of(meta(0, List.of())),
+                poisonedRoot, List.of(meta(1, List.of(balloon))),
+                otherPoisonedRoot, List.of(meta(2, List.of(balloon))),
+                balloon, List.of(meta(3, List.of()), meta(4, List.of())));
+        List<String> failures = new ArrayList<>();
+
+        List<Set<UUID>> groups = OpKit.selectForceLoadCandidateGroupSets(
+                List.of(cleanRoot, poisonedRoot, otherPoisonedRoot), disk,
+                Map.of(), Map.of(), failures);
+
+        assertEquals(List.of(Set.of(cleanRoot)), groups);
+        assertEquals(1, failures.size());
+        assertTrue(failures.get(0).contains(balloon.toString()));
+        assertTrue(failures.get(0).contains(poisonedRoot.toString().substring(0, 8)));
+        assertTrue(failures.get(0).contains(otherPoisonedRoot.toString().substring(0, 8)));
     }
 
     @Test
