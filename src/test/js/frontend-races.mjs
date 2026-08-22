@@ -58,7 +58,9 @@ function makeSandbox(state) {
     body: { classList: { add(){}, remove(){}, toggle(){} } },
     hidden: false,
   };
-  const store = new Map();
+  // spLang 钉死中文:navigator 经 Proxy 回落到宿主 Node 的 navigator(language='en-US'),
+  // 不钉的话 en 词典一存在,全部中文断言就整批换语言
+  const store = new Map([['spLang', 'zh']]);
   // 只放浏览器特有的东西;标准内置(Boolean/Array/…)由 Proxy 回落到宿主 globalThis ——
   // 手写清单漏一个就会被兜成 noop,`parts.filter(Boolean)` 会静悄悄把整个数组过滤空
   const sandbox = {

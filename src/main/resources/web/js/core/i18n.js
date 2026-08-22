@@ -1,7 +1,18 @@
 'use strict';
-/* 中文词典 T / MANUAL 文案;fmt 为词条函数所依赖,随词典同文件。单语言站,词条直读 T.key */
+/* 词典 DICT.{zh,en};T 按 LANG 一次解析,切换语言 = 写偏好 + 整页重载(toggleLang)——
+   语言切换低频,重载比给全部视图接重渲染管线薄一个数量级。
+   HTML 静态标签写中文兜底,非中文启动时由 applyStaticI18n 统一覆写。
+   fmt 为词条函数所依赖,随词典同文件。 */
+const LANG = (() => {
+  try {
+    const saved = localStorage.getItem('spLang');
+    if (saved === 'zh' || saved === 'en') return saved;
+    return String(navigator.language || 'zh').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+  } catch (ignored) { return 'zh'; }   // 测试沙箱/无 storage 环境一律中文
+})();
 /* ===================== 词典 ===================== */
-const T = {
+const DICT = {};
+DICT.zh = {
   refresh:'刷新',
           state:'状态',
   stLoaded:'加载中', stStored:'未加载',         szHuge:'巨型 ≥10000', szLarge:'大型 ≥1000', szMid:'中型 ≥100', szSmall:'小型 ≥10', szFrag:'碎片 <10',
@@ -206,7 +217,30 @@ const T = {
   membersFold:'收起成员列表', membersUnfold:'展开成员列表', membersRail:(n)=>`成员 ${n}`,
   statBlocks:'方块总数', statSizeL:'尺寸 W×H×D', statMembers:'组成员', statCostL:'逻辑开销 ms/tick',
   bodyGone:'该物理体已不存在',
+  /* ===================== 静态标签(index.html data-i18n,中文写在 HTML 里作兜底) ===================== */
+  navDash:'总览', navBodies:'物理体', navRecycle:'回收站', navJobs:'日志',
+  pillCost:'物理体开销 ms/tick', jobPillTitle:'查看日志', themeTitle:'切换主题', langTitle:'切换语言 / Language',
+  loginAddress:'服务器地址', loginToken:'访问口令', loginEnter:'进入',
+  chartTitle:'Sable 物理求解历史',
+  chartHint:'维度曲线为 Sable 物理求解耗时,不是维度总 MSPT;空维度仍有少量管线基础开销。粉色曲线为已加载物理体的 Java 逻辑合计。',
+  searchPh:'名称 / UUID', cardSizeTitle:'卡片大小', sizeS:'小', sizeM:'中', sizeL:'大',
+  sortLabel:'排序', sortTitle:'排序(可多条件)', addSortLabel:'添加条件',
+  moreFilters:'更多筛选', filterBlockTitle:'包含方块', blockPh:'方块名或 id',
+  dupTitle:'重复', dupAll:'全部显示', dupOnly:'仅多副本', cloneOnly:'仅疑似克隆', dupAny:'两者任一',
+  otherTitle:'其他', namedOnly:'仅命名体', groupOnly:'仅组合体',
+  chipState:'状态', chipSize:'规模', chipDim:'维度', chipRestoreState:'恢复状态',
+  pvRetryTitle:'重试资源准备', pvVersionsLabel:'副本',
+  pvVersionsTitle:'该物理体有多份磁盘副本,在「处理副本」中逐版本预览并选定',
+  opTeleport:'传送', opDest:'目的坐标', fillCurrent:'取当前', opPlayer:'玩家',
+  opPhysTitle:'物理与恢复', opPhysHint:'各按钮相互独立,悬停看说明',
+  clearVel:'清除速度', adoptLabel:'收养(含依赖)', adoptHint:'重建加载指针,数据不动盘',
+  dangerTitle:'危险操作', dangerHint:'删除严格验收成功后才会进入回收站',
+  limitLabel:'存储上限', applyLabel:'应用',
+  restoreGroupLabel:'恢复该物理组', purgeGroupLabel:'彻底删除该物理组', restoreHint:'恢复后会在保存位置重新加载',
+  jobsFileLabel:'日志文件', jobsFailedOnly:'只看失败',
+  closeLabel:'关闭', manualTitle:'SablePanel 使用说明', modalNeverLabel:'永不提醒', repairSelected:'修复所选项',
 };
+const T = DICT[LANG] || DICT.zh;
 const MANUAL = {
   zh: [
     {k:'states',label:'状态与判断',sections:[
@@ -237,6 +271,24 @@ const MANUAL = {
     ]}
   ]
 };
+/* 静态标签覆写:HTML 写中文兜底,非中文语言启动时统一替换(main.js 启动序列调用) */
+function applyStaticI18n(){
+  if (LANG === 'zh') return;
+  document.documentElement.lang = LANG;
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const v = T[el.dataset.i18n]; if (typeof v === 'string') el.textContent = v;
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach(el => {
+    const v = T[el.dataset.i18nTitle]; if (typeof v === 'string') el.title = v;
+  });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+    const v = T[el.dataset.i18nPh]; if (typeof v === 'string') el.placeholder = v;
+  });
+}
+function toggleLang(){
+  try { localStorage.setItem('spLang', LANG === 'zh' ? 'en' : 'zh'); } catch (ignored) {}
+  location.reload();
+}
 function fmt(n){ return Number(n).toLocaleString('en-US'); }
 /* 时间戳(ms)三种口径:时刻/日期/完整。图表横轴的 2-digit 紧凑格式是刻意的第四种,留在 chart.js */
 function fmtTime(ms){ return new Date(ms).toLocaleTimeString(); }
