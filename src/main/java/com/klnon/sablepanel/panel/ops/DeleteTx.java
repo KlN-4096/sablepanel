@@ -486,26 +486,26 @@ final class DeleteTx {
     static void requireColdTargetsUnloaded(Collection<UUID> targets,
                                            java.util.function.Predicate<UUID> loaded) {
         if (targets.stream().anyMatch(loaded)) {
-            throw new IllegalStateException("物理组在确认期间已经加载，请重新扫描");
+            throw new IllegalStateException("物理组在确认期间已经加载,请重新扫描");
         }
     }
 
     static void requireUnchangedDiskSnapshot(DiskSnapshot expected, DiskSnapshot current) {
         if (!expected.members().equals(current.members())) {
-            throw new IllegalStateException("副本依赖组在确认期间发生变化，请重新扫描");
+            throw new IllegalStateException("副本物理组在确认期间发生变化,请重新扫描");
         }
         if (!expected.entries().keySet().equals(current.entries().keySet())) {
-            throw new IllegalStateException("副本成员在确认期间发生变化，请重新扫描");
+            throw new IllegalStateException("副本成员在确认期间发生变化,请重新扫描");
         }
         for (UUID uuid : expected.entries().keySet()) {
             Map<DiskScanner.EntryKey, CompoundTag> expectedEntries = expected.entries().get(uuid);
             Map<DiskScanner.EntryKey, CompoundTag> currentEntries = current.entries().get(uuid);
             if (!expectedEntries.keySet().equals(currentEntries.keySet())) {
-                throw new IllegalStateException("物理结构 " + uuid + " 的副本槽位在确认期间发生变化，请重新扫描");
+                throw new IllegalStateException("物理结构 " + uuid + " 的副本槽位在确认期间发生变化,请重新扫描");
             }
             for (Map.Entry<DiskScanner.EntryKey, CompoundTag> entry : expectedEntries.entrySet()) {
                 if (!entry.getValue().equals(currentEntries.get(entry.getKey()))) {
-                    throw new IllegalStateException("条目 " + entry.getKey().id() + " 在确认期间发生变化，请重新扫描");
+                    throw new IllegalStateException("条目 " + entry.getKey().id() + " 在确认期间发生变化,请重新扫描");
                 }
                 List<DiskScanner.LiveLocation> expectedValues =
                         expected.pointers().getOrDefault(entry.getKey(), List.of());
@@ -513,7 +513,7 @@ final class DeleteTx {
                         current.pointers().getOrDefault(entry.getKey(), List.of());
                 if (!orderedPointers(expectedValues).equals(orderedPointers(currentValues))) {
                     throw new IllegalStateException("条目 " + entry.getKey().id()
-                            + " 的 holding 指针在确认期间发生变化，请重新扫描");
+                            + " 的 holding 指针在确认期间发生变化,请重新扫描");
                 }
             }
         }
@@ -521,10 +521,10 @@ final class DeleteTx {
 
     static void requireUnchangedOperationalSnapshot(OperationalSnapshot expected, OperationalSnapshot current) {
         if (!expected.active().equals(current.active())) {
-            throw new IllegalStateException("当前运行版本在确认期间发生变化，请重新扫描");
+            throw new IllegalStateException("当前运行版本在确认期间发生变化,请重新扫描");
         }
         if (!expected.states().equals(current.states())) {
-            throw new IllegalStateException("运行状态在确认期间发生变化，请重新扫描");
+            throw new IllegalStateException("运行状态在确认期间发生变化,请重新扫描");
         }
     }
 
@@ -724,7 +724,7 @@ final class DeleteTx {
             // 否则会静默清掉无辜体的条目(此处在主线程,sable 不会并发写盘)
             CompoundTag fresh = OpKit.readVerified(dims, uuid, copy.key());
             if (fresh == null) {
-                throw new IllegalStateException("条目 " + copy.key().id() + " 在删除前被 sable 搬迁，已中止并回滚");
+                throw new IllegalStateException("条目 " + copy.key().id() + " 在删除前被 sable 搬迁,已中止并回滚");
             }
             ServerLevel level = this.kit.levelOf(copy.key().dim());
             ServerSubLevelContainer container = level == null ? null : SubLevelContainer.getContainer(level);
@@ -896,8 +896,8 @@ final class DeleteTx {
         boolean partial = execution.component.targets.stream()
                 .anyMatch(uuid -> execution.statuses.get(uuid).removed);
         String message = partial
-                ? "同一依赖组发生不可自动回滚的部分删除,请从回收站恢复"
-                : "同一依赖组未执行完整删除";
+                ? "同一物理组发生不可自动回滚的部分删除,请从回收站恢复"
+                : "同一物理组未执行完整删除";
         failComponent(execution.component, execution.statuses, message);
         SablePanel.LOGGER.error("sablepanel: {}: {}", message, OpKit.shortUuids(execution.component.targets));
     }

@@ -99,7 +99,7 @@ public final class CopyOps {
     private static CopyVersionScanner.Version requireVersion(CopyVersionScanner.Scan scan, String versionId) {
         return scan.versions().stream()
                 .filter(candidate -> candidate.id().equals(versionId)).findFirst()
-                .orElseThrow(() -> new IllegalStateException("副本版本已经变化，请重新扫描"));
+                .orElseThrow(() -> new IllegalStateException("副本版本已经变化,请重新扫描"));
     }
 
     private static CopyVersionScanner.Version requireSelectableVersion(CopyVersionScanner.Scan scan,
@@ -127,7 +127,7 @@ public final class CopyOps {
                                                     CopySelectionBasis basis) {
         if (basis == CopySelectionBasis.COLD) {
             if (scan.activeMembers() != 0) {
-                throw new IllegalStateException("副本活动证据在处理期间发生变化，请重新扫描");
+                throw new IllegalStateException("副本活动证据在处理期间发生变化,请重新扫描");
             }
             CopyVersionScanner.Version selected = requireSelectableVersion(scan, versionId);
             return new CopyResolutionPlan(selected, selected);
@@ -135,7 +135,7 @@ public final class CopyOps {
         if (scan.currentState() != CopyVersionScanner.CurrentState.KNOWN || scan.currentVersion() == null) {
             String reason = scan.currentState() == CopyVersionScanner.CurrentState.MIXED
                     ? "运行态证据横跨多个副本版本" : "没有足够运行态证据判定当前版本";
-            throw new IllegalStateException(reason + "，未执行副本处理");
+            throw new IllegalStateException(reason + ",未执行副本处理");
         }
         CopyVersionScanner.Version rollback = requireSelectableVersion(scan, scan.currentVersion());
         return new CopyResolutionPlan(basis == CopySelectionBasis.LIVE
@@ -259,7 +259,7 @@ public final class CopyOps {
         }
         DeleteTx.DeleteComponent component = this.tx.prepareExactDeleteComponent(members, warnings, allowPreSave);
         if (!component.targets.equals(members)) {
-            throw new IllegalStateException("副本依赖组缺少可读取的磁盘条目，未执行副本处理");
+            throw new IllegalStateException("副本物理组缺少可读取的磁盘条目,未执行副本处理");
         }
         component.diskMembersSnapshot = Set.copyOf(diskMembers);
         component.runtimeMembersSnapshot = Set.copyOf(initial.runtimeMembers());
@@ -450,13 +450,13 @@ public final class CopyOps {
         try {
             this.kit.audit("resolve_copies", uuid, null, detail.toString());
         } catch (Throwable error) {
-            warnings.add("副本处理已完成，但审计日志写入失败: " + messageOf(error));
+            warnings.add("副本处理已完成,但审计日志写入失败: " + messageOf(error));
             SablePanel.LOGGER.warn("sablepanel: copy resolution audit failed after commit", error);
         }
         try {
             this.kit.rescan.run();
         } catch (Throwable error) {
-            warnings.add("副本处理已完成，但磁盘索引重扫触发失败: " + messageOf(error));
+            warnings.add("副本处理已完成,但磁盘索引重扫触发失败: " + messageOf(error));
             SablePanel.LOGGER.warn("sablepanel: copy resolution rescan failed after commit", error);
         }
         OpKit.attachWarnings(out, warnings);
@@ -507,7 +507,7 @@ public final class CopyOps {
         CopyVersionScanner.Scan scan = inspectVersionState(uuid, warnings).scan();
         if (scan.versions().stream().anyMatch(version -> version.complete()
                 || CopyVersionScanner.repairableCurrent(scan, version))) {
-            throw new IllegalStateException("存在完整候选版本，请选择主版本；未归属条目会随切换一起隔离");
+            throw new IllegalStateException("存在完整候选版本,请选择主版本;未归属条目会随切换一起隔离");
         }
         if (scan.incomplete().isEmpty()) throw new IllegalStateException("没有可隔离的不完整副本");
         Map<UUID, RecycleStore.OperationalState> states = operationalStates(scan.members());

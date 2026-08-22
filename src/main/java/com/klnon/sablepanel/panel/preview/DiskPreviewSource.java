@@ -29,7 +29,7 @@ public final class DiskPreviewSource implements PreviewSource {
     public Loaded load(UUID uuid) throws Exception {
         Map<String, Path> dimensions = DiskScanner.sublevelDirs(this.server);
         BodyIndex.PreviewSelection selection = this.index.previewSelection(uuid);
-        if (selection.ambiguous()) throw new PreviewSource.Ambiguous("副本版本不明确，请显式选择版本");
+        if (selection.ambiguous()) throw new PreviewSource.Ambiguous("副本版本不明确,请显式选择版本");
         DiskScanner.DiskEntry entry = selection.entry();
         Path directory = entry != null ? dimensions.get(entry.key().dim()) : null;
         Loaded loaded = entry != null && directory != null

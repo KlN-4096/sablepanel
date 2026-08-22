@@ -119,7 +119,7 @@ public final class ConsistencyService {
     private JsonObject repairExclusive(String scanId, Set<String> pointerIds, Set<String> trackingIds,
                                        Set<UUID> forced, Set<UUID> paused) throws Exception {
         Report shown = this.report;
-        if (!shown.ready || !shown.id.equals(scanId)) throw new IllegalStateException("一致性结果已变化，请重新扫描");
+        if (!shown.ready || !shown.id.equals(scanId)) throw new IllegalStateException("一致性结果已变化,请重新扫描");
         Collected collected = JobService.underLocate(this::collectContext);
         Report current = collected.report;
         Map<String, PointerIssue> pointerById = new LinkedHashMap<>();
@@ -132,7 +132,7 @@ public final class ConsistencyService {
                 || selectedTracking.stream().anyMatch(java.util.Objects::isNull)
                 || !current.forced.containsAll(forced) || !current.paused.containsAll(paused)) {
             this.report = current;
-            throw new IllegalStateException("一致性结果已变化，请查看最新扫描");
+            throw new IllegalStateException("一致性结果已变化,请查看最新扫描");
         }
         if (selectedPointers.isEmpty() && selectedTracking.isEmpty() && forced.isEmpty() && paused.isEmpty()) {
             throw new IllegalArgumentException("没有选择修复项");
@@ -167,7 +167,7 @@ public final class ConsistencyService {
         try {
             verified = JobService.underLocate(() -> collect());
         } catch (Exception error) {
-            String suffix = backup == null ? "" : "，元数据备份位于 " + backup;
+            String suffix = backup == null ? "" : ",元数据备份位于 " + backup;
             throw new IllegalStateException("修复可能部分完成" + suffix, error);
         }
         Set<String> remainingPointers = new LinkedHashSet<>();
@@ -298,7 +298,7 @@ public final class ConsistencyService {
         }
         if (files.size() > MAX_FINAL_CHECK_FILES) {
             throw new IllegalArgumentException("一次最多修复分布在 " + MAX_FINAL_CHECK_FILES
-                    + " 个存储文件内的悬空指针，请分批选择");
+                    + " 个存储文件内的悬空指针,请分批选择");
         }
     }
 

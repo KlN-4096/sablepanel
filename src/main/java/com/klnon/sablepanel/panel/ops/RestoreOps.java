@@ -91,7 +91,7 @@ public final class RestoreOps {
         int index = 0;
         for (String groupId : ids) {
             // 恢复的体已经从列表里消失,行徽章挂不上,进度只能靠顶栏指示器 —— 阶段文本是它唯一的内容
-            JobService.phase("恢复依赖组");
+            JobService.phase("恢复物理组");
             JobService.detail(++index + "/" + ids.size());
             JsonObject result = new JsonObject();
             result.addProperty("id", groupId);
@@ -104,7 +104,7 @@ public final class RestoreOps {
                 try {
                     this.recycle.markRestored(groupId);
                 } catch (Exception metadataError) {
-                    result.addProperty("warn", "物理体已恢复，但回收站状态更新失败: " + messageOf(metadataError));
+                    result.addProperty("warn", "物理体已恢复,但回收站状态更新失败: " + messageOf(metadataError));
                 }
                 for (RecycleStore.RestoreBody body : group.bodies()) {
                     this.kit.audit("restore", body.uuid(), null, groupId);
@@ -134,7 +134,7 @@ public final class RestoreOps {
 
     private JsonObject purgeRecycleGroupsExclusive(List<String> groupIds) {
         JobService.phase("彻底删除回收组");
-        JobService.detail(groupIds.size() + " 个依赖组");
+        JobService.detail(groupIds.size() + " 个物理组");
         JsonObject out = this.recycle.purgeGroups(groupIds);
         JsonArray warnings = new JsonArray();
         for (var element : out.getAsJsonArray("results")) {
@@ -212,11 +212,11 @@ public final class RestoreOps {
         JsonObject runtime = this.kit.readRuntimeStates(targets);
         for (UUID uuid : targets) {
             if (existingEntries.getOrDefault(uuid, 0) > 0) {
-                throw new IllegalStateException("UUID 已存在，未恢复该依赖组: " + uuid);
+                throw new IllegalStateException("UUID 已存在,未恢复该物理组: " + uuid);
             }
             JsonObject state = runtime.getAsJsonObject(uuid.toString());
             if (state.get("loaded").getAsBoolean() || state.get("holding").getAsBoolean()) {
-                throw new IllegalStateException("UUID 已存在，未恢复该依赖组: " + uuid);
+                throw new IllegalStateException("UUID 已存在,未恢复该物理组: " + uuid);
             }
         }
     }
@@ -273,7 +273,7 @@ public final class RestoreOps {
                 RecycleStore.RestoreBody body = bodies.get(uuid);
                 boolean exists = existingEntries.getOrDefault(body.uuid(), 0) > 0
                         || this.kit.resolveLoaded(body.uuid()) != null || this.kit.isHolding(body.uuid());
-                if (exists) throw new IllegalStateException("UUID 已存在，未恢复该依赖组: " + body.uuid());
+                if (exists) throw new IllegalStateException("UUID 已存在,未恢复该物理组: " + body.uuid());
                 ServerLevel level = restoreLevel(body.dimension());
                 ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
                 if (container == null) throw new IllegalStateException("恢复目标维度没有物理体容器");
@@ -476,13 +476,13 @@ public final class RestoreOps {
         for (UUID owner : plotOwners.getOrDefault(new DiskScanner.PlotKey(dim, plotX, plotZ), Set.of())) {
             if (!owner.equals(body.uuid())) {
                 throw new IllegalStateException("plot 槽位 (" + plotX + "," + plotZ + ") 已被物理体 "
-                        + owner + " 占用，未恢复该依赖组");
+                        + owner + " 占用,未恢复该物理组");
             }
         }
         var occupant = container.getSubLevel(plotX, plotZ);
         if (occupant != null && !body.uuid().equals(occupant.getUniqueId())) {
             throw new IllegalStateException("plot 槽位 (" + plotX + "," + plotZ + ") 已被加载中的物理体 "
-                    + occupant.getUniqueId() + " 占用，未恢复该依赖组");
+                    + occupant.getUniqueId() + " 占用,未恢复该物理组");
         }
     }
 }

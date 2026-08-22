@@ -175,7 +175,7 @@ public final class TeleportOps {
                 else members.addAll(this.kit.loadedDependencyMembersOnMain(List.of(root)));
             }
             if (members.isEmpty()) {
-                throw new IllegalStateException("没有已加载成员，未清除速度。冷体请用传送(会顺带清速度并落盘): "
+                throw new IllegalStateException("没有已加载成员,未清除速度。冷体请用传送(会顺带清速度并落盘): "
                         + OpKit.shortUuids(missing));
             }
             for (UUID uuid : members) {
@@ -188,7 +188,7 @@ public final class TeleportOps {
             r.addProperty("ok", true);
             r.addProperty("count", members.size());
             if (!missing.isEmpty()) {
-                OpKit.attachWarnings(r, List.of("未加载，未清除速度(冷体请用传送): "
+                OpKit.attachWarnings(r, List.of("未加载,未清除速度(冷体请用传送): "
                         + OpKit.shortUuids(missing)));
             }
             return r;
@@ -496,7 +496,7 @@ public final class TeleportOps {
 
     static ForceTicketPlan forceTicketPlan(Collection<UUID> provisional, Collection<UUID> runtime) {
         Set<UUID> keep = Set.copyOf(runtime);
-        if (keep.isEmpty()) throw new IllegalStateException("当前运行依赖组为空");
+        if (keep.isEmpty()) throw new IllegalStateException("当前运行物理组为空");
         Set<UUID> release = new LinkedHashSet<>(provisional);
         release.removeAll(keep);
         return new ForceTicketPlan(keep, Set.copyOf(release));
@@ -517,7 +517,7 @@ public final class TeleportOps {
                 else ticksWithoutNewMembers++;
                 if (ticksWithoutNewMembers >= quietTicks) return Set.copyOf(observed);
                 if (observedTicks >= maxObservedTicks) {
-                    throw new IllegalStateException("当前运行依赖组在观察上限内仍出现新成员，未挂常驻票");
+                    throw new IllegalStateException("当前运行物理组在观察上限内仍出现新成员,未挂常驻票");
                 }
             }
             try {
@@ -584,7 +584,7 @@ public final class TeleportOps {
                                 }
                             }
                             if (!otherTickets.isEmpty()) {
-                                throw new IllegalStateException("存在其他模组的常驻票，未取消常驻: " + otherTickets);
+                                throw new IllegalStateException("存在其他模组的常驻票,未取消常驻: " + otherTickets);
                             }
                         },
                         () -> {
@@ -770,7 +770,7 @@ public final class TeleportOps {
             if (body == null) missing.add(uuid);
             else bodies.add(body);
         }
-        if (!missing.isEmpty()) throw new IllegalStateException("物理结构组未完整加载，请先常驻加载: " + missing);
+        if (!missing.isEmpty()) throw new IllegalStateException("物理结构组未完整加载,请先常驻加载: " + missing);
         return bodies;
     }
 
@@ -844,7 +844,7 @@ public final class TeleportOps {
                 }
             }
             if (!otherTickets.isEmpty()) {
-                throw new IllegalStateException("依赖组存在其他模组的常驻票，未卸载: " + otherTickets);
+                throw new IllegalStateException("物理组存在其他模组的常驻票,未卸载: " + otherTickets);
             }
             ServerLevel level = anchor.getLevel();
             ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
@@ -881,7 +881,7 @@ public final class TeleportOps {
             Set<UUID> outside = new LinkedHashSet<>(entry.getValue());
             outside.removeAll(universe);
             throw new IllegalStateException(
-                    "运行链引入了选择之外的成员，已中止: " + entry.getKey() + " -> " + outside);
+                    "运行链引入了选择之外的成员,已中止: " + entry.getKey() + " -> " + outside);
         }
         return OpKit.mergeOverlappingGroups(runtimeGroups.values());
     }
@@ -894,7 +894,7 @@ public final class TeleportOps {
         for (UUID uuid : candidates) {
             if (expected.equals(runtimeGroups.get(uuid))) return uuid;
         }
-        throw new IllegalStateException("当前运行依赖组没有完整卸载锚点: " + expected);
+        throw new IllegalStateException("当前运行物理组没有完整卸载锚点: " + expected);
     }
 
     private void saveChangedMetadata(Set<String> dimensions) {
