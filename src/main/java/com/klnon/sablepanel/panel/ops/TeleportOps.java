@@ -483,8 +483,6 @@ public final class TeleportOps {
     private JsonObject disableForceLoad(OpKit.DependencySelection selection,
                                         Set<UUID> forcedSnapshot) throws Exception {
         List<UUID> uuids = selection.members();
-        Set<UUID> originalPaused = new LinkedHashSet<>();
-        Set<UUID> originalFrozen = new LinkedHashSet<>();
         Map<UUID, Set<String>> originalTickets = new LinkedHashMap<>();
         Map<UUID, StoredSnapshot> expectedStored = new LinkedHashMap<>();
         Map<UUID, DiskScanner.EntryKey> savedEntries = new LinkedHashMap<>();
@@ -494,14 +492,11 @@ public final class TeleportOps {
                 Set<ServerLevel> touched = new LinkedHashSet<>();
                 Set<String> changedMetadata = new LinkedHashSet<>();
                 JobService.Job job = JobService.current();
-                for (UUID uuid : uuids) {
-                    if (PauseService.isPaused(uuid)) originalPaused.add(uuid);
-                    if (FreezeService.isFrozen(uuid)) originalFrozen.add(uuid);
-                }
                 originalTickets.putAll(ForceLoadService.panelTicketDimensionsOnMain(this.kit.server, uuids));
                 finishUnforce(new UnforceActions(
+                        // 取消常驻只退出常驻本身:暂停/冻结意图刻意保留,体重新加载时由观察器按意图重新生效。
                         () -> {
-                            if (job != null) job.phase("清除运行状态");
+                            if (job != null) job.phase("复核前置状态");
                             this.kit.requirePreparedDependencyGroupsOnMain(selection);
                             Set<UUID> otherTickets = new LinkedHashSet<>();
                             for (UUID uuid : uuids) {
@@ -512,8 +507,6 @@ public final class TeleportOps {
                             if (!otherTickets.isEmpty()) {
                                 throw new IllegalStateException("存在其他模组的常驻票，未取消常驻: " + otherTickets);
                             }
-                            PauseService.applyOnMain(this.kit.server, uuids, false);
-                            FreezeService.applyOnMain(uuids, false);
                         },
                         () -> {
                             if (job != null) job.phase("卸载到存档");
@@ -553,16 +546,13 @@ public final class TeleportOps {
         } catch (Exception failure) {
             try {
                 this.kit.onMainUntilComplete(() -> {
-                    rollbackUnforceOnMain(uuids, originalPaused, originalFrozen,
-                            originalTickets, expectedStored, savedEntries);
+                    rollbackUnforceOnMain(uuids, originalTickets, expectedStored, savedEntries);
                     return new JsonObject();
                 });
             } catch (Throwable rollbackFailure) {
                 failure.addSuppressed(rollbackFailure);
             }
             throw failure;
-        } finally {
-            PauseService.persist();
         }
     }
 
@@ -838,11 +828,10 @@ public final class TeleportOps {
     }
 
     private void verifyUnforcedOnMain(Collection<UUID> uuids) {
+        // 只复核常驻票本身;暂停/冻结意图属于独立功能,取消常驻不动它们(自然加载也不算失败)。
         Set<UUID> failed = new LinkedHashSet<>();
         for (UUID uuid : uuids) {
-            if (!unforceStateValid(this.kit.resolveLoaded(uuid) != null,
-                    ForceLoadService.isForcedOnMain(this.kit.server, uuid),
-                    PauseService.isPaused(uuid), FreezeService.isFrozen(uuid))) failed.add(uuid);
+            if (ForceLoadService.isForcedOnMain(this.kit.server, uuid)) failed.add(uuid);
         }
         if (!failed.isEmpty()) throw new IllegalStateException("取消常驻状态复核失败: " + failed);
     }
@@ -854,16 +843,11 @@ public final class TeleportOps {
         }
     }
 
-    static boolean unforceStateValid(boolean loaded, boolean forced, boolean paused, boolean frozen) {
-        return !forced && !paused && !frozen;
-    }
-
     static <T> T savedPointer(T holdingPointer, T loadedPointer) {
         return holdingPointer != null ? holdingPointer : loadedPointer;
     }
 
-    private void rollbackUnforceOnMain(Collection<UUID> uuids, Set<UUID> originalPaused,
-                                       Set<UUID> originalFrozen,
+    private void rollbackUnforceOnMain(Collection<UUID> uuids,
                                        Map<UUID, Set<String>> originalTickets,
                                        Map<UUID, StoredSnapshot> stored,
                                        Map<UUID, DiskScanner.EntryKey> savedEntries) {
@@ -873,20 +857,10 @@ public final class TeleportOps {
         attemptRollback(failures, () -> restoredTicketDimensions.addAll(
                 ForceLoadService.restorePanelTicketsOnMain(this.kit.server, originalTickets)));
         attemptRollback(failures, () -> reloadedLevels.addAll(reloadStoredOnMain(stored, savedEntries)));
-        attemptRollback(failures, () -> FreezeService.applyOnMain(uuids, false));
-        if (!originalFrozen.isEmpty()) {
-            attemptRollback(failures, () -> FreezeService.applyOnMain(originalFrozen, true));
-        }
-        attemptRollback(failures, () -> PauseService.applyOnMain(this.kit.server, uuids, false));
-        if (!originalPaused.isEmpty()) {
-            attemptRollback(failures,
-                    () -> PauseService.applyOnMain(this.kit.server, originalPaused, true));
-        }
         attemptRollback(failures, () -> OpKit.saveAllLevels(reloadedLevels));
         attemptRollback(failures, () -> saveChangedMetadata(restoredTicketDimensions));
         attemptRollback(failures,
-                () -> verifyRollbackState(uuids, originalPaused, originalFrozen,
-                        originalTickets, stored));
+                () -> verifyRollbackState(uuids, originalTickets, stored));
         if (!failures.isEmpty()) {
             IllegalStateException rollbackFailure = new IllegalStateException("取消常驻失败后的状态恢复失败");
             failures.forEach(rollbackFailure::addSuppressed);
@@ -937,16 +911,13 @@ public final class TeleportOps {
         return touched;
     }
 
-    private void verifyRollbackState(Collection<UUID> uuids, Set<UUID> originalPaused,
-                                     Set<UUID> originalFrozen,
+    private void verifyRollbackState(Collection<UUID> uuids,
                                      Map<UUID, Set<String>> originalTickets,
                                      Map<UUID, StoredSnapshot> originallyLoaded) {
         Set<UUID> failed = new LinkedHashSet<>();
         Map<UUID, Set<String>> tickets = ForceLoadService.panelTicketDimensionsOnMain(this.kit.server, uuids);
         for (UUID uuid : uuids) {
-            if (PauseService.isPaused(uuid) != originalPaused.contains(uuid)
-                    || FreezeService.isFrozen(uuid) != originalFrozen.contains(uuid)
-                    || !tickets.getOrDefault(uuid, Set.of()).equals(originalTickets.getOrDefault(uuid, Set.of()))
+            if (!tickets.getOrDefault(uuid, Set.of()).equals(originalTickets.getOrDefault(uuid, Set.of()))
                     || originallyLoaded.containsKey(uuid) && this.kit.resolveLoaded(uuid) == null) {
                 failed.add(uuid);
             }

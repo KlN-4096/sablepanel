@@ -173,9 +173,11 @@ test('常驻、物理暂停和 tick 暂停按整组独立更新', async () => {
   await evalIn(sandbox, 'setPausedBodies')(['a'], true);
   await evalIn(sandbox, 'setFrozenBodies')(['a'], true);
   await evalIn(sandbox, 'setForcedBodies')(['a'], false);
+  // 2026-08-22 用户裁决"功能划分明确,不串功能":取消常驻只退常驻,
+  // 暂停/冻结意图保留(后端同步改为不清除,下次加载由观察器重新生效)。
   assert.deepEqual(JSON.parse(evalIn(sandbox,
-    'JSON.stringify({paused:[...PAUSED],frozen:[...FROZEN],forced:[...FORCED]})')),
-    {paused:[], frozen:[], forced:[]}, '取消常驻必须清除整组运行状态');
+    'JSON.stringify({paused:[...PAUSED].sort(),frozen:[...FROZEN].sort(),forced:[...FORCED]})')),
+    {paused:['a','b'], frozen:['a','b'], forced:[]}, '取消常驻只摘票,暂停/冻结意图保留');
 });
 
 test('总览分别按依赖组和成员体统计规模', () => {

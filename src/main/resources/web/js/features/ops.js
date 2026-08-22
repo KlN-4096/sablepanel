@@ -194,10 +194,10 @@ async function setForcedBodies(uuids, forced){
   if (!uuids.length) return null;
   const r = await submitJob('/api/ops/force_load', {method:'POST', body: JSON.stringify({uuids, forced})});
   if (!r) return null;
-  // 乐观更新;作业失败时下一次 loadBodies 会用服务端真值纠正回来
+  // 乐观更新;作业失败时下一次 loadBodies 会用服务端真值纠正回来。
+  // 取消常驻不再清暂停/冻结意图(独立功能,意图保留到下次加载重新生效)。
   for (const u of visibleGroupUuids(uuids)) {
     forced ? FORCED.add(u) : FORCED.delete(u);
-    if (!forced) { PAUSED.delete(u); FROZEN.delete(u); }
   }
   renderAll();
   if (SEL) renderDetail();

@@ -214,11 +214,8 @@ class PauseServiceAnchorTest {
 
     @Test
     void naturalReloadDoesNotMakeTicketRemovalFail() {
-        assertTrue(TeleportOps.unforceStateValid(true, false, false, false),
-                "玩家自然加载不等于面板仍在常驻");
-        assertFalse(TeleportOps.unforceStateValid(false, true, false, false));
-        assertFalse(TeleportOps.unforceStateValid(false, false, true, false));
-        assertFalse(TeleportOps.unforceStateValid(false, false, false, true));
+        // 取消常驻的复核只看常驻票:自然加载、暂停意图、冻结意图都不构成失败
+        // (2026-08-22 起暂停/冻结意图在取消常驻时刻意保留,属独立功能)。
         assertEquals("loaded", TeleportOps.savedPointer(null, "loaded"),
                 "saveAll 内自然重载后必须从 loaded body 捕获保存指针");
         assertEquals("holding", TeleportOps.savedPointer("holding", "loaded"));
@@ -226,15 +223,13 @@ class PauseServiceAnchorTest {
 
     @Test
     void cancelForceLoadAcceptsLoadedPointerAfterSaveAllNaturallyReloadsTheBody() {
-        AtomicBoolean paused = new AtomicBoolean(true);
-        AtomicBoolean frozen = new AtomicBoolean(true);
         AtomicBoolean forced = new AtomicBoolean(true);
         AtomicReference<String> holdingPointer = new AtomicReference<>();
         AtomicReference<String> loadedPointer = new AtomicReference<>();
         AtomicReference<String> verifiedPointer = new AtomicReference<>();
 
         TeleportOps.finishUnforce(new TeleportOps.UnforceActions(
-                () -> { paused.set(false); frozen.set(false); },
+                () -> {},
                 () -> holdingPointer.set("saved-slot"),
                 () -> {
                     loadedPointer.set(holdingPointer.get());
@@ -243,8 +238,8 @@ class PauseServiceAnchorTest {
                             holdingPointer.get(), loadedPointer.get()));
                 },
                 () -> forced.set(false),
-                () -> assertTrue(TeleportOps.unforceStateValid(
-                        loadedPointer.get() != null, forced.get(), paused.get(), frozen.get()))));
+                () -> assertFalse(forced.get(),
+                        "取消常驻复核只看票;暂停/冻结意图保留不算失败")));
 
         assertEquals("saved-slot", verifiedPointer.get());
     }
