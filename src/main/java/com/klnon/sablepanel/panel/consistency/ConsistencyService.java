@@ -152,8 +152,10 @@ public final class ConsistencyService {
                     collected.dimensions, selectedPointers, selectedTracking, backupForced, backupPaused));
             backup = backupMetadata(current.id, backupFiles);
             Set<String> initialSkipped = Set.copyOf(skipped);
-            attempt = onMain(() -> repairOnMain(collected.dimensions, selectedPointers,
-                    selectedTracking, backupForced, backupPaused, collected.diskUuids, initialSkipped));
+            // 修复块改持久化意图(摘票/清暂停):不设超时——60 秒超时后任务仍迟到执行,finally 的 persist 已跑完
+            attempt = MainThread.onUntilComplete(this.server, () -> repairOnMain(collected.dimensions,
+                    selectedPointers, selectedTracking, backupForced, backupPaused,
+                    collected.diskUuids, initialSkipped));
             operationError = attempt.error;
         } catch (Exception error) {
             operationError = messageOf(error);

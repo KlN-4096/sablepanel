@@ -75,8 +75,8 @@ public final class FreezeService {
 
     /**
      * 作业线程:意图落盘。AtomicIo 的 Windows 重试最长睡半秒,不能睡在主线程上。
-     * 已知窗(setPaused 同病):onMain 20 秒超时后作业线程先 persist,迟到的主线程任务
-     * 再改内存就无人落盘 —— 封窗要换 onMainUntilComplete,待裁决。
+     * 调用路径已全部走不设超时的 onMainUntilComplete:带超时的块会在超时后迟到执行,
+     * 那时 persist 已跑完,内存改了没人落盘。
      */
     public static void persist() {
         FILE.saveUuids(FROZEN);

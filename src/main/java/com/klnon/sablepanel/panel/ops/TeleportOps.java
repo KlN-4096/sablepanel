@@ -202,7 +202,7 @@ public final class TeleportOps {
         List<UUID> uuids;
         try {
             if (paused) {
-                uuids = this.kit.onMain(() -> {
+                uuids = this.kit.onMainUntilComplete(() -> {
                     OpKit.DependencySelection selection = this.kit.loadedDependencyGroupsOnMain(requested, true);
                     List<UUID> members = selection.members();
                     List<ServerSubLevel> bodies = requireLoadedGroup(members);
@@ -212,7 +212,7 @@ public final class TeleportOps {
             } else {
                 OpKit.DependencySelection selection = this.kit.dependencyGroups(requested);
                 uuids = selection.members();
-                this.kit.onMain(() -> {
+                this.kit.onMainUntilComplete(() -> {
                     this.kit.requirePreparedDependencyGroupsOnMain(selection);
                     PauseService.applyOnMain(this.kit.server, uuids, false);
                     return null;
@@ -702,7 +702,7 @@ public final class TeleportOps {
         List<UUID> uuids;
         try {
             if (frozen) {
-                uuids = this.kit.onMain(() -> {
+                uuids = this.kit.onMainUntilComplete(() -> {
                     List<UUID> members = this.kit.loadedDependencyGroupsOnMain(requested, true).members();
                     requireLoadedGroup(members);
                     FreezeService.applyOnMain(members, true);
@@ -711,7 +711,7 @@ public final class TeleportOps {
             } else {
                 OpKit.DependencySelection selection = this.kit.dependencyGroups(requested);
                 uuids = selection.members();
-                this.kit.onMain(() -> {
+                this.kit.onMainUntilComplete(() -> {
                     this.kit.requirePreparedDependencyGroupsOnMain(selection);
                     FreezeService.applyOnMain(uuids, false);
                     return null;
@@ -739,7 +739,7 @@ public final class TeleportOps {
             added.removeAll(current.uuids());
             if (added.isEmpty()) return 0;
             try {
-                JsonObject migration = this.kit.onMain(() -> {
+                JsonObject migration = this.kit.onMainUntilComplete(() -> {
                     boolean applied = applyMigrationIfUnchanged(
                             current.revision(), PauseService::revision, () -> {
                             this.kit.requirePreparedDependencyGroupsOnMain(selection);
@@ -1182,7 +1182,7 @@ public final class TeleportOps {
      * 整维度停跑/恢复物理。审计记在维度上,没有 uuid —— 这一下影响的是所有人的船。
      */
     public JsonObject setDimensionPhysics(String dim, boolean paused) throws Exception {
-        this.kit.onMain(() -> {
+        this.kit.onMainUntilComplete(() -> {
             PhysicsService.applyOnMain(this.kit.server, dim, paused);
             return null;
         });

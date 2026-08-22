@@ -969,6 +969,7 @@ public final class OpKit {
         SablePanel.LOGGER.info("sablepanel: panel op {} {} ({})", op, uuid, name);
     }
 
+    /** 20 秒超时,只给纯读/无持久化副作用的块用:超时后任务仍会迟到执行,而块外 persist 已跑完 —— 改持久化意图的块必须走 {@link #onMainUntilComplete}。 */
     <T> T onMain(Callable<T> task) throws Exception {
         return MainThread.on(this.server, 20, task);
     }
