@@ -526,9 +526,10 @@ header .hbtn.stale{border-color:var(--warn);color:var(--warn)}
 .bsub b{font-family:var(--pixel);color:var(--fg2);font-weight:400}
 .btags{display:flex;flex-wrap:wrap;gap:4px}
 .btags:empty{display:none}
-/* 忙碌徽章带作业 phase 文字("等待依赖关系稳定 128s"),可以比小卡还宽 ——
-   与作业页 .jobRow .tag 同款,收在自己的胶囊里而不是顶穿卡边 */
-.btags .tag{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+/* 忙碌徽章带作业 phase 文字("确认当前运行组 等待依赖关系稳定 128s"),可以比小卡还宽。
+   .tag 是 inline-flex,text-overflow 在 flex 容器上不生效(只会硬切)—— 改为允许在
+   胶囊内换行;短徽章装得下就不换,不受影响 */
+.btags .tag{max-width:100%;white-space:normal;overflow-wrap:anywhere}
 .member{display:flex;gap:9px;align-items:center;padding:7px 13px 7px 30px;cursor:pointer;font-size:12.5px;
   line-height:1.35;border-left:2px solid transparent}
 .member:hover{background:var(--hover)}
