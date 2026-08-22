@@ -133,28 +133,16 @@ async function confirmPurge(groups){
     {method:'POST',body:JSON.stringify({ids:groups.map(group=>group.id)})});
   if (r) { R_SELECTED.clear(); clearRecycleDetail(); renderRecycle(); }
 }
-function visibleGroupUuids(uuids){
-  const expanded = new Set(uuids);
-  for (const uuid of uuids) {
-    const group = BODY_BY_UUID.get(uuid)?.g;
-    if (group) for (const body of group.bodies) expanded.add(body.uuid);
-  }
-  return [...expanded];
-}
-/* 暂停/冻结/常驻三个整组开关共用一条提交路径:提交作业→乐观更新对应集合→重画。
-   作业失败时下一次 loadBodies 会用服务端真值纠正回来。 */
-async function setBodyFlag(route, key, uuids, on, set){
+/* 暂停/冻结/常驻三个整组开关共用一条提交路径。不做乐观更新:作业期间每 2 秒的
+   /api/jobs 轮询带回状态真值(applyStateSets),徽章逐组跟随实际进度 —— 乐观翻转
+   会被 60 秒兜底刷新的真值打回,在取消常驻上表现为"全灭→复亮→完成才逐组灭"。 */
+function setBodyFlag(route, key, uuids, on){
   if (!uuids.length) return null;
-  const r = await submitJob(route, {method:'POST', body: JSON.stringify({uuids, [key]: on})});
-  if (!r) return null;
-  for (const u of visibleGroupUuids(uuids)) on ? set.add(u) : set.delete(u);
-  renderAll();
-  if (SEL) renderDetail();
-  return r;
+  return submitJob(route, {method:'POST', body: JSON.stringify({uuids, [key]: on})});
 }
 /* 物理暂停按完整依赖组执行:全部固定后清除线速度和角速度,重启后保持。 */
 function setPausedBodies(uuids, paused){
-  return setBodyFlag('/api/ops/pause', 'paused', uuids, paused, PAUSED);
+  return setBodyFlag('/api/ops/pause', 'paused', uuids, paused);
 }
 function doPauseCurrent(){
   if (SEL) setPausedBodies([SEL.uuid], !PAUSED.has(SEL.uuid));
@@ -165,7 +153,7 @@ function doPauseSelected(paused){
 /* 暂停 tick(冻结):后端按整个依赖组生效,点一个体会连坐全组。
    恢复 tick 才是危险动作 —— 大组一旦重新开跑就是主线程被压垮的那种崩,所以只在这头弹确认。 */
 function setFrozenBodies(uuids, frozen){
-  return setBodyFlag('/api/ops/freeze', 'frozen', uuids, frozen, FROZEN);
+  return setBodyFlag('/api/ops/freeze', 'frozen', uuids, frozen);
 }
 async function doFreezeCurrent(){
   if (!SEL) return;

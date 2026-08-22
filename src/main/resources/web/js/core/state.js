@@ -44,7 +44,7 @@ function onServerReset(hook){ SERVER_RESET_HOOKS.push(hook); }
 /* 在线玩家(传送玩家用):选中体时拉取,15s 节流;切服作废 */
 let PLAYERS = [], PLAYERS_ERROR = '', playersFetchedAt = 0;
 
-/* 暂停集合:以 /api/bodies 的 paused 为单一事实源,操作成功后本地乐观更新 */
+/* 暂停集合:以 /api/bodies 的 paused 为单一事实源;作业期间由 /api/jobs 轮询的真值接管 */
 let PAUSED = new Set();
 
 /* 冻结集合(暂停 tick):和 PAUSED 完全独立。PAUSED 只锁住物理并清速度;

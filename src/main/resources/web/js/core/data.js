@@ -131,7 +131,9 @@ async function loadBodies() {
 function pollJobs(){
   return load('jobs', () => api('/api/jobs?poll=1'), result => {
     const had = ACTIVE_JOBS.length;
-    applyJobs(result.running || []);
+    // 状态真值随轮询回来:作业期间列表不重拉,徽章靠这几个集合逐组跟随实际进度
+    const setsChanged = applyStateSets(result);
+    applyJobs(result.running || [], setsChanged);
     const reaped = reapFinishedJobs(result.log || []);
     // 作业刚跑完:这时候的列表才是服务端真值(乐观更新过的字段要纠正回来)。
     // 消费掉终态也算:快作业可能在第一轮轮询之前就结束了,那时 had 还是 0 ——
@@ -146,7 +148,7 @@ function pollJobs(){
 }
 /* 每个作业一条,按 targets 展开成"体 → 作业"给行徽章用;
    没有目标体的作业(回收站恢复/重扫磁盘)只进 ACTIVE_JOBS,靠顶栏指示器显示 */
-function applyJobs(list){
+function applyJobs(list, setsChanged){
   const previousTargets = [...BUSY.keys()].sort().join('\n');
   // /api/jobs 给的是 started_at / queued_at 两个字段,顶栏指示器算已耗时用的是 since。
   // 不归一化的话 Date.now() - undefined 就是 NaN,界面上显示 "NaNs"
@@ -156,9 +158,28 @@ function applyJobs(list){
   for (const job of ACTIVE_JOBS) for (const u of (job.targets || [])) BUSY.set(u, job);
   renderJobPill();
   const currentTargets = [...BUSY.keys()].sort().join('\n');
-  if (previousTargets !== currentTargets) renderAll();
+  if (previousTargets !== currentTargets || setsChanged) renderAll();
   else if (typeof refreshBusyLabels === 'function') refreshBusyLabels();
+  // 详情页的常驻/暂停按钮文案跟着集合走,列表重画不覆盖它
+  if (setsChanged && SEL) renderDetail();
 }
+/* /api/jobs?poll=1 附带的四个状态集合(服务端镜像真值)。与 /api/bodies 的区别:
+   bodies 只发已渲染体的子集,这里是全量 —— 列表被截断时两个来源会在超集/子集间摆动,
+   只多存不误画。forced_lost = 意图在、票不在,与 BodyIndex 同一算法 */
+function applyStateSets(result){
+  if (!Array.isArray(result.forced)) return false;   // 后端没带(非 poll 或旧版本)就当没变
+  const active = new Set(result.forced);
+  const lost = (result.forced_requested || []).filter(u => !active.has(u));
+  const changed = !sameSet(FORCED, result.forced) || !sameSet(FORCED_LOST, lost)
+    || !sameSet(PAUSED, result.paused || []) || !sameSet(FROZEN, result.frozen || []);
+  if (!changed) return false;
+  FORCED = active;
+  FORCED_LOST = new Set(lost);
+  PAUSED = new Set(result.paused || []);
+  FROZEN = new Set(result.frozen || []);
+  return true;
+}
+function sameSet(set, arr){ return set.size === arr.length && arr.every(u => set.has(u)); }
 /* 有作业在跑时把作业状态轮询加速到 2 秒,跑完自动停。
    取代从前散落在各操作里的 setTimeout(loadBodies, 1200/1500/4000) —— 那些是对
    "多久能好"的猜测,猜短了看不到结果,猜长了白等,巨型体两头都不对。

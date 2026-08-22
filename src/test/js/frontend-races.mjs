@@ -153,31 +153,67 @@ const bodiesResponse = (extra = {}) => jsonResponse({
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-test('常驻、物理暂停和 tick 暂停按整组独立更新', async () => {
+test('三个整组开关只提交作业,不再乐观翻转集合', async () => {
+  // 乐观翻转已删:它会被 60 秒兜底刷新的真值打回,在取消常驻上表现为
+  // "全灭→复亮→完成才逐组灭"的闪烁。集合改由作业轮询的真值接管(见下一条)
   const { sandbox } = setup();
   evalIn(sandbox, `
-    const group = {gid:'g1',bodies:[{uuid:'a'},{uuid:'b'}]};
-    BODY_BY_UUID = new Map([
-      ['a',{b:group.bodies[0],g:group}],
-      ['b',{b:group.bodies[1],g:group}]
-    ]);
+    __submits = [];
+    submitJob = async (route, opts) => { __submits.push([route, JSON.parse(opts.body)]); return {job:1}; };
     PAUSED = new Set(['a']); FROZEN = new Set(['b']); FORCED = new Set();
-    submitJob = async () => ({job:1}); renderAll = () => {}; renderDetail = () => {};
   `);
-
   await evalIn(sandbox, 'setForcedBodies')(['a'], true);
-  assert.deepEqual(JSON.parse(evalIn(sandbox,
-    'JSON.stringify({paused:[...PAUSED],frozen:[...FROZEN],forced:[...FORCED].sort()})')),
-    {paused:['a'], frozen:['b'], forced:['a','b']}, '开启常驻不得改动两种暂停');
-
-  await evalIn(sandbox, 'setPausedBodies')(['a'], true);
+  await evalIn(sandbox, 'setPausedBodies')(['a'], false);
   await evalIn(sandbox, 'setFrozenBodies')(['a'], true);
-  await evalIn(sandbox, 'setForcedBodies')(['a'], false);
-  // 2026-08-22 用户裁决"功能划分明确,不串功能":取消常驻只退常驻,
-  // 暂停/冻结意图保留(后端同步改为不清除,下次加载由观察器重新生效)。
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify(__submits)')), [
+    ['/api/ops/force_load', {uuids:['a'], forced:true}],
+    ['/api/ops/pause', {uuids:['a'], paused:false}],
+    ['/api/ops/freeze', {uuids:['a'], frozen:true}],
+  ], '三个开关各自提交到自己的路由,payload 键名不串');
   assert.deepEqual(JSON.parse(evalIn(sandbox,
-    'JSON.stringify({paused:[...PAUSED].sort(),frozen:[...FROZEN].sort(),forced:[...FORCED]})')),
-    {paused:['a','b'], frozen:['a','b'], forced:[]}, '取消常驻只摘票,暂停/冻结意图保留');
+    'JSON.stringify({paused:[...PAUSED],frozen:[...FROZEN],forced:[...FORCED]})')),
+    {paused:['a'], frozen:['b'], forced:[]}, '提交本身不改集合,徽章等真值');
+});
+
+test('作业轮询带回状态真值,徽章逐组跟随而非作业结束才一次性变', async () => {
+  // 取消常驻曾要等作业完成才一次性变:作业期间列表不重拉,60 秒兜底还会把乐观清掉的
+  // 徽章画回来。现在 /api/jobs?poll=1 附四个集合,作业中途每轮轮询逐组跟随真值
+  let phase = 0;
+  const { sandbox, state } = setup();
+  state.fetch = async (url) => {
+    if (url.startsWith('/api/jobs')) {
+      return jsonResponse({
+        running: [{ seq: 1, op: '取消常驻', state: 'running', phase: '卸载',
+          started_at: 1, queued_at: 0, targets: ['a', 'b'] }],
+        log: [],
+        // phase 0:两组都还持票;phase 1:第一组的票在作业中途已摘
+        forced: phase === 0 ? ['a', 'b'] : ['b'],
+        forced_requested: phase === 0 ? ['a', 'b', 'lost1'] : ['b', 'lost1'],
+        paused: ['p1'], frozen: [],
+      });
+    }
+    if (url.startsWith('/api/bodies')) return bodiesResponse();
+    return jsonResponse({});
+  };
+  evalIn(sandbox, 'authenticated = true; __renders = 0; renderAll = () => __renders++;');
+  await evalIn(sandbox, 'pollJobs')();
+  await tick();
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify([...FORCED].sort())')), ['a', 'b']);
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify([...FORCED_LOST])')), ['lost1'],
+    '意图在票不在=掉线,与 BodyIndex 同一算法');
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify([...PAUSED])')), ['p1']);
+
+  const renders = evalIn(sandbox, '__renders');
+  await evalIn(sandbox, 'pollJobs')();   // 真值没变的一轮
+  await tick();
+  assert.equal(evalIn(sandbox, '__renders'), renders, '集合没变就不重画');
+
+  phase = 1;                             // 作业进行中,第一组的票被摘掉
+  await evalIn(sandbox, 'pollJobs')();
+  await tick();
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify([...FORCED])')), ['b'],
+    '作业期间徽章逐组跟随服务端真值');
+  assert.ok(evalIn(sandbox, '__renders') > renders, '集合变了要重画');
 });
 
 test('总览分别按依赖组和成员体统计规模', () => {

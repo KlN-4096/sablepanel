@@ -9,8 +9,11 @@ import com.klnon.sablepanel.panel.PanelConfig;
 import com.klnon.sablepanel.panel.bodies.BodyIndex;
 import com.klnon.sablepanel.panel.storage.DiskScanner;
 import com.klnon.sablepanel.panel.metrics.StatsCollector;
+import com.klnon.sablepanel.panel.ops.ForceLoadService;
+import com.klnon.sablepanel.panel.ops.FreezeService;
 import com.klnon.sablepanel.panel.ops.JobService;
 import com.klnon.sablepanel.panel.ops.PanelOps;
+import com.klnon.sablepanel.panel.ops.PauseService;
 import com.klnon.sablepanel.panel.preview.PreviewSubsystem;
 import net.minecraft.nbt.CompoundTag;
 
@@ -153,8 +156,13 @@ public final class PanelApiService {
         this.routes.put("/api/jobs", request -> {
             String file = request.query().get("file");
             if (file != null && !file.isBlank()) return PanelResponse.json(200, JobService.readLog(file), true);
-            // poll=1 是面板每 2 秒那一次:只要 running 和精简过的历史,不列日志目录
-            return PanelResponse.json(200, this.jobs.view(request.query().containsKey("poll")), true);
+            // poll=1 是面板每 2 秒那一次:只要 running 和精简过的历史,不列日志目录。
+            // 顺带附上四个状态集合(HTTP 线程镜像,几 KB):作业期间列表不重拉(12 MiB),
+            // 徽章靠这份真值逐组跟随实际进度,不再等到作业结束才一次性变
+            boolean poll = request.query().containsKey("poll");
+            JsonObject view = this.jobs.view(poll);
+            if (poll) attachStateSets(view);
+            return PanelResponse.json(200, view, true);
         });
         this.routes.put("/api/players", request ->
                 PanelResponse.json(200, this.ops.teleport().listPlayers(), false));
@@ -169,6 +177,20 @@ public final class PanelApiService {
                 return out;
             });
         });
+    }
+
+    /** 作业轮询顺带下发的状态真值:全部来自并发镜像集合,不碰主线程 */
+    private static void attachStateSets(JsonObject view) {
+        view.add("paused", uuidArray(PauseService.snapshot()));
+        view.add("forced", uuidArray(ForceLoadService.snapshot()));
+        view.add("forced_requested", uuidArray(ForceLoadService.requestedSnapshot()));
+        view.add("frozen", uuidArray(FreezeService.snapshot()));
+    }
+
+    private static JsonArray uuidArray(Set<UUID> uuids) {
+        JsonArray arr = new JsonArray();
+        for (UUID uuid : uuids) arr.add(uuid.toString());
+        return arr;
     }
 
     private synchronized CachedBodies bodiesResponse() {
