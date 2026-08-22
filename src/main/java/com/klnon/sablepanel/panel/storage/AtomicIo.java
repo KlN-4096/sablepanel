@@ -2,6 +2,7 @@ package com.klnon.sablepanel.panel.storage;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,12 +22,32 @@ public final class AtomicIo {
         move(temporary, target);
     }
 
-    /** 文件系统不支持原子移动时退化为普通替换(仍是先写全再换名) */
+    /**
+     * 文件系统不支持原子移动时退化为普通替换(仍是先写全再换名)。
+     * Windows 上杀毒/索引器会瞬时占住刚写完的文件或目录,rename 抛 AccessDenied
+     * (2026-08-22 实机:回收站 .pending 目录转正被咬,整个组件级联进 recovery_required);
+     * 同卷 rename 无中间态,短退避重试安全。
+     */
     public static void move(Path source, Path target) throws IOException {
-        try {
-            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (AtomicMoveNotSupportedException ignored) {
-            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+        AccessDeniedException denied = null;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try {
+                Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                return;
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+                return;
+            } catch (AccessDeniedException error) {
+                denied = error;
+                try {
+                    Thread.sleep(50L * (attempt + 1));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    error.addSuppressed(interrupted);
+                    throw error;
+                }
+            }
         }
+        throw denied;
     }
 }
