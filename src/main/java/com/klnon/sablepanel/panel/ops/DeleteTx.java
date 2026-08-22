@@ -657,13 +657,15 @@ final class DeleteTx {
     }
 
     /**
-     * 把体从 holding 区块的"待加载表"里摘掉。删除路径上少了这一步,体会被 sable 复活。
+     * 把体从 holding 区块的"待加载表"里摘掉(按 UUID 全量清扫)。
      * <p>
-     * 2026-08-08 实测:{@code queueDeletion} 只从 {@code getSubLevelPointers()} 摘指针,
-     * 而 {@code saveAll()} 的最后一段会遍历每个已加载 holding 区块的 {@code loadedHoldingSubLevels},
-     * 发现 pointer 的 chunkPos 和所在区块对不上就 {@code moveAndSaveSubLevel} 搬家。
-     * 顺序是「先清空旧槽位、再搬家写新槽位」,于是删除变成了搬家:
-     * 校验只看到条目还在(换了个区域文件),而旧指针没了 —— 体变成孤儿。
+     * 2026-08-08 实测:当时的 {@code queueDeletion} 只从 {@code getSubLevelPointers()} 摘指针,
+     * 内存记录残留会被 {@code saveAll()} 的 holding 循环当搬家写回盘,删除变成搬家、体成孤儿。
+     * sable 2.0.4 补丁版的 {@code queueDeletion} 已连内存两张表一起摘,但那是<b>按指针相等</b>的
+     * 精确摘除;遗留多条目存档里,另一个已加载 holding 区块可能持有同 UUID、不同指针的兄弟记录,
+     * 精确摘除罩不住它,saveAll 仍会把它复活。删除路径按 UUID 清扫的这一步因此保留,
+     * 不属于可拆的冗余防线(2026-08-22 减脂审计裁决;同日拆除的是与 2.0.4 头部守卫重复的
+     * HoldingChunkMapMixin)。
      * <p>
      * 每个维度在 saveAll 前只扫一次全部已加载 holding 区块,不按 pointer.chunkPos() 直接定位 ——
      * 记录所在区块和 pointer 说的区块本来就可能对不上(sable 那句 mis-match 日志就是为此),
