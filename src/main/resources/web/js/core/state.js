@@ -59,9 +59,9 @@ let FORCED = new Set();
    不单列的话它和"从未常驻"长得一样,守护剥票会被误读成"取消常驻悄悄成功" */
 let FORCED_LOST = new Set();
 
-/* 非面板常驻票:uuid → 票种 id 数组(sable 指令 / 其他模组挂的票)。
-   不标出来的话"取消常驻被外部票挡住"在界面上无迹可循 */
-let FORCED_FOREIGN = new Map();
+/* 外部保持加载:非面板 sable 票,或体被外部区块加载源(区块加载器/原版 forceload/出生点)罩住。
+   只分内外不细分来源 —— 不标出来的话"取消常驻了为什么还在跑"在界面上无迹可循 */
+let FORCED_EXTERNAL = new Set();
 
 /* 正在排队/执行的作业(每个作业一条,含 targets),来自 /api/jobs?poll=1 的 running[] */
 let ACTIVE_JOBS = [];
@@ -108,5 +108,5 @@ onServerReset(() => {
   RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
   loadFav();
   PLAYERS = []; PLAYERS_ERROR = ''; playersFetchedAt = 0; PAUSED = new Set(); FORCED = new Set();
-  FORCED_LOST = new Set(); FORCED_FOREIGN = new Map();
+  FORCED_LOST = new Set(); FORCED_EXTERNAL = new Set();
 });

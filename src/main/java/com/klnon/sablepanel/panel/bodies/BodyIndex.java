@@ -813,30 +813,25 @@ public final class BodyIndex {
         // 常驻掉线 = 意图在、票不在:守护剥了拉不回来的票,或周期恢复还没成功。不单发的话
         // 它和"从未常驻"在界面上不可分辨 —— 2026-08-22 恢复失败的体徽章消失,被误读成取消成功
         Set<UUID> forcedIntents = com.klnon.sablepanel.panel.ops.ForceLoadService.requestedSnapshot();
-        // 非面板票(sable 指令/其他模组):uuid → 票种 id 数组,画"常驻·外部"来源徽章
-        Map<UUID, Set<String>> foreignAll = com.klnon.sablepanel.panel.ops.ForceLoadService.foreignSnapshot();
+        // "外部保持加载"(非面板 sable 票或外部区块加载源):画"外部加载"徽章,不细分来源
+        Set<UUID> externalAll = com.klnon.sablepanel.panel.ops.ForceLoadService.externalSnapshot();
         JsonArray pausedArr = new JsonArray();
         JsonArray forcedArr = new JsonArray();
         JsonArray frozenArr = new JsonArray();
         JsonArray forcedLostArr = new JsonArray();
-        JsonObject foreignObj = new JsonObject();
+        JsonArray externalArr = new JsonArray();
         for (UUID u : emitted) {
             if (pausedAll.contains(u)) pausedArr.add(u.toString());
             if (forcedAll.contains(u)) forcedArr.add(u.toString());
             else if (forcedIntents.contains(u)) forcedLostArr.add(u.toString());
             if (frozenAll.contains(u)) frozenArr.add(u.toString());
-            Set<String> foreignTypes = foreignAll.get(u);
-            if (foreignTypes != null) {
-                JsonArray types = new JsonArray();
-                for (String type : foreignTypes) types.add(type);
-                foreignObj.add(u.toString(), types);
-            }
+            if (externalAll.contains(u)) externalArr.add(u.toString());
         }
         out.add("paused", pausedArr);
         out.add("forced", forcedArr);
         out.add("frozen", frozenArr);
         out.add("forced_lost", forcedLostArr);
-        out.add("forced_foreign", foreignObj);
+        out.add("forced_external", externalArr);
         JsonObject policy = new JsonObject();
         policy.addProperty("blocks", this.config.protectBlocks);
         policy.addProperty("types", this.config.protectBlockTypes);

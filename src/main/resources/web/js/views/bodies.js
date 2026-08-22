@@ -268,11 +268,8 @@ function groupTags(g){
   if (forcedN) tags.push(`<span class="tag forced" title="${T.forcedTag}">${T.forcedBadge}${forcedN>1?' ×'+forcedN:''}</span>`);
   const lostN = g.bodies.filter(b=>FORCED_LOST.has(b.uuid)).length;
   if (lostN) tags.push(`<span class="tag bad" title="${T.forcedLostTag}">${T.forcedLostBadge}${lostN>1?' ×'+lostN:''}</span>`);
-  const foreign = g.bodies.filter(b=>FORCED_FOREIGN.has(b.uuid));
-  if (foreign.length) {
-    const types = [...new Set(foreign.flatMap(b=>FORCED_FOREIGN.get(b.uuid)||[]))].join(', ');
-    tags.push(`<span class="tag" title="${esc(T.forcedForeignTag(types))}">${T.forcedForeignBadge}${foreign.length>1?' ×'+foreign.length:''}</span>`);
-  }
+  const externalN = g.bodies.filter(b=>FORCED_EXTERNAL.has(b.uuid)).length;
+  if (externalN) tags.push(`<span class="tag" title="${T.forcedExternalTag}">${T.forcedExternalBadge}${externalN>1?' ×'+externalN:''}</span>`);
   const pausedN = g.bodies.filter(b=>PAUSED.has(b.uuid)).length;
   if (pausedN) tags.push(`<span class="tag warn" title="${T.pausedTag}">⏸${pausedN>1?'×'+pausedN:''}</span>`);
   const frozenN = g.bodies.filter(b=>FROZEN.has(b.uuid)).length;
@@ -749,7 +746,7 @@ function renderMembers(){
     if (isSky(b)) extra.push(`<span class="tag warn" title="${T.skyTag(REACH.sky_above)}">${T.skyBadge}</span>`);
     if (FORCED.has(b.uuid)) extra.push(`<span class="tag forced">${T.forcedBadge}</span>`);
     if (FORCED_LOST.has(b.uuid)) extra.push(`<span class="tag bad" title="${T.forcedLostTag}">${T.forcedLostBadge}</span>`);
-    if (FORCED_FOREIGN.has(b.uuid)) extra.push(`<span class="tag" title="${esc(T.forcedForeignTag((FORCED_FOREIGN.get(b.uuid)||[]).join(', ')))}">${T.forcedForeignBadge}</span>`);
+    if (FORCED_EXTERNAL.has(b.uuid)) extra.push(`<span class="tag" title="${T.forcedExternalTag}">${T.forcedExternalBadge}</span>`);
     if (PAUSED.has(b.uuid)) extra.push(`<span class="tag warn">⏸</span>`);
     if (FROZEN.has(b.uuid)) extra.push(`<span class="tag warn">❄</span>`);
     if (b.detached) extra.push(`<span class="tag bad" title="${T.detachedTag}">${T.detachedBadge}</span>`);

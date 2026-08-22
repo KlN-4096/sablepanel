@@ -2513,20 +2513,20 @@ test('常驻掉线徽章:意图在票不在的体单独标出,不与"从未常�
   assert.ok(!clean.includes(evalIn(sandbox, 'T.forcedLostBadge')), '无意图的体不误标掉线');
 });
 
-test('外部常驻票徽章:非面板票种单独标出并悬停显示来源', async () => {
+test('外部加载徽章:非面板来源保持加载的体单独标出(不细分来源)', async () => {
+  // 外部=其他模组/指令的 sable 票,或区块加载器钉住的区块(create_power_loader 实案):
+  // 取消常驻对它们无效,不标出来"取消了为什么还在跑"无迹可循。用户裁决只分内外
   const { sandbox, state } = setup();
   state.fetch = async url => url.startsWith('/api/bodies')
-    ? bodiesResponse({ forced: ['U'],
-        forced_foreign: { U: ['sable:command'], W: ['othermod:tug', 'sable:command'] } })
+    ? bodiesResponse({ forced: ['U'], forced_external: ['U', 'W'] })
     : jsonResponse({});
   evalIn(sandbox, 'authenticated = true');
   await evalIn(sandbox, 'loadBodies')();
   const tags = evalIn(sandbox, "groupTags({bodies:[{uuid:'U'},{uuid:'W'}]}).join('')");
-  assert.ok(tags.includes(evalIn(sandbox, 'T.forcedForeignBadge')), '持外部票的成员画来源徽章');
-  assert.ok(tags.includes('sable:command') && tags.includes('othermod:tug'),
-    '悬停要能看到具体票种 id');
+  assert.ok(tags.includes(evalIn(sandbox, 'T.forcedExternalBadge')), '外部保持加载的成员画徽章');
+  assert.ok(tags.includes(evalIn(sandbox, 'T.forcedBadge')), '面板常驻徽章并存:两个来源同时成立');
   const clean = evalIn(sandbox, "groupTags({bodies:[{uuid:'X'}]}).join('')");
-  assert.ok(!clean.includes(evalIn(sandbox, 'T.forcedForeignBadge')), '无外部票的体不误标');
+  assert.ok(!clean.includes(evalIn(sandbox, 'T.forcedExternalBadge')), '无外部来源的体不误标');
 });
 
 /* ---------- 运行 ---------- */
