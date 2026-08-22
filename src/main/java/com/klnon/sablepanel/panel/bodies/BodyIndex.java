@@ -813,25 +813,21 @@ public final class BodyIndex {
         // 常驻掉线 = 意图在、票不在:守护剥了拉不回来的票,或周期恢复还没成功。不单发的话
         // 它和"从未常驻"在界面上不可分辨 —— 2026-08-22 恢复失败的体徽章消失,被误读成取消成功
         Set<UUID> forcedIntents = com.klnon.sablepanel.panel.ops.ForceLoadService.requestedSnapshot();
-        // "外部保持加载"(非面板 sable 票或外部区块加载源):画"外部加载"徽章,不细分来源
-        Set<UUID> externalAll = com.klnon.sablepanel.panel.ops.ForceLoadService.externalSnapshot();
+        // "外部加载"不在这儿发:已加载 ∧ 非面板常驻 ⇒ 外部,是定义不是探测,前端按谓词画徽章
         JsonArray pausedArr = new JsonArray();
         JsonArray forcedArr = new JsonArray();
         JsonArray frozenArr = new JsonArray();
         JsonArray forcedLostArr = new JsonArray();
-        JsonArray externalArr = new JsonArray();
         for (UUID u : emitted) {
             if (pausedAll.contains(u)) pausedArr.add(u.toString());
             if (forcedAll.contains(u)) forcedArr.add(u.toString());
             else if (forcedIntents.contains(u)) forcedLostArr.add(u.toString());
             if (frozenAll.contains(u)) frozenArr.add(u.toString());
-            if (externalAll.contains(u)) externalArr.add(u.toString());
         }
         out.add("paused", pausedArr);
         out.add("forced", forcedArr);
         out.add("frozen", frozenArr);
         out.add("forced_lost", forcedLostArr);
-        out.add("forced_external", externalArr);
         JsonObject policy = new JsonObject();
         policy.addProperty("blocks", this.config.protectBlocks);
         policy.addProperty("types", this.config.protectBlockTypes);

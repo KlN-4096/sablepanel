@@ -259,6 +259,10 @@ function toggleFav(gid){
 function cloneSetOf(body){ return body && body.clone_set !== undefined ? CLONE_SETS.get(Number(body.clone_set)) : null; }
 function clonePeerCount(body){ const set=cloneSetOf(body); return set ? Math.max(0,(set.members||[]).length-1) : 0; }
 
+/* 外部加载 = 已加载 ∧ 非面板常驻(定义,不是探测):区块加载器/其他票/玩家在附近都算。
+   取消常驻对这类体无效,不标出来"取消了为什么还在跑"无迹可循(create_power_loader 实案) */
+function externalKept(b){ return b.state === 'loaded' && !FORCED.has(b.uuid); }
+
 /* 组级徽章(卡片和详情页共用口径);skipMeta=true 时省去方块数/维度(卡片另有专位) */
 function groupTags(g){
   const tags = [];
@@ -268,7 +272,7 @@ function groupTags(g){
   if (forcedN) tags.push(`<span class="tag forced" title="${T.forcedTag}">${T.forcedBadge}${forcedN>1?' ×'+forcedN:''}</span>`);
   const lostN = g.bodies.filter(b=>FORCED_LOST.has(b.uuid)).length;
   if (lostN) tags.push(`<span class="tag bad" title="${T.forcedLostTag}">${T.forcedLostBadge}${lostN>1?' ×'+lostN:''}</span>`);
-  const externalN = g.bodies.filter(b=>FORCED_EXTERNAL.has(b.uuid)).length;
+  const externalN = g.bodies.filter(externalKept).length;
   if (externalN) tags.push(`<span class="tag" title="${T.forcedExternalTag}">${T.forcedExternalBadge}${externalN>1?' ×'+externalN:''}</span>`);
   const pausedN = g.bodies.filter(b=>PAUSED.has(b.uuid)).length;
   if (pausedN) tags.push(`<span class="tag warn" title="${T.pausedTag}">⏸${pausedN>1?'×'+pausedN:''}</span>`);
@@ -746,7 +750,7 @@ function renderMembers(){
     if (isSky(b)) extra.push(`<span class="tag warn" title="${T.skyTag(REACH.sky_above)}">${T.skyBadge}</span>`);
     if (FORCED.has(b.uuid)) extra.push(`<span class="tag forced">${T.forcedBadge}</span>`);
     if (FORCED_LOST.has(b.uuid)) extra.push(`<span class="tag bad" title="${T.forcedLostTag}">${T.forcedLostBadge}</span>`);
-    if (FORCED_EXTERNAL.has(b.uuid)) extra.push(`<span class="tag" title="${T.forcedExternalTag}">${T.forcedExternalBadge}</span>`);
+    if (externalKept(b)) extra.push(`<span class="tag" title="${T.forcedExternalTag}">${T.forcedExternalBadge}</span>`);
     if (PAUSED.has(b.uuid)) extra.push(`<span class="tag warn">⏸</span>`);
     if (FROZEN.has(b.uuid)) extra.push(`<span class="tag warn">❄</span>`);
     if (b.detached) extra.push(`<span class="tag bad" title="${T.detachedTag}">${T.detachedBadge}</span>`);

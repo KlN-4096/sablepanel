@@ -9,15 +9,10 @@ import dev.ryanhcode.sable.api.sublevel.ticket.SubLevelTicketInfo;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelTicketsSavedData;
 import dev.ryanhcode.sable.sublevel.storage.holding.GlobalSavedSubLevelPointer;
-import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
-import it.unimi.dsi.fastutil.longs.LongSet;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Unit;
-import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.ForcedChunksSavedData;
-import net.minecraft.world.level.GameRules;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -62,13 +57,6 @@ public final class ForceLoadService {
     private static final Set<UUID> REQUESTED = ConcurrentHashMap.newKeySet();
     /** 当前实际持票集合，供 HTTP 线程展示。 */
     private static final Set<UUID> ACTIVE = ConcurrentHashMap.newKeySet();
-    /**
-     * "外部保持加载"镜像:非面板 sable 票(指令/其他模组),或体被外部区块加载源罩住
-     * (原版 forceload / 其他 mod 的区块票如 create_power_loader / 出生点区块)。
-     * 用户只关心内外之分,不细分来源。{@link #guardOnMain} 每轮整体重建后原子替换,
-     * 供 HTTP 线程展示"外部加载"徽章 —— 不标出来的话,"取消常驻了为什么还在跑"无迹可循。
-     */
-    private static volatile Set<UUID> EXTERNAL = Set.of();
     private static final int STOP_DETACH_ATTEMPTS = 3;
     private static final IntentFile FILE = new IntentFile("forced.json");
 
@@ -87,11 +75,6 @@ public final class ForceLoadService {
 
     public static Set<UUID> requestedSnapshot() {
         return Set.copyOf(REQUESTED);
-    }
-
-    /** 外部保持加载镜像(HTTP 线程 /api/bodies 输出用);新鲜度与运行态刷新同节奏 */
-    public static Set<UUID> externalSnapshot() {
-        return EXTERNAL;
     }
 
     /**
@@ -114,7 +97,6 @@ public final class ForceLoadService {
     public static void reset() {
         REQUESTED.clear();
         ACTIVE.clear();
-        EXTERNAL = Set.of();
     }
 
     public static void captureNativeIntentsOnMain(MinecraftServer server) {
@@ -404,7 +386,6 @@ public final class ForceLoadService {
     public static void guardOnMain(MinecraftServer server) {
         Set<UUID> forced = new HashSet<>();
         Set<UUID> recover = new LinkedHashSet<>();
-        Set<UUID> external = new HashSet<>();
         for (ServerLevel level : server.getAllLevels()) {
             try {
                 ServerSubLevelContainer c = container(level);
@@ -414,11 +395,13 @@ public final class ForceLoadService {
                 List<Reload> pending = new ArrayList<>();
                 for (Map.Entry<UUID, SubLevelTicketInfo> en : c.getAllTickets().entrySet()) {
                     SubLevelTicketInfo info = en.getValue();
-                    // 常态守护路径,每票一个 Stream 分配不值得。非面板票=外部来源之一
+                    // 常态守护路径,每票一个 Stream 分配不值得
                     boolean panelTicket = false;
                     for (SubLevelLoadingTicket<?> ticket : info.tickets()) {
-                        if (isPanelTicket(ticket)) panelTicket = true;
-                        else external.add(en.getKey());
+                        if (isPanelTicket(ticket)) {
+                            panelTicket = true;
+                            break;
+                        }
                     }
                     if (!panelTicket) continue;
                     UUID uuid = en.getKey();
@@ -444,7 +427,6 @@ public final class ForceLoadService {
                         recover.add(r.uuid());
                     }
                 }
-                collectChunkPinnedOnMain(server, level, c, external);
             } catch (Throwable t) {
                 SablePanel.LOGGER.warn("sablepanel: force-load guard failed", t);
             }
@@ -455,74 +437,6 @@ public final class ForceLoadService {
         }
         ACTIVE.retainAll(forced);
         ACTIVE.addAll(forced);
-        EXTERNAL = Set.copyOf(external);
-    }
-
-    /**
-     * 被外部区块加载源罩住的已加载体也算"外部":体自身没有任何 sable 票,但所在区块被
-     * 原版 forceload、其他 mod 的区块票(如 create_power_loader)或出生点区块钉着,
-     * sable 对"区块已加载"的体天然保持运行 —— 取消常驻后 1~9 毫秒就会被重新拉起
-     * (2026-08-22 实测)。钉住的区块按 ±2 格膨胀比对,近似加载度的边界扩散。
-     */
-    private static void collectChunkPinnedOnMain(MinecraftServer server, ServerLevel level,
-                                                 ServerSubLevelContainer c, Set<UUID> external) {
-        LongSet pinned = pinnedChunksOnMain(server, level);
-        if (pinned.isEmpty()) return;
-        for (ServerSubLevel body : c.getAllSubLevels()) {
-            if (external.contains(body.getUniqueId())) continue;
-            var bounds = body.boundingBox();
-            if (!Double.isFinite(bounds.minX()) || !Double.isFinite(bounds.maxX())
-                    || !Double.isFinite(bounds.minZ()) || !Double.isFinite(bounds.maxZ())) continue;
-            int minX = ((int) Math.floor(bounds.minX() - 1.0)) >> 4;
-            int maxX = ((int) Math.floor(bounds.maxX() + 1.0)) >> 4;
-            int minZ = ((int) Math.floor(bounds.minZ() - 1.0)) >> 4;
-            int maxZ = ((int) Math.floor(bounds.maxZ() + 1.0)) >> 4;
-            // 失控包围盒防线(b5 病例那种上万格的盒):范围离谱就不逐区块扫了
-            if ((long) (maxX - minX + 1) * (maxZ - minZ + 1) > 4096) continue;
-            search:
-            for (int cx = minX; cx <= maxX; cx++) {
-                for (int cz = minZ; cz <= maxZ; cz++) {
-                    if (nearPinned(pinned, cx, cz)) {
-                        external.add(body.getUniqueId());
-                        break search;
-                    }
-                }
-            }
-        }
-    }
-
-    private static boolean nearPinned(LongSet pinned, int cx, int cz) {
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                if (pinned.contains(ChunkPos.asLong(cx + dx, cz + dz))) return true;
-            }
-        }
-        return false;
-    }
-
-    /** 本维度被钉住的区块:原版 forceload + NeoForge 方块/实体区块票 + 出生点区块(仅主世界) */
-    private static LongSet pinnedChunksOnMain(MinecraftServer server, ServerLevel level) {
-        LongSet pinned = new LongOpenHashSet(level.getForcedChunks());
-        ForcedChunksSavedData data = level.getDataStorage()
-                .get(ForcedChunksSavedData.factory(), ForcedChunksSavedData.FILE_ID);
-        if (data != null) {
-            for (LongSet set : data.getBlockForcedChunks().getChunks().values()) pinned.addAll(set);
-            for (LongSet set : data.getBlockForcedChunks().getTickingChunks().values()) pinned.addAll(set);
-            for (LongSet set : data.getEntityForcedChunks().getChunks().values()) pinned.addAll(set);
-            for (LongSet set : data.getEntityForcedChunks().getTickingChunks().values()) pinned.addAll(set);
-        }
-        if (level == server.overworld()) {
-            int radius = level.getGameRules().getInt(GameRules.RULE_SPAWN_CHUNK_RADIUS);
-            if (radius > 0) {
-                ChunkPos spawn = new ChunkPos(level.getSharedSpawnPos());
-                for (int dx = -radius; dx <= radius; dx++) {
-                    for (int dz = -radius; dz <= radius; dz++) {
-                        pinned.add(ChunkPos.asLong(spawn.x + dx, spawn.z + dz));
-                    }
-                }
-            }
-        }
-        return pinned;
     }
 
     private static boolean isPanelTicket(SubLevelLoadingTicket<?> ticket) {
