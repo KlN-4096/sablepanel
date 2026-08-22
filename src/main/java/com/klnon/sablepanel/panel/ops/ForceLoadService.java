@@ -431,7 +431,8 @@ public final class ForceLoadService {
     }
 
     private static boolean isPanelTicket(SubLevelLoadingTicket<?> ticket) {
-        return PANEL_FORCED.equals(ticket.getType());
+        // sable 2.0.4 起 ticket 是 record,访问器从 getType() 变为 type()
+        return PANEL_FORCED.equals(ticket.type());
     }
 
     private static ServerSubLevelContainer container(ServerLevel level) {
