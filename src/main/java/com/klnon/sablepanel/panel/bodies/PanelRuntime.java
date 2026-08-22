@@ -62,7 +62,7 @@ public final class PanelRuntime implements AutoCloseable {
     private ScheduledExecutorService controlExecutor;
     private ExecutorService scanExecutor;
     private ScheduledFuture<?> heartbeatTask;
-    private int ticksSinceRefresh;
+    private final RefreshCadence cadence = new RefreshCadence();
     private volatile ForceRestoreAttempt failedForceRestore;
 
     record ForceRestoreAttempt(List<UUID> pending, long diskRevision) {
@@ -236,21 +236,61 @@ public final class PanelRuntime implements AutoCloseable {
         PanelClusterNode panel = this.panelNode;
         if (panel == null) return;
         StatsCollector.INSTANCE.tick();
-        this.ticksSinceRefresh++;
-        int interval = panel.isActive() ? RUNTIME_REFRESH_TICKS : RUNTIME_REFRESH_IDLE_TICKS;
-        boolean dirty = this.refreshRequested.get();
-        // 事件刷新最多每秒一次：主体变化仍及时可见，碎片风暴不会每 5 tick 重建全量运行态。
-        int nextRefresh = dirty ? Math.min(EVENT_REFRESH_TICKS, interval) : interval;
-        if (this.ticksSinceRefresh < nextRefresh) return;
+        if (!this.cadence.due(this.refreshRequested.get(), panel.isActive())) return;
         boolean requested = this.refreshRequested.getAndSet(false);
+        int elapsed = this.cadence.begin();
         try {
-            this.bodyIndex.refreshRuntime(server, Math.max(1, this.ticksSinceRefresh));
-        } catch (Throwable ignored) {
+            this.bodyIndex.refreshRuntime(server, elapsed);
+        } catch (Throwable failure) {
             if (requested) this.refreshRequested.set(true);
+            if (this.cadence.failedShouldLog()) {
+                SablePanel.LOGGER.warn("sablepanel: runtime refresh failed (consecutive #{})",
+                        this.cadence.failures(), failure);
+            }
             return;
         }
-        this.ticksSinceRefresh = 0;
+        this.cadence.succeeded();
         if (requested) publishBodiesChanged(panel);
+    }
+
+    /** 刷新节奏与失败记账。失败也归零计数:否则 refreshRuntime 持续抛出会退化成每 tick 重试全量刷新。 */
+    static final class RefreshCadence {
+        private int ticksSinceRefresh;
+        private long consecutiveFailures;
+
+        /** 每 tick 调用;true = 到点,调用方随后必须 {@link #begin()}。 */
+        boolean due(boolean dirty, boolean active) {
+            this.ticksSinceRefresh++;
+            int interval = active ? RUNTIME_REFRESH_TICKS : RUNTIME_REFRESH_IDLE_TICKS;
+            // 事件刷新最多每秒一次：主体变化仍及时可见，碎片风暴不会每 5 tick 重建全量运行态。
+            int next = dirty ? Math.min(EVENT_REFRESH_TICKS, interval) : interval;
+            return this.ticksSinceRefresh >= next;
+        }
+
+        /** 取走本轮真实间隔并归零——成功失败都只走这一次。 */
+        int begin() {
+            int elapsed = Math.max(1, this.ticksSinceRefresh);
+            this.ticksSinceRefresh = 0;
+            return elapsed;
+        }
+
+        void succeeded() {
+            this.consecutiveFailures = 0;
+        }
+
+        /** 失败限频:首个失败与之后每 64 个打一条,持续故障不刷屏也不静默。 */
+        boolean failedShouldLog() {
+            return this.consecutiveFailures++ % 64 == 0;
+        }
+
+        long failures() {
+            return this.consecutiveFailures;
+        }
+
+        void reset() {
+            this.ticksSinceRefresh = 0;
+            this.consecutiveFailures = 0;
+        }
     }
 
     @Override
@@ -294,7 +334,7 @@ public final class PanelRuntime implements AutoCloseable {
         this.preparedConfig = null;
         this.scanPauseLogged = false;
         this.refreshRequested.set(false);
-        this.ticksSinceRefresh = 0;
+        this.cadence.reset();
     }
 
     public void prepareForStop(MinecraftServer server) {

@@ -432,7 +432,13 @@ public final class ForceLoadService {
             }
         }
         if (!recover.isEmpty()) {
-            detachNativeTicketsOnMain(server, recover);
+            try {
+                detachNativeTicketsOnMain(server, recover);
+            } catch (Throwable t) {
+                // 剥离失败只告警不外抛:外抛会连坐 refreshRuntime,退化成每 tick 重试全量刷新。
+                // 掉线体照常移出 ACTIVE,前端按 forced_lost 显式标红,下轮守护再试。
+                SablePanel.LOGGER.warn("sablepanel: force-load guard ticket detach failed", t);
+            }
             forced.removeAll(recover);
         }
         ACTIVE.retainAll(forced);
