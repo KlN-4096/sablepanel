@@ -841,7 +841,7 @@ function renderDetail(){
     document.getElementById('tz').value = pos[2]|0;
   }
   document.getElementById('adoptRow').style.display = b.state === 'orphan' ? 'flex' : 'none';
-  document.getElementById('dedupeBtn').style.display = b.copies > 1 ? '' : 'none';
+  document.getElementById('dedupeBtn').style.display = (b.copies > 1 || g.dup) ? '' : 'none';
   document.getElementById('delBodyBtn').textContent = g.members > 1 ? T.delGroup(g.members) : T.delBody;
   const fullyLoaded = g.loaded === g.members;
   const pauseBtn = document.getElementById('pauseBtn');
@@ -857,7 +857,11 @@ function renderDetail(){
   const forceBtn = document.getElementById('forceBtn');
   forceBtn.textContent = FORCED.has(b.uuid) ? T.unforceBody : T.forceBody;
   forceBtn.classList.toggle('primary', !FORCED.has(b.uuid));
-  forceBtn.title = T.forceHint;
+  // 副本歧义挡常驻(B 组门槛前置到按钮):冷组多副本后端选不出版本,先去处理副本。
+  // 整组已加载=运行证据齐、常驻必成,不挡;取消常驻只摘票,也不挡。
+  const forceGated = !FORCED.has(b.uuid) && !fullyLoaded && !!g.dup;
+  forceBtn.disabled = !!job || forceGated;
+  forceBtn.title = forceGated ? T.forceCopiesFirst : T.forceHint;
   const autoRepairBtn = document.getElementById('autoRepairBtn');
   autoRepairBtn.textContent = AUTO_REPAIR_RUN ? T.autoRepairing : T.autoRepairGroup;
   autoRepairBtn.disabled = !!job || !!AUTO_REPAIR_RUN;
@@ -886,7 +890,8 @@ function renderPlayerSelect(){
     : `<option value="">${esc(status || T.tpNoPlayers)}</option>`;
   sel.disabled = !PLAYERS.length;
   const btn = document.getElementById('tpPlayerBtn');
-  if (btn) btn.disabled = !PLAYERS.length;
+  // 玩家列表异步回来时别把 renderDetail 的作业置灰覆写掉(传送自身会依链加载,不设加载门)
+  if (btn) btn.disabled = !PLAYERS.length || !!(SEL && BUSY.get(SEL.uuid));
 }
 /* 成分表默认只列前 30 种,点"展开"看全部;切体时复位 */
 const COMP_PAGE = 30;

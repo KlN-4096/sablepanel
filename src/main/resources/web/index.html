@@ -205,11 +205,8 @@ document.documentElement.dataset.theme=ok[t]?t
                 <button id="pauseBtn" class="warnb" onclick="doPauseCurrent()">⏸</button>
                 <button id="freezeBtn" class="warnb" onclick="doFreezeCurrent()">❄</button>
               </div>
-              <div class="row">
+              <div class="row dual">
                 <button id="forceBtn" onclick="doForceCurrent()">常驻加载[断链处理]</button>
-              </div>
-              <div class="row">
-                <button class="primary" id="autoRepairBtn" onclick="doAutoRepairCurrent()">自动修复物理组</button>
               </div>
               <div class="row" id="adoptRow" style="display:none">
                 <button onclick="doAdopt()">收养找回(含依赖)</button>
@@ -218,7 +215,10 @@ document.documentElement.dataset.theme=ok[t]?t
             </div>
             <div class="opGroup danger">
               <div class="opTitle"><span>危险操作</span><span class="opHint">删除严格验收成功后才会进入回收站</span></div>
-              <div class="row">
+              <div class="row dual">
+                <button class="primary" id="autoRepairBtn" onclick="doAutoRepairCurrent()">自动修复物理组</button>
+              </div>
+              <div class="row dual">
                 <button class="danger" id="delBodyBtn" onclick="doDelete()">删除该物理体</button>
                 <button id="dedupeBtn" onclick="openDedupe()" style="display:none">处理副本</button>
               </div>

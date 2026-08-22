@@ -240,8 +240,13 @@ function reapFinishedJobs(log){
     const parts = [job.op, job.name, label, job.message];
     if (job.op === '回收站彻底删除' && (job.warnings || []).length) parts.push(job.warnings[0]);
     toast(parts.filter(Boolean).join(' · '), outcome === 'ok' ? 'ok' : 'bad');
+    // 副本弹层已开着时不重开:openDedupe 会重置扫描与用户已手选的版本
+    const dedupeClosed = () => { const el=document.getElementById('copyBack'); return !el || !el.open; };
     if ((job.op==='删除'||job.op==='批量删除')&&outcome==='fail'
-      &&String(job.message||'').includes('处理副本')&&SEL&&SEL.copies>1) openDedupe();
+      &&String(job.message||'').includes('处理副本')&&SEL&&SEL.copies>1&&dedupeClosed()) openDedupe();
+    // 常驻因多份副本选不出版本时同样导流:副本弹层按整组扫描,选完版本常驻就能过
+    if (job.op==='常驻加载'&&outcome==='fail'&&String(job.message||'').includes('多份副本')
+      &&SEL&&(SEL.copies>1||(SELG&&SELG.dup))&&dedupeClosed()) openDedupe();
     if (job.op === '回收站恢复' || job.op === '回收站彻底删除') refreshRecycle = true;
   }
   if (refreshRecycle) loadRecycle();

@@ -2408,6 +2408,41 @@ test('副本重新扫描回来不抢用户已手选的版本', async () => {
   assert.equal(evalIn(sandbox, 'COPY_VERSION'), 'v592a', '自动选中只在用户未选时发生');
 });
 
+test('操作门槛置灰:冷组副本挡常驻,处理副本入口按组级出现', () => {
+  const { sandbox } = setup();
+  evalIn(sandbox, `
+    loadPlayers = () => {};
+    PAUSED.clear(); FROZEN.clear(); FORCED.clear(); BUSY.clear();
+    SEL = { uuid:'U', name:'冷气球', state:'holding', pos:[0,0,0], size:[8,8,8], blocks:100,
+            entry:'overworld/0.0.0:1', copies:1, entries:[] };
+    SELG = { gid:'G', members:2, blocks:200, loaded:0, dup:true, orphans:0,
+             bodies:[{uuid:'U'},{uuid:'V'}] };
+  `);
+  evalIn(sandbox, 'renderDetail')();
+  const el = id => evalIn(sandbox, `document.getElementById('${id}')`);
+  assert.equal(el('forceBtn').disabled, true, '冷组带多副本成员:常驻按钮置灰导流处理副本');
+  assert.equal(el('forceBtn').title, evalIn(sandbox, 'T.forceCopiesFirst'));
+  assert.equal(el('dedupeBtn').style.display, '', '选中体干净但兄弟成员有副本,入口也要出现');
+  assert.equal(el('pauseBtn').disabled, true, '未整组加载不能暂停(既有门槛回归)');
+
+  evalIn(sandbox, "FORCED.add('U')");
+  evalIn(sandbox, 'renderDetail')();
+  assert.equal(el('forceBtn').disabled, false, '取消常驻不受副本门槛影响');
+
+  evalIn(sandbox, "FORCED.clear(); SELG.loaded = 2");
+  evalIn(sandbox, 'renderDetail')();
+  assert.equal(el('forceBtn').disabled, false, '整组已加载=运行证据齐,副本不再挡常驻');
+  assert.equal(el('forceBtn').title, evalIn(sandbox, 'T.forceHint'));
+
+  // 玩家传送按钮:players 异步回来不能把作业置灰覆写掉
+  evalIn(sandbox, "PLAYERS = [{uuid:'p1',name:'P'}]; BUSY.set('U', {op:'传送', since:0})");
+  evalIn(sandbox, 'renderPlayerSelect')();
+  assert.equal(el('tpPlayerBtn').disabled, true, '作业进行中玩家传送保持禁用');
+  evalIn(sandbox, "BUSY.delete('U')");
+  evalIn(sandbox, 'renderPlayerSelect')();
+  assert.equal(el('tpPlayerBtn').disabled, false);
+});
+
 /* ---------- 运行 ---------- */
 let failures = 0;
 for (const [name, fn] of tests) {

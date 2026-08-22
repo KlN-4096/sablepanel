@@ -351,7 +351,9 @@ async function runAutoRepairGroup(uuid, run){
     if (!autoRepairFullyForced(view)) {
       const accepted = await setForcedBodies([uuid], true);
       if (!accepted || (accepted.job && await awaitJob(accepted.job) !== 'ok')) {
-        throw new Error(T.autoRepairPartial);
+        // 冷成员带多份副本时常驻必然选不出版本 —— 面板不猜,导流到「处理副本」由人选
+        throw new Error(view.group.bodies.some(body => (body.copies || 1) > 1)
+          ? T.autoRepairForceCopies : T.autoRepairPartial);
       }
       scan = await waitAutoRepairState(() => api(`/api/body/${uuid}/copies`), candidate => {
         const expected = candidate.runtime_members || 0;
