@@ -59,6 +59,10 @@ let FORCED = new Set();
    不单列的话它和"从未常驻"长得一样,守护剥票会被误读成"取消常驻悄悄成功" */
 let FORCED_LOST = new Set();
 
+/* 非面板常驻票:uuid → 票种 id 数组(sable 指令 / 其他模组挂的票)。
+   不标出来的话"取消常驻被外部票挡住"在界面上无迹可循 */
+let FORCED_FOREIGN = new Map();
+
 /* 正在排队/执行的作业(每个作业一条,含 targets),来自 /api/jobs?poll=1 的 running[] */
 let ACTIVE_JOBS = [];
 /* 由 ACTIVE_JOBS 按 targets 展开:uuid → 作业。命中的行显示转圈+阶段+已耗时,按钮禁用。
@@ -104,5 +108,5 @@ onServerReset(() => {
   RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
   loadFav();
   PLAYERS = []; PLAYERS_ERROR = ''; playersFetchedAt = 0; PAUSED = new Set(); FORCED = new Set();
-  FORCED_LOST = new Set();
+  FORCED_LOST = new Set(); FORCED_FOREIGN = new Map();
 });

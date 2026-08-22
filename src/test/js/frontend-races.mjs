@@ -2493,6 +2493,22 @@ test('常驻掉线徽章:意图在票不在的体单独标出,不与"从未常�
   assert.ok(!clean.includes(evalIn(sandbox, 'T.forcedLostBadge')), '无意图的体不误标掉线');
 });
 
+test('外部常驻票徽章:非面板票种单独标出并悬停显示来源', async () => {
+  const { sandbox, state } = setup();
+  state.fetch = async url => url.startsWith('/api/bodies')
+    ? bodiesResponse({ forced: ['U'],
+        forced_foreign: { U: ['sable:command'], W: ['othermod:tug', 'sable:command'] } })
+    : jsonResponse({});
+  evalIn(sandbox, 'authenticated = true');
+  await evalIn(sandbox, 'loadBodies')();
+  const tags = evalIn(sandbox, "groupTags({bodies:[{uuid:'U'},{uuid:'W'}]}).join('')");
+  assert.ok(tags.includes(evalIn(sandbox, 'T.forcedForeignBadge')), '持外部票的成员画来源徽章');
+  assert.ok(tags.includes('sable:command') && tags.includes('othermod:tug'),
+    '悬停要能看到具体票种 id');
+  const clean = evalIn(sandbox, "groupTags({bodies:[{uuid:'X'}]}).join('')");
+  assert.ok(!clean.includes(evalIn(sandbox, 'T.forcedForeignBadge')), '无外部票的体不误标');
+});
+
 /* ---------- 运行 ---------- */
 let failures = 0;
 for (const [name, fn] of tests) {

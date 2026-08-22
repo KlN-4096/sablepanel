@@ -57,6 +57,12 @@ public final class ForceLoadService {
     private static final Set<UUID> REQUESTED = ConcurrentHashMap.newKeySet();
     /** 当前实际持票集合，供 HTTP 线程展示。 */
     private static final Set<UUID> ACTIVE = ConcurrentHashMap.newKeySet();
+    /**
+     * 非面板票(sable 指令/其他模组)镜像:uuid → 票种 id 集合。{@link #guardOnMain} 每轮
+     * 整体重建后原子替换,供 HTTP 线程展示"常驻·外部"徽章 —— 不标出来的话,
+     * "取消常驻被其他票种挡住"在界面上无迹可循。
+     */
+    private static volatile Map<UUID, Set<String>> FOREIGN = Map.of();
     private static final int STOP_DETACH_ATTEMPTS = 3;
     private static final IntentFile FILE = new IntentFile("forced.json");
 
@@ -75,6 +81,11 @@ public final class ForceLoadService {
 
     public static Set<UUID> requestedSnapshot() {
         return Set.copyOf(REQUESTED);
+    }
+
+    /** 非面板票镜像(HTTP 线程 /api/bodies 输出用);新鲜度与运行态刷新同节奏 */
+    public static Map<UUID, Set<String>> foreignSnapshot() {
+        return FOREIGN;
     }
 
     /**
@@ -97,6 +108,7 @@ public final class ForceLoadService {
     public static void reset() {
         REQUESTED.clear();
         ACTIVE.clear();
+        FOREIGN = Map.of();
     }
 
     public static void captureNativeIntentsOnMain(MinecraftServer server) {
@@ -386,6 +398,7 @@ public final class ForceLoadService {
     public static void guardOnMain(MinecraftServer server) {
         Set<UUID> forced = new HashSet<>();
         Set<UUID> recover = new LinkedHashSet<>();
+        Map<UUID, Set<String>> foreign = new LinkedHashMap<>();
         for (ServerLevel level : server.getAllLevels()) {
             try {
                 ServerSubLevelContainer c = container(level);
@@ -395,12 +408,14 @@ public final class ForceLoadService {
                 List<Reload> pending = new ArrayList<>();
                 for (Map.Entry<UUID, SubLevelTicketInfo> en : c.getAllTickets().entrySet()) {
                     SubLevelTicketInfo info = en.getValue();
-                    // 常态守护路径,每票一个 Stream 分配不值得
+                    // 常态守护路径,每票一个 Stream 分配不值得。顺带收集非面板票种给来源徽章
                     boolean panelTicket = false;
                     for (SubLevelLoadingTicket<?> ticket : info.tickets()) {
                         if (isPanelTicket(ticket)) {
                             panelTicket = true;
-                            break;
+                        } else {
+                            foreign.computeIfAbsent(en.getKey(), ignored -> new LinkedHashSet<>())
+                                    .add(String.valueOf(ticket.type().name()));
                         }
                     }
                     if (!panelTicket) continue;
@@ -437,6 +452,7 @@ public final class ForceLoadService {
         }
         ACTIVE.retainAll(forced);
         ACTIVE.addAll(forced);
+        FOREIGN = Map.copyOf(foreign);
     }
 
     private static boolean isPanelTicket(SubLevelLoadingTicket<?> ticket) {
