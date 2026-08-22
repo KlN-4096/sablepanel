@@ -55,6 +55,10 @@ let FROZEN = new Set();
    含未加载体的意图。命中的组在列表里变色并恒置顶 */
 let FORCED = new Set();
 
+/* 常驻掉线集合:有常驻意图但票已不在(守护剥了拉不回来的票,周期恢复还没成功)。
+   不单列的话它和"从未常驻"长得一样,守护剥票会被误读成"取消常驻悄悄成功" */
+let FORCED_LOST = new Set();
+
 /* 正在排队/执行的作业(每个作业一条,含 targets),来自 /api/jobs?poll=1 的 running[] */
 let ACTIVE_JOBS = [];
 /* 由 ACTIVE_JOBS 按 targets 展开:uuid → 作业。命中的行显示转圈+阶段+已耗时,按钮禁用。
@@ -100,4 +104,5 @@ onServerReset(() => {
   RECYCLE_CURSOR = ''; RECYCLE_TOTAL = 0;
   loadFav();
   PLAYERS = []; PLAYERS_ERROR = ''; playersFetchedAt = 0; PAUSED = new Set(); FORCED = new Set();
+  FORCED_LOST = new Set();
 });

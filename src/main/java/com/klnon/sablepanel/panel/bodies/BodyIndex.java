@@ -820,17 +820,23 @@ public final class BodyIndex {
         Set<UUID> forcedAll = com.klnon.sablepanel.panel.ops.ForceLoadService.snapshot();
         // 冻结与暂停是两回事:暂停只锁物理(机器照转),冻结连方块实体都不 tick。分开发,别合并
         Set<UUID> frozenAll = com.klnon.sablepanel.panel.ops.FreezeService.snapshot();
+        // 常驻掉线 = 意图在、票不在:守护剥了拉不回来的票,或周期恢复还没成功。不单发的话
+        // 它和"从未常驻"在界面上不可分辨 —— 2026-08-22 恢复失败的体徽章消失,被误读成取消成功
+        Set<UUID> forcedIntents = com.klnon.sablepanel.panel.ops.ForceLoadService.requestedSnapshot();
         JsonArray pausedArr = new JsonArray();
         JsonArray forcedArr = new JsonArray();
         JsonArray frozenArr = new JsonArray();
+        JsonArray forcedLostArr = new JsonArray();
         for (UUID u : emitted) {
             if (pausedAll.contains(u)) pausedArr.add(u.toString());
             if (forcedAll.contains(u)) forcedArr.add(u.toString());
+            else if (forcedIntents.contains(u)) forcedLostArr.add(u.toString());
             if (frozenAll.contains(u)) frozenArr.add(u.toString());
         }
         out.add("paused", pausedArr);
         out.add("forced", forcedArr);
         out.add("frozen", frozenArr);
+        out.add("forced_lost", forcedLostArr);
         JsonObject policy = new JsonObject();
         policy.addProperty("blocks", this.config.protectBlocks);
         policy.addProperty("types", this.config.protectBlockTypes);

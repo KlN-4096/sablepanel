@@ -2443,6 +2443,21 @@ test('操作门槛置灰:冷组副本挡常驻,处理副本入口按组级出现
   assert.equal(el('tpPlayerBtn').disabled, false);
 });
 
+test('常驻掉线徽章:意图在票不在的体单独标出,不与"从未常驻"混同', async () => {
+  const { sandbox, state } = setup();
+  state.fetch = async url => url.startsWith('/api/bodies')
+    ? bodiesResponse({ forced: ['U'], forced_lost: ['V'] }) : jsonResponse({});
+  evalIn(sandbox, 'authenticated = true');
+  await evalIn(sandbox, 'loadBodies')();
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify([...FORCED_LOST])')), ['V'],
+    'forced_lost 快照要进独立集合');
+  const tags = evalIn(sandbox, "groupTags({bodies:[{uuid:'U'},{uuid:'V'}]}).join('')");
+  assert.ok(tags.includes(evalIn(sandbox, 'T.forcedBadge')), '在票成员照常画常驻徽章');
+  assert.ok(tags.includes(evalIn(sandbox, 'T.forcedLostBadge')), '意图在票不在的成员画掉线徽章');
+  const clean = evalIn(sandbox, "groupTags({bodies:[{uuid:'X'}]}).join('')");
+  assert.ok(!clean.includes(evalIn(sandbox, 'T.forcedLostBadge')), '无意图的体不误标掉线');
+});
+
 /* ---------- 运行 ---------- */
 let failures = 0;
 for (const [name, fn] of tests) {

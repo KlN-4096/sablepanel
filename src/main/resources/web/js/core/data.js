@@ -97,6 +97,7 @@ async function loadBodies() {
       CLONE_SETS = new Map((DATA.clone_sets || []).map(set=>[Number(set.id), set]));
       PAUSED = new Set(DATA.paused || []);
       FORCED = new Set(DATA.forced || []);
+      FORCED_LOST = new Set(DATA.forced_lost || []);
       FROZEN = new Set(DATA.frozen || []);
       REACH = DATA.reach || REACH;
       DATA.groups.forEach(g => g.bodies.forEach(b => BODY_BY_UUID.set(b.uuid, {b, g})));
