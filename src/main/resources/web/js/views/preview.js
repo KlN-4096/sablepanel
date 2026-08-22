@@ -108,12 +108,12 @@ function showPreviewHover(index, pointer, reason) {
   const pz = (origin.plot_z || 0) + (origin.origin_z || 0) + z;
   const state = palette.state || palette.id || '?';
   const simplified = reason ? ` · 简化: ${simplificationLabel(reason)}` : '';
-  tip.innerHTML = `<b>${esc(palette.zh || palette.id || '?')}</b><div class="bid">${esc(state)} · (${x}, ${y}, ${z}) · plot (${px}, ${py}, ${pz})${simplified}</div>`;
+  tip.innerHTML = `<b>${esc((LANG === 'zh' && palette.zh) || palette.id || '?')}</b><div class="bid">${esc(state)} · (${x}, ${y}, ${z}) · plot (${px}, ${py}, ${pz})${simplified}</div>`;
   tip.style.display = 'block';
   placeTip(tip, pointer && pointer.cx || 0, pointer && pointer.cy || 0);
   if (fsMode) {
     const hover = document.getElementById('fsHover');
-    if (hover) hover.innerHTML = `<b style="color:var(--fg)">${esc(palette.zh || palette.id || '?')}</b> <span class="mono" style="font-size:10.5px">${esc(state)}</span> · (${x}, ${y}, ${z}) · plot (${px}, ${py}, ${pz})${simplified}`;
+    if (hover) hover.innerHTML = `<b style="color:var(--fg)">${esc((LANG === 'zh' && palette.zh) || palette.id || '?')}</b> <span class="mono" style="font-size:10.5px">${esc(state)}</span> · (${x}, ${y}, ${z}) · plot (${px}, ${py}, ${pz})${simplified}`;
   }
 }
 
