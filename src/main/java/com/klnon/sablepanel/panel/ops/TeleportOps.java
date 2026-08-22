@@ -160,6 +160,43 @@ public final class TeleportOps {
                 && Math.abs(position[2] - z) <= POSITION_EPSILON;
     }
 
+    /**
+     * 整组清除线/角速度:止停被撞飞或持续漂移的组,不暂停物理、不固定、不冻结。
+     * 只作用于运行时闭包内的已加载成员 —— 冷体的正确治法是传送(顺带清速度并落盘)。
+     * 不逐成员写盘:活体状态已改,后续任何保存路径自然带上零速度;
+     * 逐成员磁盘写+复核在主线程对大组是吊死风险。
+     */
+    public JsonObject clearVelocity(List<UUID> requested) throws Exception {
+        JsonObject out = this.kit.onMain(() -> {
+            Set<UUID> missing = new LinkedHashSet<>();
+            Set<UUID> members = new LinkedHashSet<>();
+            for (UUID root : new LinkedHashSet<>(requested)) {
+                if (this.kit.resolveLoaded(root) == null) missing.add(root);
+                else members.addAll(this.kit.loadedDependencyMembersOnMain(List.of(root)));
+            }
+            if (members.isEmpty()) {
+                throw new IllegalStateException("没有已加载成员，未清除速度。冷体请用传送(会顺带清速度并落盘): "
+                        + OpKit.shortUuids(missing));
+            }
+            for (UUID uuid : members) {
+                ServerSubLevel body = this.kit.resolveLoaded(uuid);
+                if (body == null) continue;   // 闭包展开与执行同一主线程切片,防御跳过
+                SubLevelPhysicsSystem.get(body.getLevel()).getPipeline().resetVelocity(body);
+                this.kit.audit("clear_velocity", uuid, body.getName(), null);
+            }
+            JsonObject r = new JsonObject();
+            r.addProperty("ok", true);
+            r.addProperty("count", members.size());
+            if (!missing.isEmpty()) {
+                OpKit.attachWarnings(r, List.of("未加载，未清除速度(冷体请用传送): "
+                        + OpKit.shortUuids(missing)));
+            }
+            return r;
+        });
+        // 不触发磁盘重扫:本操作不写盘,索引里也没有会变化的字段
+        return out;
+    }
+
     /** 整组物理暂停/恢复；暂停成功后清除组内全部线速度和角速度。 */
     public JsonObject setPaused(List<UUID> requested, boolean paused) throws Exception {
         List<UUID> uuids;

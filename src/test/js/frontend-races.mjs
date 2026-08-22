@@ -2459,6 +2459,8 @@ test('操作门槛置灰:冷组副本挡常驻,处理副本入口按组级出现
   assert.equal(el('forceBtn').title, evalIn(sandbox, 'T.forceCopiesFirst'));
   assert.equal(el('dedupeBtn').style.display, '', '选中体干净但兄弟成员有副本,入口也要出现');
   assert.equal(el('pauseBtn').disabled, true, '未整组加载不能暂停(既有门槛回归)');
+  assert.equal(el('clearVelBtn').disabled, true, '零加载成员不能清速度,冷体导流传送');
+  assert.equal(el('clearVelBtn').title, evalIn(sandbox, 'T.clearVelNeedsLoad'));
 
   evalIn(sandbox, "FORCED.add('U')");
   evalIn(sandbox, 'renderDetail')();
@@ -2468,6 +2470,13 @@ test('操作门槛置灰:冷组副本挡常驻,处理副本入口按组级出现
   evalIn(sandbox, 'renderDetail')();
   assert.equal(el('forceBtn').disabled, false, '整组已加载=运行证据齐,副本不再挡常驻');
   assert.equal(el('forceBtn').title, evalIn(sandbox, 'T.forceHint'));
+  assert.equal(el('clearVelBtn').disabled, false, '有已加载成员即可清速度(不要求整组加载)');
+
+  // 清除速度提交:单体按钮按选中体发,后端自己展开运行时闭包
+  evalIn(sandbox, "__submits = []; submitJob = async (r,o) => { __submits.push([r, JSON.parse(o.body)]); return {job:9}; }");
+  evalIn(sandbox, 'doClearVelocity')();
+  assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify(__submits)')),
+    [['/api/ops/clear_velocity', {uuids:['U']}]]);
 
   // 玩家传送按钮:players 异步回来不能把作业置灰覆写掉
   evalIn(sandbox, "PLAYERS = [{uuid:'p1',name:'P'}]; BUSY.set('U', {op:'传送', since:0})");

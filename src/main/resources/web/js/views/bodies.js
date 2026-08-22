@@ -870,6 +870,9 @@ function renderDetail(){
   const forceGated = !FORCED.has(b.uuid) && !fullyLoaded && !!g.dup;
   forceBtn.disabled = !!job || forceGated;
   forceBtn.title = forceGated ? T.forceCopiesFirst : T.forceHint;
+  const clearVelBtn = document.getElementById('clearVelBtn');
+  clearVelBtn.disabled = !!job || !g.loaded;
+  clearVelBtn.title = g.loaded ? T.clearVelTip : T.clearVelNeedsLoad;
   const autoRepairBtn = document.getElementById('autoRepairBtn');
   autoRepairBtn.textContent = AUTO_REPAIR_RUN ? T.autoRepairing : T.autoRepairGroup;
   autoRepairBtn.disabled = !!job || !!AUTO_REPAIR_RUN;

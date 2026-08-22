@@ -294,6 +294,12 @@ public final class PanelApiService {
             return enqueue(paused ? "暂停" : "恢复", uuids,
                     () -> this.ops.teleport().setPaused(uuids, paused));
         });
+        // 清除速度:整组线/角速度清零止停,只作用于已加载成员;冷体导流传送
+        this.routes.put("/api/ops/clear_velocity", request -> {
+            requirePost(request);
+            List<UUID> uuids = readUuids(request.jsonBody());
+            return enqueue("清除速度", uuids, () -> this.ops.teleport().clearVelocity(uuids));
+        });
         this.routes.put("/api/ops/force_load", request -> {
             requirePost(request);
             JsonObject body = request.jsonBody();

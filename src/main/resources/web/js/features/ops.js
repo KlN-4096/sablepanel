@@ -181,7 +181,11 @@ async function doFreezeSelected(frozen){
    取消时整组保存到磁盘并退出活动态;取消不清暂停/冻结意图(独立功能,下次加载重新生效)。
    返回值给自动修复等调用方拿 job seq 等终态。 */
 function setForcedBodies(uuids, forced){
-  return setBodyFlag('/api/ops/force_load', 'forced', uuids, forced, FORCED);
+  return setBodyFlag('/api/ops/force_load', 'forced', uuids, forced);
+}
+/* 整组清除线/角速度:止停被撞飞/持续漂移的组。只作用于已加载成员,冷体后端会导流传送 */
+function doClearVelocity(){
+  if (SEL) submitJob('/api/ops/clear_velocity', {method:'POST', body: JSON.stringify({uuids:[SEL.uuid]})});
 }
 /**
  * 整维度停跑/恢复物理 —— sable 自己的 setPaused,跳掉 Rapier3D.step 那一整段。
