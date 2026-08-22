@@ -22,6 +22,7 @@ import net.minecraft.server.MinecraftServer;
 
 import java.util.Map;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -350,22 +351,40 @@ public final class PanelRuntime implements AutoCloseable {
     }
 
     private void restoreForcedIntents(MinecraftServer server, PanelOps ops, long generation) {
-        List<UUID> pending = new java.util.ArrayList<>();
-        for (UUID uuid : com.klnon.sablepanel.panel.ops.ForceLoadService.requestedSnapshot()
-                .stream().sorted().toList()) {
-            if (!isLifecycleCurrent(generation)) return;
-            try {
-                boolean active = MainThread.onUntilComplete(server, () -> {
-                    boolean forced = com.klnon.sablepanel.panel.ops.ForceLoadService.isForcedOnMain(server, uuid);
-                    boolean loaded = com.klnon.sablepanel.panel.ops.ForceLoadService.isLoadedOnMain(server, uuid);
-                    if (forced && !loaded) com.klnon.sablepanel.panel.ops.ForceLoadService
-                            .detachNativeTicketsOnMain(server, List.of(uuid));
-                    return forced && loaded;
-                });
-                if (!active) pending.add(uuid);
-            } catch (Exception error) {
-                SablePanel.LOGGER.warn("sablepanel: checking force-load intent {} failed", uuid, error);
-            }
+        List<UUID> requested = com.klnon.sablepanel.panel.ops.ForceLoadService.requestedSnapshot()
+                .stream().sorted().toList();
+        if (requested.isEmpty() || !isLifecycleCurrent(generation)) {
+            if (requested.isEmpty()) this.failedForceRestore = null;
+            return;
+        }
+        List<UUID> pending;
+        try {
+            // 一次往返核对全部意图:逐个往返是 O(意图数) 次任务分发,且每 uuid 都全扫一遍票表
+            pending = MainThread.onUntilComplete(server, () -> {
+                Set<UUID> forced = com.klnon.sablepanel.panel.ops.ForceLoadService.forcedOnMain(server);
+                List<UUID> stale = new java.util.ArrayList<>();
+                for (UUID uuid : requested) {
+                    if (forced.contains(uuid)
+                            && com.klnon.sablepanel.panel.ops.ForceLoadService.isLoadedOnMain(server, uuid)) {
+                        continue;
+                    }
+                    if (forced.contains(uuid)) {
+                        try {
+                            com.klnon.sablepanel.panel.ops.ForceLoadService
+                                    .detachNativeTicketsOnMain(server, List.of(uuid));
+                        } catch (Throwable error) {
+                            SablePanel.LOGGER.warn(
+                                    "sablepanel: detaching stale force-load ticket {} failed", uuid, error);
+                            continue; // 与逐个时代同语义:剥不掉的这轮不进恢复,30 秒后再试
+                        }
+                    }
+                    stale.add(uuid);
+                }
+                return stale;
+            });
+        } catch (Exception error) {
+            SablePanel.LOGGER.warn("sablepanel: checking force-load intents failed", error);
+            return;
         }
         if (!pending.isEmpty() && isLifecycleCurrent(generation)) {
             long diskRevision = this.bodyIndex.diskRevision();
