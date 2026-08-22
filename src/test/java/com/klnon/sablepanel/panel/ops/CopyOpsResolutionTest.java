@@ -24,17 +24,52 @@ class CopyOpsResolutionTest {
     private final CopyVersionScanner.Version second = version("second");
 
     @Test
-    void unknownOrMixedCurrentStateCannotCreateAResolutionPlan() {
+    void coldSelectionUsesTheChosenVersionAsItsRollback() {
+        CopyOps.CopyResolutionPlan plan = CopyOps.requireCopyResolution(
+                scan(null, CopyVersionScanner.CurrentState.UNKNOWN), "first",
+                CopyOps.CopySelectionBasis.COLD);
+
+        assertEquals("first", plan.selected().id());
+        assertEquals("first", plan.rollback().id());
+    }
+
+    @Test
+    void ambiguousRuntimeCurrentStateCannotCreateAResolutionPlan() {
         assertThrows(IllegalStateException.class, () -> CopyOps.requireCopyResolution(
-                scan(null, CopyVersionScanner.CurrentState.UNKNOWN), "first", false));
+                scan(null, CopyVersionScanner.CurrentState.MIXED), "first",
+                CopyOps.CopySelectionBasis.LIVE));
+    }
+
+    @Test
+    void holdingOnlyEvidenceUsesTheKnownCurrentVersionAsRollback() {
+        CopyOps.CopyResolutionPlan plan = CopyOps.requireCopyResolution(
+                scan("first", CopyVersionScanner.CurrentState.KNOWN), "second",
+                CopyOps.CopySelectionBasis.POINTED);
+
+        assertEquals("second", plan.selected().id());
+        assertEquals("first", plan.rollback().id());
+    }
+
+    @Test
+    void coldOrHoldingOnlyResolutionRejectsChangedOrAmbiguousEvidence() {
+        CopyVersionScanner.Scan evidenceAppeared = new CopyVersionScanner.Scan(
+                this.target, Set.of(this.target), List.of(version("first", 1, key(0))), List.of(),
+                "first", CopyVersionScanner.CurrentState.KNOWN, 1);
+        CopyVersionScanner.Scan pointedUnknown = new CopyVersionScanner.Scan(
+                this.target, Set.of(this.target), List.of(version("first", 1, key(0))), List.of(),
+                null, CopyVersionScanner.CurrentState.UNKNOWN, 1);
+
         assertThrows(IllegalStateException.class, () -> CopyOps.requireCopyResolution(
-                scan(null, CopyVersionScanner.CurrentState.MIXED), "first", false));
+                evidenceAppeared, "first", CopyOps.CopySelectionBasis.COLD));
+        assertThrows(IllegalStateException.class, () -> CopyOps.requireCopyResolution(
+                pointedUnknown, "first", CopyOps.CopySelectionBasis.POINTED));
     }
 
     @Test
     void authoritativeRescanRejectsAStaticVersionThatNoLongerExists() {
         assertThrows(IllegalStateException.class, () -> CopyOps.requireCopyResolution(
-                scan("first", CopyVersionScanner.CurrentState.KNOWN), "vanished", false));
+                scan("first", CopyVersionScanner.CurrentState.KNOWN), "vanished",
+                CopyOps.CopySelectionBasis.STATIC));
     }
 
     /**
@@ -51,7 +86,8 @@ class CopyOpsResolutionTest {
                 List.of(version("moved", 1, key(7)), version("stale", 0, key(3))), List.of(),
                 "moved", CopyVersionScanner.CurrentState.KNOWN, 1);
 
-        CopyOps.CopyResolutionPlan plan = CopyOps.requireCopyResolution(authoritative, "vanished", true);
+        CopyOps.CopyResolutionPlan plan = CopyOps.requireCopyResolution(
+                authoritative, "vanished", CopyOps.CopySelectionBasis.LIVE);
 
         assertEquals("moved", plan.selected().id());
     }
@@ -60,10 +96,30 @@ class CopyOpsResolutionTest {
     @Test
     void aStaticSelectionSurvivesTheFlushByItsId() {
         CopyOps.CopyResolutionPlan plan = CopyOps.requireCopyResolution(
-                scan("first", CopyVersionScanner.CurrentState.KNOWN), "second", false);
+                scan("first", CopyVersionScanner.CurrentState.KNOWN), "second",
+                CopyOps.CopySelectionBasis.STATIC);
 
         assertEquals("second", plan.selected().id());
         assertEquals("first", plan.rollback().id());
+    }
+
+    @Test
+    void coldDeleteLoadsTheExplicitlySelectedCopyInsteadOfTheLexicalDefault() {
+        DiskScanner.EntryKey oldKey = key(0);
+        DiskScanner.EntryKey selectedKey = key(1);
+        DeleteTx.DeleteCopy oldCopy = new DeleteTx.DeleteCopy(oldKey, new CompoundTag(), 1, List.of());
+        DeleteTx.DeleteCopy selectedCopy = new DeleteTx.DeleteCopy(
+                selectedKey, new CompoundTag(), 1, List.of());
+        DeleteTx.DeleteComponent component = new DeleteTx.DeleteComponent();
+        component.addTarget(this.target, List.of(oldCopy, selectedCopy));
+        component.canonical.put(this.target, oldCopy);
+        CopyVersionScanner.Version selected = new CopyVersionScanner.Version("selected", true, 0,
+                List.of(new CopyVersionScanner.Copy(this.target, selectedKey,
+                        selectedCopy.tag(), 1, List.of())), List.of(), List.of(), Set.of());
+
+        CopyOps.preferSelectedCopies(component, selected);
+
+        assertEquals(selectedKey, component.canonical.get(this.target).key());
     }
 
     @Test
@@ -74,7 +130,8 @@ class CopyOpsResolutionTest {
                 List.of(repairable, this.second), List.of(), "repairable",
                 CopyVersionScanner.CurrentState.KNOWN, 1);
 
-        CopyOps.CopyResolutionPlan plan = CopyOps.requireCopyResolution(scan, "repairable", true);
+        CopyOps.CopyResolutionPlan plan = CopyOps.requireCopyResolution(
+                scan, "repairable", CopyOps.CopySelectionBasis.LIVE);
 
         assertFalse(CopyOps.preSaveAllowed(scan), "可修复路径不能触发任何删除前 saveAll");
         assertEquals("repairable", plan.selected().id());

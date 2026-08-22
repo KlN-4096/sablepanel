@@ -59,6 +59,16 @@ class DeleteTxSnapshotTest {
     }
 
     @Test
+    void coldOperationalGateRejectsATargetLoadedAfterPreparation() {
+        UUID other = UUID.randomUUID();
+
+        assertDoesNotThrow(() -> DeleteTx.requireColdTargetsUnloaded(
+                Set.of(this.target, other), ignored -> false));
+        assertThrows(IllegalStateException.class, () -> DeleteTx.requireColdTargetsUnloaded(
+                Set.of(this.target, other), uuid -> uuid.equals(other)));
+    }
+
+    @Test
     void diskGateCanTrackAnExternalHistoricalMemberWithoutDeletingIt() {
         UUID external = UUID.randomUUID();
         CompoundTag tag = new CompoundTag();

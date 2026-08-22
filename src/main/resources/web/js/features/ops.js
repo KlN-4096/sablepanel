@@ -297,7 +297,8 @@ function autoRepairCopyDecision(scan){
     EVIDENCE_SPLIT:T.copyCurrentMixed,
     EVIDENCE_STRAY:T.copyEvidenceStray,
     EVIDENCE_AMBIGUOUS:T.copyEvidenceAmbiguous,
-    NOT_LOADED:T.copyCurrentUnknown,
+    COLD_SELECT:T.copyColdSelectHint,
+    RUNTIME_UNPROVEN:T.copyRuntimeUnproven,
     QUARANTINE_ONLY:T.autoRepairNoVersion,
     NOTHING_TO_DO:T.autoRepairNoVersion,
   })[verdict.kind] || T.copyCurrentUnknown;

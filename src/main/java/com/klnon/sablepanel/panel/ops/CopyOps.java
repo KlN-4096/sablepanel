@@ -42,13 +42,18 @@ public final class CopyOps {
                               CopyVersionScanner.Version rollback) {
     }
 
+    enum CopySelectionBasis {
+        COLD, POINTED, LIVE, STATIC
+    }
+
     private record CopyInspection(CopyVersionScanner.Scan scan, Set<UUID> diskMembers,
                                   Set<UUID> runtimeMembers, Set<UUID> externalMembers,
                                   Map<UUID, String> activeEntries, String runtimeVersion) {
     }
 
     private record PreparedCopyResolution(DeleteTx.DeleteComponent component, CopyVersionScanner.Scan scan,
-                                          Map<UUID, RecycleStore.OperationalState> states, boolean live,
+                                          Map<UUID, RecycleStore.OperationalState> states,
+                                          CopySelectionBasis basis,
                                           String runtimeVersion,
                                           Map<UUID, OpKit.RuntimeSnapshot> runtimeSnapshots,
                                           List<DeleteTx.DependencyRewrite> externalRewrites) {
@@ -118,16 +123,25 @@ public final class CopyOps {
      * 所以活着那份只能靠运行证据认领,不能靠 id 也不能靠槽位。
      * <p>
      * 没人写的静态副本两者都稳定(同一轮里另两份纹丝不动),照旧按内容哈希找回。
+     * 整组未加载且没有活动证据时，用户显式选择的完整版本同时作为失败回滚基准。
      */
     static CopyResolutionPlan requireCopyResolution(CopyVersionScanner.Scan scan, String versionId,
-                                                    boolean live) {
+                                                    CopySelectionBasis basis) {
+        if (basis == CopySelectionBasis.COLD) {
+            if (scan.activeMembers() != 0) {
+                throw new IllegalStateException("副本活动证据在处理期间发生变化，请重新扫描");
+            }
+            CopyVersionScanner.Version selected = requireSelectableVersion(scan, versionId);
+            return new CopyResolutionPlan(selected, selected);
+        }
         if (scan.currentState() != CopyVersionScanner.CurrentState.KNOWN || scan.currentVersion() == null) {
             String reason = scan.currentState() == CopyVersionScanner.CurrentState.MIXED
                     ? "运行态证据横跨多个副本版本" : "没有足够运行态证据判定当前版本";
             throw new IllegalStateException(reason + "，未执行副本处理");
         }
         CopyVersionScanner.Version rollback = requireSelectableVersion(scan, scan.currentVersion());
-        return new CopyResolutionPlan(live ? rollback : requireSelectableVersion(scan, versionId), rollback);
+        return new CopyResolutionPlan(basis == CopySelectionBasis.LIVE
+                ? rollback : requireSelectableVersion(scan, versionId), rollback);
     }
 
     private static Map<UUID, String> activeEntries(JsonObject runtime, Collection<UUID> members) {
@@ -226,8 +240,15 @@ public final class CopyOps {
             throws Exception {
         // flush 之前判定:那之后活着那份的 id 和槽位都不再是用户看到的那一个
         CopyInspection initial = inspectVersionState(uuid, warnings);
-        CopyVersionScanner.Version requested = requireSelectableVersion(initial.scan(), versionId);
-        boolean live = versionId.equals(initial.scan().currentVersion());
+        requireSelectableVersion(initial.scan(), versionId);
+        CopySelectionBasis basis;
+        if (initial.runtimeMembers().isEmpty()) {
+            basis = initial.scan().activeMembers() == 0
+                    ? CopySelectionBasis.COLD : CopySelectionBasis.POINTED;
+        } else {
+            basis = versionId.equals(initial.scan().currentVersion())
+                    ? CopySelectionBasis.LIVE : CopySelectionBasis.STATIC;
+        }
         boolean allowPreSave = initial.runtimeMembers().isEmpty() && preSaveAllowed(initial.scan());
         ScanSession scan = this.kit.strictScan(warnings);
         Set<UUID> diskMembers = CopyVersionScanner.members(scan.meta(), uuid);
@@ -243,7 +264,7 @@ public final class CopyOps {
             throw new IllegalStateException("副本依赖组缺少可读取的磁盘条目，未执行副本处理");
         }
         component.diskMembersSnapshot = Set.copyOf(diskMembers);
-        if (!initial.runtimeMembers().isEmpty()) component.runtimeMembersSnapshot = Set.copyOf(members);
+        component.runtimeMembersSnapshot = Set.copyOf(initial.runtimeMembers());
 
         JsonObject runtime = this.kit.readOperationalMetadata(members);
         Map<UUID, String> active = activeEntries(runtime, members);
@@ -264,6 +285,9 @@ public final class CopyOps {
         }
         CopyVersionScanner.Scan versions = CopyVersionScanner.assemble(
                 uuid, members, copies, active, !initial.runtimeMembers().isEmpty());
+        if (basis == CopySelectionBasis.COLD) {
+            preferSelectedCopies(component, requireSelectableVersion(versions, versionId));
+        }
         CopyVersionScanner.Version runtimeVersion = initial.runtimeMembers().isEmpty()
                 ? null : CopyVersionScanner.runtimeCandidate(versions, active);
         Map<UUID, OpKit.RuntimeSnapshot> runtimeSnapshots = runtimeVersion == null
@@ -271,8 +295,17 @@ public final class CopyOps {
         List<DeleteTx.DependencyRewrite> externalRewrites = initial.externalMembers().isEmpty()
                 ? List.of() : this.tx.prepareDependencyRewrites(scan, members, warnings).stream()
                 .filter(rewrite -> initial.externalMembers().contains(rewrite.uuid())).toList();
-        return new PreparedCopyResolution(component, versions, states, live,
+        return new PreparedCopyResolution(component, versions, states, basis,
                 runtimeVersion == null ? null : runtimeVersion.id(), runtimeSnapshots, externalRewrites);
+    }
+
+    static void preferSelectedCopies(DeleteTx.DeleteComponent component, CopyVersionScanner.Version selected) {
+        for (CopyVersionScanner.Copy copy : selected.copies()) {
+            DeleteTx.DeleteCopy prepared = component.copies.getOrDefault(copy.uuid(), List.of()).stream()
+                    .filter(candidate -> candidate.key().equals(copy.key())).findFirst()
+                    .orElseThrow(() -> new IllegalStateException("所选副本在准备期间发生变化: " + copy.uuid()));
+            component.canonical.put(copy.uuid(), prepared);
+        }
     }
 
     static boolean preSaveAllowed(CopyVersionScanner.Scan scan) {
@@ -288,7 +321,7 @@ public final class CopyOps {
         List<String> warnings = new ArrayList<>();
         PreparedCopyResolution prepared = prepareCopyResolution(uuid, versionId, warnings);
         CopyVersionScanner.Scan scan = prepared.scan();
-        CopyResolutionPlan plan = requireCopyResolution(scan, versionId, prepared.live());
+        CopyResolutionPlan plan = requireCopyResolution(scan, versionId, prepared.basis());
         CopyVersionScanner.Version selected = plan.selected();
         CopyVersionScanner.Version rollbackVersion = plan.rollback();
         DeleteTx.DeleteComponent component = prepared.component();

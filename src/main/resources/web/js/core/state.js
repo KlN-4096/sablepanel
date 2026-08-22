@@ -13,7 +13,7 @@ let R_TAB = 'latest';
 let refreshTimer = 60;
 const CHART_PRESETS = [[300,'5 分钟'],[900,'15 分钟']];
 let CHART = {span:300,hoverIndex:-1,hoverTime:null};
-let COPY_SCAN = null, COPY_UUID = null, COPY_VERSION = null, COPY_WAKE_SEQ = null, MANUAL_TAB = 'states';
+let COPY_SCAN = null, COPY_UUID = null, COPY_VERSION = null, MANUAL_TAB = 'states';
 
 /* 集群:同机多服共用 apiPort,顶栏切换;CURSRV 为空表示"本机 HOST 自己" */
 let SERVERS = [], SERVERS_ERROR = '', CURSRV = localStorage.getItem('spServer') || '';

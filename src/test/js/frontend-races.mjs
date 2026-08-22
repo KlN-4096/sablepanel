@@ -2068,11 +2068,11 @@ test('UI-02 旧会话的改口令响应不能覆盖新登录凭据', async () =>
 /* 夹具形状取自 2026-08-09 实机抓取的真实 payload:J-15 唤醒前后(f4fc6f21)与
    糖音气球 192 组(e9115a33),字段名以 CopyOps.copyVersionsJson 为准 */
 const verdictFixtures = () => ({
-  notLoaded: { uuid:'U', current_state:'unknown', members:1, active_members:0,
+  notLoaded: { uuid:'U', current_state:'unknown', members:1, runtime_members:0, active_members:0,
     versions:[{id:'v608',complete:true,members:1,active_members:0,blocks:608},
               {id:'v592a',complete:true,members:1,active_members:0,blocks:592},
               {id:'v592b',complete:true,members:1,active_members:0,blocks:592}], incomplete:[] },
-  known: { uuid:'U', current_state:'known', current_version:'v608', members:1, active_members:1,
+  known: { uuid:'U', current_state:'known', current_version:'v608', members:1, runtime_members:1, active_members:1,
     versions:[{id:'v608',complete:true,members:1,active_members:1,blocks:608,current:true},
               {id:'v592a',complete:true,members:1,active_members:0,blocks:592},
               {id:'v592b',complete:true,members:1,active_members:0,blocks:592}], incomplete:[] },
@@ -2082,7 +2082,9 @@ test('copyVerdict 判定表:八个终态各归各位', async () => {
   const { sandbox } = setup();
   const verdict = fixture => evalIn(sandbox, 'copyVerdict')(fixture);
   const f = verdictFixtures();
-  assert.equal(verdict(f.notLoaded).kind, 'NOT_LOADED', '零运行证据 = 体没加载');
+  assert.equal(verdict(f.notLoaded).kind, 'COLD_SELECT', '零运行证据时应允许显式选择磁盘版本');
+  assert.equal(verdict({...f.notLoaded, runtime_members:1}).kind, 'RUNTIME_UNPROVEN',
+    '已加载但尚无活动指针时不能冒充冷存档');
   const clean = verdict(f.known);
   assert.deepEqual([clean.kind, clean.pick, clean.removed], ['READY_CLEAN', 'v608', 0],
     '证据收敛且移出 0');
@@ -2362,70 +2364,34 @@ test('副本预览提示随 dialog 进入顶层，迁移时清掉旧提示', asy
   assert.equal(evalIn(sandbox, "document.getElementById('hoverTip').style.display"), 'none');
 });
 
-test('副本对话框:未加载 → 一键唤醒 → 作业结束自动重扫并自动选中', async () => {
+test('副本对话框:未加载时直接选择磁盘版本，不再依赖常驻加载', async () => {
   const { sandbox, state } = setup();
   const f = verdictFixtures();
-  let scanPhase = 'cold', jobsPhase = 'running';
   state.fetch = async (url) => {
-    if (url.includes('/copies')) return jsonResponse(scanPhase === 'cold' ? f.notLoaded : f.known);
+    if (url.includes('/copies')) return jsonResponse(f.notLoaded);
     if (url.includes('/copy/')) return meshResponse();
-    if (url.startsWith('/api/ops/force_load')) return jsonResponse({ ok:true, accepted:true, job:9, op:'常驻加载' });
-    if (url.startsWith('/api/jobs')) return jsonResponse(jobsPhase === 'running'
-      ? { running: [{seq:9, op:'常驻加载', targets:['U'], started_at:1}], log: [] }
-      : { running: [], log: [{seq:9, op:'常驻加载', state:'done', outcome:'ok'}] });
     if (url.startsWith('/api/bodies')) return bodiesResponse();
     return jsonResponse({});
   };
-  evalIn(sandbox, "authenticated = true; toast = () => {}; SEL = {uuid:'U'}; renderDetail = () => {}");   // 详情面板要 SELG 全套字段,不是本例被测物
+  evalIn(sandbox, `
+    authenticated = true; toast = () => {}; SEL = {uuid:'U'}; renderDetail = () => {};
+    __submitted = []; askModal = async () => true;
+    submitJob = async route => { __submitted.push(route); return null; };
+  `);
   await evalIn(sandbox, 'openDedupe')();
   await tick();
   const panelBody = () => evalIn(sandbox, "document.getElementById('copyPanelBody').innerHTML");
-  assert.ok(panelBody().includes('wakeDedupeTarget'), 'NOT_LOADED 必须给出唤醒按钮');
+  assert.ok(!panelBody().includes('wakeDedupeTarget'), '冷存档不能再要求先常驻加载');
   assert.equal(evalIn(sandbox, "document.getElementById('dedupeConfirm').disabled"), true);
 
-  scanPhase = 'warm';                                     // 唤醒之后服务端将给出 known
-  await evalIn(sandbox, 'wakeDedupeTarget')();
+  await evalIn(sandbox, 'selectCopyVersion')('v608');
   await tick();
-  assert.equal(evalIn(sandbox, 'COPY_WAKE_SEQ'), 9, '唤醒作业的 seq 要记下来');
-  assert.ok(evalIn(sandbox, "document.getElementById('copyPanelStatus').textContent").includes('唤醒中'));
-  assert.ok(!panelBody().includes('wakeDedupeTarget'), '唤醒中不能再给按钮重复提交');
-
-  jobsPhase = 'done';
-  await evalIn(sandbox, 'pollJobs')();                    // 收割终态 → 自动重扫
-  await tick(); await tick();
-  assert.equal(evalIn(sandbox, 'COPY_WAKE_SEQ'), null);
-  assert.equal(evalIn(sandbox, 'COPY_VERSION'), 'v608', 'READY_CLEAN 自动选中当前版本');
-  assert.equal(evalIn(sandbox, "document.getElementById('dedupeConfirm').disabled"), false, '确认可点');
-  // 弹层开合判定换 <dialog>.open 后这里曾静默失守:isCurrent 恒假,mesh 一个请求都不发,
-  // 预览停在"加载预览…"。断言选中版本的 mesh 真的落了地,别再只看选中态
-  await tick();
-  assert.equal(evalIn(sandbox, 'MESH_SOURCE'), 'copy:v608', '选中版本后副本 mesh 必须真的加载落地');
+  assert.equal(evalIn(sandbox, "document.getElementById('dedupeConfirm').disabled"), false, '手选后确认可点');
+  await evalIn(sandbox, 'confirmDedupe')();
+  assert.equal(evalIn(sandbox, '__submitted.join()'), '/api/body/U/resolve_copies');
 });
 
-test('唤醒作业快到首轮轮询就终态时也不能卡在"唤醒中"', async () => {
-  const { sandbox, state } = setup();
-  const f = verdictFixtures();
-  let scanPhase = 'cold';
-  state.fetch = async (url) => {
-    if (url.includes('/copies')) return jsonResponse(scanPhase === 'cold' ? f.notLoaded : f.known);
-    if (url.includes('/copy/')) return meshResponse();
-    if (url.startsWith('/api/ops/force_load')) return jsonResponse({ ok:true, job:3 });
-    if (url.startsWith('/api/jobs')) return jsonResponse({ running: [],
-      log: [{seq:3, state:'done', outcome:'ok', op:'常驻加载'}] });
-    if (url.startsWith('/api/bodies')) return bodiesResponse();
-    return jsonResponse({});
-  };
-  evalIn(sandbox, "authenticated = true; toast = () => {}; SEL = {uuid:'U'}; renderDetail = () => {}");   // 详情面板要 SELG 全套字段,不是本例被测物
-  await evalIn(sandbox, 'openDedupe')();
-  await tick();
-  scanPhase = 'warm';
-  await evalIn(sandbox, 'wakeDedupeTarget')();            // submitJob 内部首轮轮询就收割了 seq 3
-  await tick(); await tick();
-  assert.equal(evalIn(sandbox, 'COPY_WAKE_SEQ'), null, '收割先于 WAKE_SEQ 赋值时要自己补一次重扫');
-  assert.equal(evalIn(sandbox, 'COPY_VERSION'), 'v608');
-});
-
-test('唤醒重扫回来不抢用户已手选的版本', async () => {
+test('副本重新扫描回来不抢用户已手选的版本', async () => {
   const { sandbox, state } = setup();
   const f = verdictFixtures();
   state.fetch = async (url) => {

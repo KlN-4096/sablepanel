@@ -245,7 +245,6 @@ function reapFinishedJobs(log){
     if (job.op === '回收站恢复' || job.op === '回收站彻底删除') refreshRecycle = true;
   }
   if (refreshRecycle) loadRecycle();
-  dedupeJobsFinished(finished);   // 副本对话框的唤醒作业结束 → 自动重扫(dedupe.js)
   return true;
 }
 function reselect(uuid){

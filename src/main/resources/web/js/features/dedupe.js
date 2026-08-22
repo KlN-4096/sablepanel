@@ -2,13 +2,14 @@
 /* 完整依赖组副本选择:只读扫描/预览，确认后交给后台事务切换。 */
 
 /* 副本处置的唯一判定入口:页面只读它的返回值,不再各处自己拼 current_state/active_members。
-   终态表见 docs/tasks/copy-verdict-frontend.md。分界是用户 2026-08-07 拍板的:
+   终态表见 docs/archive/copy-verdict-frontend.md。分界是用户 2026-08-07 拍板的:
    只有 READY_CLEAN(移出=0,零损失)自动选中;READY_WITH_LOSS 那道"看移出数字"的视线不能省。 */
 function copyVerdict(scan){
   const versions   = scan.versions || [];
   const selectable = versions.filter(v => v.complete || v.repairable_current);
   const incomplete = (scan.incomplete || []).length;
   const evidence   = scan.active_members || 0;   // 全组有运行时活动指针的成员数
+  const runtime    = scan.runtime_members || 0;
   const total      = scan.members || 0;
 
   // ① 没有任何完整候选 —— 只能隔离,不能设主版本
@@ -32,7 +33,8 @@ function copyVerdict(scan){
 
   // ④ unknown 分两种,可行动性完全不同
   if (evidence === 0)
-    return {kind:'NOT_LOADED'};                  // 体没加载 → 有明确出路(唤醒)
+    return runtime === 0 ? {kind:'COLD_SELECT'}  // 冷存档由用户显式选择完整磁盘版本
+      : {kind:'RUNTIME_UNPROVEN'};
 
   // 有指针,但没落在唯一一个完整版本上
   const best = Math.max(...selectable.map(v => v.active_members || 0));
@@ -42,7 +44,7 @@ function copyVerdict(scan){
 async function openDedupe(){
   if (!SEL) return;
   const uuid = SEL.uuid;
-  COPY_UUID = uuid; COPY_SCAN = null; COPY_VERSION = null; COPY_WAKE_SEQ = null;
+  COPY_UUID = uuid; COPY_SCAN = null; COPY_VERSION = null;
   document.getElementById('copyBack').showModal();
   document.getElementById('copyPanelBody').innerHTML = `<div class="empty">${T.dedupeScanning}</div>`;
   document.getElementById('copyPanelStatus').textContent = '';
@@ -56,7 +58,7 @@ async function openDedupe(){
   resizeGL();
   return loadDedupeScan(uuid);
 }
-/* openDedupe 首扫与唤醒后的重扫共用;load('copies') 的序号会丢弃过期响应 */
+/* openDedupe 首扫与后续重扫共用;load('copies') 的序号会丢弃过期响应 */
 function loadDedupeScan(uuid){
   return load('copies', () => api(`/api/body/${uuid}/copies`), result => {
     if (COPY_UUID !== uuid || result.uuid !== uuid) return;
@@ -70,27 +72,6 @@ function loadDedupeScan(uuid){
     document.getElementById('copyPanelBody').innerHTML = `<div class="empty" style="color:var(--bad)">${esc(message)}</div>`;
     document.getElementById('copyPanelStatus').textContent = T.dedupeFail + message;
   });
-}
-/* NOT_LOADED 的出口:一键常驻加载(后端自动整组展开并自然运行),作业结束后自动重扫。
-   与列表入口同一条路:断链残骸确认流 + setForcedBodies 的乐观更新一并生效。 */
-async function wakeDedupeTarget(){
-  if (!COPY_UUID || COPY_WAKE_SEQ !== null) return;
-  const uuid = COPY_UUID;
-  const group = typeof BODY_BY_UUID !== 'undefined' && BODY_BY_UUID.get(uuid)?.g;
-  if (group && !await dropDetachedBefore(group)) return;
-  if (COPY_UUID !== uuid) return;   // 确认框挂起期间可能已换体/关弹层
-  const r = await setForcedBodies([uuid], true);
-  if (!r || !r.job || COPY_UUID !== uuid) return;
-  COPY_WAKE_SEQ = r.job;
-  // 快作业可能在 submitJob 内部的首轮轮询就已终态:那一轮收割看不到 WAKE_SEQ,这里自己补
-  if (!JOB_WATCH.has(r.job) && !ACTIVE_JOBS.some(job => job.seq === r.job)) return dedupeJobsFinished([r.job]);
-  if (COPY_SCAN) renderDedupe(COPY_SCAN);
-}
-/* data.js 的 reapFinishedJobs 每轮把到达终态的 seq 递过来 */
-function dedupeJobsFinished(finished){
-  if (COPY_WAKE_SEQ === null || !finished.includes(COPY_WAKE_SEQ)) return;
-  COPY_WAKE_SEQ = null;
-  if (COPY_UUID) loadDedupeScan(COPY_UUID);
 }
 function renderDedupe(scan){
   const versions = scan.versions || [];
@@ -135,23 +116,23 @@ function renderDedupe(scan){
   const verdict = copyVerdict(scan);
   const notice = ({
     EVIDENCE_SPLIT: `<div class="copyWarning">${T.copyCurrentMixed}</div>`,
-    NOT_LOADED: `<div class="copyWarning">${T.copyNotLoadedHint} ${COPY_WAKE_SEQ!==null
-      ? esc(T.copyWaking)
-      : `<button onclick="wakeDedupeTarget()" title="${esc(T.copyWakeRisk)}">${T.copyWakeBtn}</button>`}</div>`,
+    COLD_SELECT: `<div class="copyWarning">${T.copyColdSelectHint}</div>`,
+    RUNTIME_UNPROVEN: `<div class="copyWarning">${T.copyRuntimeUnproven}</div>`,
     EVIDENCE_STRAY: `<div class="copyWarning">${T.copyEvidenceStray}</div>`,
     EVIDENCE_AMBIGUOUS: `<div class="copyWarning">${T.copyEvidenceAmbiguous}</div>`,
   })[verdict.kind] || '';
   document.getElementById('copyPanelBody').innerHTML = `<div class="copySummary">${T.copyGroupSummary(scan.members||0,versions.length)}</div>${notice}${runtimeDiagnostic}${warning}${rows||raw||`<div class="empty">${T.dedupeSingle}</div>`}${copySelectionDetails(scan,selected)}`;
   const confirm = document.getElementById('dedupeConfirm');
   confirm.disabled = verdict.kind==='QUARANTINE_ONLY' ? false
-    : !['READY_CLEAN','READY_WITH_LOSS','READY_REPAIR'].includes(verdict.kind)
+    : !['READY_CLEAN','READY_WITH_LOSS','READY_REPAIR','COLD_SELECT'].includes(verdict.kind)
       || !selected || (!selected.complete && !selected.repairable_current);
   confirm.textContent = verdict.kind==='QUARANTINE_ONLY' ? T.copyQuarantineAll : T.dedupeConfirm;
   const status = ({
     READY_CLEAN: scan.runtime_current===verdict.pick ? T.copyRuntimeReady : T.copyReadyClean,
     READY_WITH_LOSS: T.copyReadyLoss(verdict.removed),
     READY_REPAIR: T.copyReadyRepair(verdict.missing,verdict.removed),
-    NOT_LOADED: COPY_WAKE_SEQ!==null ? T.copyWaking : T.copyCurrentUnknown,
+    COLD_SELECT: T.copyColdSelectHint,
+    RUNTIME_UNPROVEN: T.copyRuntimeUnproven,
     EVIDENCE_STRAY: T.copyEvidenceStray,
     EVIDENCE_AMBIGUOUS: T.copyEvidenceAmbiguous,
     EVIDENCE_SPLIT: T.copyCurrentMixed,
@@ -190,7 +171,7 @@ function selectCopyVersion(versionId){
 function closeDedupe(restorePreview = true){
   document.getElementById('copyBack').close();
   movePreviewTo('bodyPreviewHost');
-  COPY_SCAN = null; COPY_UUID = null; COPY_VERSION = null; COPY_WAKE_SEQ = null;
+  COPY_SCAN = null; COPY_UUID = null; COPY_VERSION = null;
   document.getElementById('copyPreviewNote').textContent = '';
   document.getElementById('copyComp').innerHTML = '';
   resizeGL();
@@ -207,7 +188,9 @@ async function confirmDedupe(){
     return;
   }
   if (!COPY_VERSION) return;
-  if (COPY_SCAN.current_state!=='known' || !COPY_SCAN.current_version) {
+  const coldSelection = COPY_SCAN.current_state==='unknown'
+    && (COPY_SCAN.runtime_members||0)===0 && (COPY_SCAN.active_members||0)===0;
+  if (!coldSelection && (COPY_SCAN.current_state!=='known' || !COPY_SCAN.current_version)) {
     toast(COPY_SCAN.current_state==='mixed'?T.copyCurrentMixed:T.copyCurrentUnknown,'bad');
     return;
   }

@@ -483,7 +483,11 @@ final class DeleteTx {
     /** 主线程(执行块内):确认快照的运行态校验 —— active 指针/暂停/常驻只能在主线程读 */
     void validateOperationalSnapshotOnMain(DeleteComponent component) {
         if (component.runtimeMembersSnapshot != null) {
-            this.kit.requireLoadedDependencyGroupOnMain(component.runtimeMembersSnapshot);
+            if (component.runtimeMembersSnapshot.isEmpty()) {
+                requireColdTargetsUnloaded(component.targets, uuid -> this.kit.resolveLoaded(uuid) != null);
+            } else {
+                this.kit.requireLoadedDependencyGroupOnMain(component.runtimeMembersSnapshot);
+            }
         }
         Map<UUID, RecycleStore.OperationalState> currentStates = new LinkedHashMap<>();
         for (UUID uuid : component.targets) {
@@ -494,6 +498,13 @@ final class DeleteTx {
         requireUnchangedOperationalSnapshot(
                 new OperationalSnapshot(component.activeSnapshot, component.states),
                 new OperationalSnapshot(this.kit.activeEntriesOnMain(component.targets), currentStates));
+    }
+
+    static void requireColdTargetsUnloaded(Collection<UUID> targets,
+                                           java.util.function.Predicate<UUID> loaded) {
+        if (targets.stream().anyMatch(loaded)) {
+            throw new IllegalStateException("物理组在确认期间已经加载，请重新扫描");
+        }
     }
 
     static void requireUnchangedDiskSnapshot(DiskSnapshot expected, DiskSnapshot current) {
