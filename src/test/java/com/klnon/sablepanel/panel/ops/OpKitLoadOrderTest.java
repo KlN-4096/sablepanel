@@ -1,5 +1,6 @@
 package com.klnon.sablepanel.panel.ops;
 
+import com.google.gson.JsonObject;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.ChunkPos;
 import dev.ryanhcode.sable.sublevel.storage.holding.GlobalSavedSubLevelPointer;
@@ -384,6 +385,42 @@ class OpKitLoadOrderTest {
         assertTrue(OpKit.samePointer(selected, selected));
         assertFalse(OpKit.samePointer(selected, current));
         assertFalse(OpKit.samePointer(selected, null));
+    }
+
+    @Test
+    void perGroupTransactionTakesOnlyTheComponentButSharesThePlans() {
+        UUID first = UUID.randomUUID();
+        UUID member = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        Map<UUID, OpKit.MemberPlan> plans = Map.of(first,
+                new OpKit.MemberPlan(meta(0, List.of()).key(), new CompoundTag(), null));
+        var all = new OpKit.DependencySelection(List.of(first, second), List.of(first, member, second),
+                List.of(Set.of(first, member), Set.of(second)), plans);
+
+        var group = TeleportOps.componentSelection(all, Set.of(first, member));
+
+        assertEquals(List.of(first), group.roots());
+        assertEquals(Set.of(first, member), Set.copyOf(group.members()));
+        assertEquals(List.of(Set.of(first, member)), group.components());
+        assertEquals(plans, group.plans());
+    }
+
+    @Test
+    void bulkForceOutcomeSeparatesPartialFromTotalFailure() {
+        UUID survivor = UUID.randomUUID();
+        JsonObject allOk = TeleportOps.forcedBatchResponse(false, 2, 2, List.of(survivor), List.of());
+        JsonObject partial = TeleportOps.forcedBatchResponse(
+                false, 2, 2, List.of(survivor), List.of("组[a]: 运行组变化"));
+        JsonObject allFailed = TeleportOps.forcedBatchResponse(
+                false, 2, 2, List.of(), List.of("组[a]: 运行组变化", "组[b]: 根成员不存在"));
+
+        assertEquals("ok", JobService.outcomeOf(allOk));
+        assertEquals("partial", JobService.outcomeOf(partial));
+        assertEquals("fail", JobService.outcomeOf(allFailed));
+        // 周期恢复的失败闩靠异常升格:部分失败不抛,失败组会被每 30 秒无谓重试
+        assertDoesNotThrow(() -> TeleportOps.requireForcedGroupsSucceeded(allOk));
+        assertThrows(IllegalStateException.class,
+                () -> TeleportOps.requireForcedGroupsSucceeded(partial));
     }
 
     @Test

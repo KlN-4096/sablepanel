@@ -47,9 +47,6 @@ public final class TeleportOps {
     record ForceTicketPlan(Set<UUID> keep, Set<UUID> release) {
     }
 
-    private record ForceEnableResult(JsonObject response, List<UUID> members) {
-    }
-
     record TicketRef(UUID uuid, String dimension) {
     }
 
@@ -226,7 +223,8 @@ public final class TeleportOps {
     public void restoreForcedIntents(List<UUID> candidates) throws Exception {
         restoreForcedIntentGroups(this.kit.lock, this.kit.forceLoadIntentGroups(candidates),
                 ForceLoadService::requestedSnapshot,
-                current -> setForcedExclusive(current, true), ForceLoadService::persist);
+                current -> requireForcedGroupsSucceeded(setForcedExclusive(current, true)),
+                ForceLoadService::persist);
     }
 
     static void restoreForcedIntents(Object lock, Collection<UUID> candidates,
@@ -280,22 +278,75 @@ public final class TeleportOps {
         OpKit.DependencySelection selection = forced
                 ? this.kit.forceLoadCandidates(requested)
                 : this.kit.forcedDisableGroups(requested, forcedSnapshot);
-        List<UUID> uuids;
-        JsonObject out;
-        if (forced) {
-            ForceEnableResult result = enableForceLoad(selection);
-            uuids = result.members();
-            out = result.response();
-        } else {
-            uuids = selection.members();
-            out = disableForceLoad(selection, forcedSnapshot);
+        // 但整组语义只到组边界为止,依赖组之间是独立事务。2026-08-22 job#15:取消常驻 117 体一单,
+        // 一个 4 体组在快照与复核的窗口里长出新成员,其余 113 个体全部连坐失败,重试才整单通过。
+        // 每组各自成败、失败原因逐组带回;单组失败保持原始异常语义(单体按钮/自动修复靠它导流)。
+        List<UUID> succeeded = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
+        Exception firstFailure = null;
+        for (Set<UUID> component : selection.components()) {
+            OpKit.DependencySelection group = componentSelection(selection, component);
+            try {
+                List<UUID> members;
+                if (forced) {
+                    members = enableForceLoad(group);
+                } else {
+                    // 每组动手前取新的全局票快照:上一组刚摘掉的票不能被当成"操作期间被人动了票"
+                    Set<UUID> snapshot = this.kit.onMainUntilComplete(
+                            () -> ForceLoadService.forcedOnMain(this.kit.server));
+                    disableForceLoad(group, snapshot);
+                    members = group.members();
+                }
+                succeeded.addAll(members);
+                for (UUID uuid : members) {
+                    this.kit.audit(forced ? "force_load" : "force_unload", uuid, null, null);
+                }
+            } catch (Exception failure) {
+                if (firstFailure == null) firstFailure = failure;
+                failures.add("组[" + OpKit.shortUuids(component) + "]: "
+                        + String.valueOf(failure.getMessage()));
+                if (failure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
         }
-        out.addProperty("requested", requested.size());
-        for (UUID uuid : uuids) this.kit.audit(forced ? "force_load" : "force_unload", uuid, null, null);
+        if (selection.components().size() == 1 && firstFailure != null) throw firstFailure;
+        return forcedBatchResponse(forced, selection.components().size(), requested.size(),
+                succeeded, failures);
+    }
+
+    /** 单组事务的取材:该组的成员/根/(常驻加载时的)条目计划,共享同一次候选决议 */
+    static OpKit.DependencySelection componentSelection(OpKit.DependencySelection all,
+                                                        Set<UUID> component) {
+        List<UUID> roots = all.roots().stream().filter(component::contains).toList();
+        return new OpKit.DependencySelection(roots, List.copyOf(component),
+                List.of(component), all.plans());
+    }
+
+    /** 终态契约(JobService.outcomeOf):ok 布尔 + failed 数组 → 全成/部分/全败;失败明细同发 warnings 供作业详情展示 */
+    static JsonObject forcedBatchResponse(boolean forced, int groups, int requested,
+                                          List<UUID> succeeded, List<String> failures) {
+        JsonObject out = new JsonObject();
+        out.addProperty("ok", failures.isEmpty() || !succeeded.isEmpty());
+        out.addProperty("forced", forced);
+        out.addProperty("count", succeeded.size());
+        out.addProperty("groups", groups);
+        out.addProperty("requested", requested);
+        JsonArray failed = new JsonArray();
+        for (String failure : failures) failed.add(failure);
+        out.add("failed", failed);
+        OpKit.attachWarnings(out, failures);
         return out;
     }
 
-    private ForceEnableResult enableForceLoad(OpKit.DependencySelection selection) throws Exception {
+    /** 周期恢复的失败闩靠异常:分组部分失败必须在这里升格抛出,否则失败组每 30 秒被无谓重扫重试 */
+    static void requireForcedGroupsSucceeded(JsonObject response) {
+        if (response.getAsJsonArray("failed").isEmpty()) return;
+        throw new IllegalStateException("部分常驻组恢复失败: " + response.getAsJsonArray("failed"));
+    }
+
+    private List<UUID> enableForceLoad(OpKit.DependencySelection selection) throws Exception {
         List<UUID> uuids = selection.members();
         Map<UUID, OpKit.MemberPlan> plans = selection.plans();
         List<UUID> anchors = forceLoadAnchors(selection);
@@ -358,11 +409,7 @@ public final class TeleportOps {
                 }
                 return Set.copyOf(keep);
             });
-            JsonObject response = new JsonObject();
-            response.addProperty("ok", true);
-            response.addProperty("forced", true);
-            response.addProperty("count", activeMembers.size());
-            return new ForceEnableResult(response, List.copyOf(activeMembers));
+            return List.copyOf(activeMembers);
         } catch (Exception | Error failure) {
             try {
                 this.kit.onMainUntilComplete(() -> {
