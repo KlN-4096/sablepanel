@@ -77,6 +77,15 @@ public final class ForceLoadService {
         return Set.copyOf(REQUESTED);
     }
 
+    /**
+     * 把一批常驻意图重新登记回意图表(不挂票、不加载)。副本处理的临时清场会连意图一起清,
+     * 恢复所选版本后必须把用户原有的意图还回来,加载则交给周期恢复按既定机制执行。
+     * 必须在共享操作锁内调用(与周期恢复/取消常驻串行)。
+     */
+    static void reinstateIntents(Collection<UUID> uuids) {
+        if (REQUESTED.addAll(uuids)) persist();
+    }
+
     public static void load() {
         REQUESTED.addAll(FILE.loadUuids("forced bodies"));
     }

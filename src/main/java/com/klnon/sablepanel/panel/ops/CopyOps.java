@@ -56,7 +56,8 @@ public final class CopyOps {
                                           CopySelectionBasis basis,
                                           String runtimeVersion,
                                           Map<UUID, OpKit.RuntimeSnapshot> runtimeSnapshots,
-                                          List<DeleteTx.DependencyRewrite> externalRewrites) {
+                                          List<DeleteTx.DependencyRewrite> externalRewrites,
+                                          Set<UUID> forcedIntents) {
     }
 
     /** 实时副本审查:列表快照只负责提示,真正操作前始终严格重扫并深比较完整 NBT。 */
@@ -295,8 +296,20 @@ public final class CopyOps {
         List<DeleteTx.DependencyRewrite> externalRewrites = initial.externalMembers().isEmpty()
                 ? List.of() : this.tx.prepareDependencyRewrites(scan, members, warnings).stream()
                 .filter(rewrite -> initial.externalMembers().contains(rewrite.uuid())).toList();
+        // 冷组的常驻只存在于意图表(REQUESTED),票为空;操作快照按票捕获看不见它。
+        // 清场会把意图一起清掉,这里先记下来,恢复/回滚成功后按现存成员还回去。
+        Set<UUID> forcedIntents = new LinkedHashSet<>(members);
+        forcedIntents.retainAll(ForceLoadService.requestedSnapshot());
         return new PreparedCopyResolution(component, versions, states, basis,
-                runtimeVersion == null ? null : runtimeVersion.id(), runtimeSnapshots, externalRewrites);
+                runtimeVersion == null ? null : runtimeVersion.id(), runtimeSnapshots, externalRewrites,
+                Set.copyOf(forcedIntents));
+    }
+
+    /** 把清场前捕获的常驻意图还给仍然存在的成员;只登记意图不加载,加载交给周期恢复。 */
+    private static void reinstateForcedIntents(Set<UUID> captured, Collection<UUID> restoredMembers) {
+        Set<UUID> keep = new LinkedHashSet<>(restoredMembers);
+        keep.retainAll(captured);
+        if (!keep.isEmpty()) ForceLoadService.reinstateIntents(keep);
     }
 
     static void preferSelectedCopies(DeleteTx.DeleteComponent component, CopyVersionScanner.Version selected) {
@@ -362,6 +375,8 @@ public final class CopyOps {
             this.restore.restoreGroupData(
                     restoreSelection(selected, prepared.runtimeVersion(), prepared.runtimeSnapshots(),
                             states, "copy-selection"), false, warnings);
+            reinstateForcedIntents(prepared.forcedIntents(),
+                    selected.copies().stream().map(CopyVersionScanner.Copy::uuid).toList());
             DeleteTx.DependencyTransition externalTransition = prepared.externalRewrites().isEmpty()
                     ? new DeleteTx.DependencyTransition(List.of(), List.of())
                     : this.tx.prepareDependencyTransition(prepared.externalRewrites(), Set.of(),
@@ -402,6 +417,8 @@ public final class CopyOps {
                 RecycleStore.RestoreGroup rollbackGroup = rollback.committed()
                         ? this.recycle.loadGroup(rollback.id()) : this.recycle.loadStage(rollback);
                 this.restore.restoreGroupData(rollbackGroup, true, warnings);
+                reinstateForcedIntents(prepared.forcedIntents(),
+                        rollbackGroup.bodies().stream().map(RecycleStore.RestoreBody::uuid).toList());
                 if (!rollback.committed()) this.recycle.discard(rollback);
                 for (Map.Entry<String, RecycleStore.Stage> entry : stages.entrySet()) {
                     if (entry.getKey().equals(rollbackVersion.id()) || entry.getValue().committed()) continue;
