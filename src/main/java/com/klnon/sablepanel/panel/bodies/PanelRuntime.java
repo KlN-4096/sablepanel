@@ -35,6 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
 import com.klnon.sablepanel.panel.PanelConfig;
 
 /** Owns the panel service lifecycle independently from NeoForge event wiring. */
@@ -257,6 +259,7 @@ public final class PanelRuntime implements AutoCloseable {
     /** 刷新节奏与失败记账。失败也归零计数:否则 refreshRuntime 持续抛出会退化成每 tick 重试全量刷新。 */
     static final class RefreshCadence {
         private int ticksSinceRefresh;
+        private int sinceSuccess;
         private long consecutiveFailures;
 
         /** 每 tick 调用;true = 到点,调用方随后必须 {@link #begin()}。 */
@@ -268,15 +271,19 @@ public final class PanelRuntime implements AutoCloseable {
             return this.ticksSinceRefresh >= next;
         }
 
-        /** 取走本轮真实间隔并归零——成功失败都只走这一次。 */
+        /**
+         * 归零到点计数,返回距上次成功的真实间隔——elapsed 是 BodyCostTracker 的除数,
+         * 失败轮 drain 没跑、纳秒还在囤,除数必须跟着累计,否则首次成功时单体耗时虚高。
+         */
         int begin() {
-            int elapsed = Math.max(1, this.ticksSinceRefresh);
+            this.sinceSuccess += this.ticksSinceRefresh;
             this.ticksSinceRefresh = 0;
-            return elapsed;
+            return Math.max(1, this.sinceSuccess);
         }
 
         void succeeded() {
             this.consecutiveFailures = 0;
+            this.sinceSuccess = 0;
         }
 
         /** 失败限频:首个失败与之后每 64 个打一条,持续故障不刷屏也不静默。 */
@@ -290,6 +297,7 @@ public final class PanelRuntime implements AutoCloseable {
 
         void reset() {
             this.ticksSinceRefresh = 0;
+            this.sinceSuccess = 0;
             this.consecutiveFailures = 0;
         }
     }
@@ -360,28 +368,11 @@ public final class PanelRuntime implements AutoCloseable {
         List<UUID> pending;
         try {
             // 一次往返核对全部意图:逐个往返是 O(意图数) 次任务分发,且每 uuid 都全扫一遍票表
-            pending = MainThread.onUntilComplete(server, () -> {
-                Set<UUID> forced = com.klnon.sablepanel.panel.ops.ForceLoadService.forcedOnMain(server);
-                List<UUID> stale = new java.util.ArrayList<>();
-                for (UUID uuid : requested) {
-                    if (forced.contains(uuid)
-                            && com.klnon.sablepanel.panel.ops.ForceLoadService.isLoadedOnMain(server, uuid)) {
-                        continue;
-                    }
-                    if (forced.contains(uuid)) {
-                        try {
-                            com.klnon.sablepanel.panel.ops.ForceLoadService
-                                    .detachNativeTicketsOnMain(server, List.of(uuid));
-                        } catch (Throwable error) {
-                            SablePanel.LOGGER.warn(
-                                    "sablepanel: detaching stale force-load ticket {} failed", uuid, error);
-                            continue; // 与逐个时代同语义:剥不掉的这轮不进恢复,30 秒后再试
-                        }
-                    }
-                    stale.add(uuid);
-                }
-                return stale;
-            });
+            pending = MainThread.onUntilComplete(server, () -> classifyStaleIntents(
+                    com.klnon.sablepanel.panel.ops.ForceLoadService.forcedOnMain(server), requested,
+                    uuid -> com.klnon.sablepanel.panel.ops.ForceLoadService.isLoadedOnMain(server, uuid),
+                    uuid -> com.klnon.sablepanel.panel.ops.ForceLoadService
+                            .detachNativeTicketsOnMain(server, List.of(uuid))));
         } catch (Exception error) {
             SablePanel.LOGGER.warn("sablepanel: checking force-load intents failed", error);
             return;
@@ -401,6 +392,26 @@ public final class PanelRuntime implements AutoCloseable {
         } else if (pending.isEmpty()) {
             this.failedForceRestore = null;
         }
+    }
+
+    /**
+     * 主线程单跳内的意图分类:forced∧loaded=活着跳过;forced∧!loaded 先剥原生票再进 stale;
+     * !forced 直接进 stale。任何单 uuid 的查询/剥离失败只跳过它自己(与逐个往返时代同语义,
+     * 30 秒后重试)—— 一个坏 uuid 不许连坐整轮,否则常驻恢复会永久停摆。
+     */
+    static List<UUID> classifyStaleIntents(Set<UUID> forced, List<UUID> requested,
+                                           Predicate<UUID> loaded, Consumer<UUID> detach) {
+        List<UUID> stale = new java.util.ArrayList<>();
+        for (UUID uuid : requested) {
+            try {
+                if (forced.contains(uuid) && loaded.test(uuid)) continue;
+                if (forced.contains(uuid)) detach.accept(uuid);
+                stale.add(uuid);
+            } catch (Throwable error) {
+                SablePanel.LOGGER.warn("sablepanel: checking force-load intent {} failed", uuid, error);
+            }
+        }
+        return stale;
     }
 
     static boolean shouldAttemptForceRestore(ForceRestoreAttempt failed, ForceRestoreAttempt current) {

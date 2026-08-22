@@ -58,7 +58,8 @@ final class IntentFile {
         return out;
     }
 
-    void saveUuids(Collection<UUID> values) {
+    /** 快照与写盘同锁:并发 persist 时后进锁者重取最新集合,先写的新状态不会被旧快照盖掉。 */
+    synchronized void saveUuids(Collection<UUID> values) {
         save(values.stream().map(UUID::toString).toList());
     }
 

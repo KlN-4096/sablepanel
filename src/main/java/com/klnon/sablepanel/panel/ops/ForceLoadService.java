@@ -379,6 +379,9 @@ public final class ForceLoadService {
         ACTIVE.removeAll(targets);
     }
 
+    /** 仅 guardOnMain(主线程)访问:detach 失败告警的限频计数 */
+    private static long guardDetachFailures;
+
     /**
      * 主线程(每次运行时刷新):把镜像与 sable 的票对齐(含重启后从存档恢复的票),
      * 并把掉线的常驻体按票中指针重新拉起。
@@ -434,10 +437,15 @@ public final class ForceLoadService {
         if (!recover.isEmpty()) {
             try {
                 detachNativeTicketsOnMain(server, recover);
+                guardDetachFailures = 0;
             } catch (Throwable t) {
                 // 剥离失败只告警不外抛:外抛会连坐 refreshRuntime,退化成每 tick 重试全量刷新。
                 // 掉线体照常移出 ACTIVE,前端按 forced_lost 显式标红,下轮守护再试。
-                SablePanel.LOGGER.warn("sablepanel: force-load guard ticket detach failed", t);
+                // 残留票是持久状态,每轮刷新一条会刷屏 —— 首条与每 64 条限频。
+                if (guardDetachFailures++ % 64 == 0) {
+                    SablePanel.LOGGER.warn("sablepanel: force-load guard ticket detach failed (#{})",
+                            guardDetachFailures, t);
+                }
             }
             forced.removeAll(recover);
         }

@@ -67,6 +67,20 @@ class PanelRuntimeRefreshCadenceTest {
         assertEquals(2, idleAttempts, "空闲间隔 1200t");
     }
 
+    /** elapsed = 距上次成功:失败轮 BodyCostTracker 没 drain、纳秒还在囤,除数必须跟着累计。 */
+    @Test
+    void elapsedAccumulatesAcrossFailedAttempts() {
+        PanelRuntime.RefreshCadence cadence = new PanelRuntime.RefreshCadence();
+        for (int tick = 0; tick < 100; tick++) cadence.due(false, true);
+        assertEquals(100, cadence.begin(), "第一次到点");
+        // 不调 succeeded():模拟刷新抛出
+        for (int tick = 0; tick < 100; tick++) cadence.due(false, true);
+        assertEquals(200, cadence.begin(), "失败后的下一次尝试,除数是距上次成功的 200");
+        cadence.succeeded();
+        for (int tick = 0; tick < 100; tick++) cadence.due(false, true);
+        assertEquals(100, cadence.begin(), "成功清零后回到单间隔");
+    }
+
     /** 失败日志限频:第一次必打,之后每 64 次一条;成功后重新从"第一次"算。 */
     @Test
     void failureLoggingIsRateLimitedAndResetsOnSuccess() {
