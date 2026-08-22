@@ -195,13 +195,21 @@ test('作业轮询带回状态真值,徽章逐组跟随而非作业结束才一�
     if (url.startsWith('/api/bodies')) return bodiesResponse();
     return jsonResponse({});
   };
-  evalIn(sandbox, 'authenticated = true; __renders = 0; renderAll = () => __renders++;');
+  evalIn(sandbox, `
+    authenticated = true; __renders = 0; renderAll = () => __renders++;
+    DATA = {groups:[{gid:'a', loaded:1, members:2,
+      bodies:[{uuid:'a',state:'stored'},{uuid:'b',state:'loaded'}]}]};
+    BODY_BY_UUID = new Map(DATA.groups[0].bodies.map(b => [b.uuid, {b, g:DATA.groups[0]}]));
+  `);
   await evalIn(sandbox, 'pollJobs')();
   await tick();
   assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify([...FORCED].sort())')), ['a', 'b']);
   assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify([...FORCED_LOST])')), ['lost1'],
     '意图在票不在=掉线,与 BodyIndex 同一算法');
   assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify([...PAUSED])')), ['p1']);
+  assert.equal(evalIn(sandbox, "DATA.groups[0].bodies[0].state"), 'loaded',
+    '进常驻集合的体绿点跟着亮(挂票=已加载)');
+  assert.equal(evalIn(sandbox, 'DATA.groups[0].loaded'), 2, '组内加载计数同步');
 
   const renders = evalIn(sandbox, '__renders');
   await evalIn(sandbox, 'pollJobs')();   // 真值没变的一轮
@@ -214,6 +222,9 @@ test('作业轮询带回状态真值,徽章逐组跟随而非作业结束才一�
   assert.deepEqual(JSON.parse(evalIn(sandbox, 'JSON.stringify([...FORCED])')), ['b'],
     '作业期间徽章逐组跟随服务端真值');
   assert.ok(evalIn(sandbox, '__renders') > renders, '集合变了要重画');
+  assert.equal(evalIn(sandbox, "DATA.groups[0].bodies[0].state"), 'stored',
+    '票没了绿点跟着灭,不等作业结束统一变');
+  assert.equal(evalIn(sandbox, 'DATA.groups[0].loaded'), 1, '组内加载计数同步回落');
 });
 
 test('总览分别按依赖组和成员体统计规模', () => {

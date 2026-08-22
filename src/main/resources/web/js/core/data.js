@@ -174,11 +174,23 @@ function applyStateSets(result){
   const changed = !sameSet(FORCED, result.forced) || !sameSet(FORCED_LOST, lost)
     || !sameSet(PAUSED, result.paused || []) || !sameSet(FROZEN, result.frozen || []);
   if (!changed) return false;
+  // 常驻集合的增减顺带修正加载态:挂上票=已加载,票没了=已卸回(取消常驻)或已掉线(守护剥票),
+  // 两种都不该再亮绿点。DATA 快照作业期间不重拉,不修的话绿点要等作业结束才统一灭;
+  // 这里改的是 DATA 本身,状态点/筛选/组内计数/详情全部跟着一致,作业结束的真值快照最终校正
+  for (const u of result.forced) if (!FORCED.has(u)) markBodyState(u, 'loaded');
+  for (const u of FORCED) if (!active.has(u)) markBodyState(u, 'stored');
   FORCED = active;
   FORCED_LOST = new Set(lost);
   PAUSED = new Set(result.paused || []);
   FROZEN = new Set(result.frozen || []);
   return true;
+}
+/* 孤儿态不动:那是指针层的问题,与是否在跑无关 */
+function markBodyState(uuid, state){
+  const hit = BODY_BY_UUID.get(uuid);
+  if (!hit || hit.b.state === state || hit.b.state === 'orphan') return;
+  hit.b.state = state;
+  hit.g.loaded = hit.g.bodies.filter(body => body.state === 'loaded').length;
 }
 function sameSet(set, arr){ return set.size === arr.length && arr.every(u => set.has(u)); }
 /* 有作业在跑时把作业状态轮询加速到 2 秒,跑完自动停。
