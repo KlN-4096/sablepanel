@@ -246,7 +246,7 @@ test('总览分别按依赖组和成员体统计规模', () => {
   assert.equal(summary.bodies, 4);
   evalIn(sandbox, 'renderDash()');
   const html = evalIn(sandbox, "document.getElementById('dashMid').innerHTML");
-  assert.match(html, /依赖组规模/);
+  assert.match(html, /物理组规模/);
   assert.match(html, /成员体规模/);
   assert.match(html, />1 组</);
   assert.match(html, />2 体</);

@@ -55,7 +55,7 @@ document.documentElement.dataset.theme=ok[t]?t
   </div>
   <div style="position:relative">
     <div id="loadPill" onclick="toggleStatPop()">
-      <div class="kv"><b id="pillCost" class="mono">--</b><span>物理体开销 ms/t</span></div>
+      <div class="kv"><b id="pillCost" class="mono">--</b><span>物理体开销 ms/tick</span></div>
       <div class="kv"><b id="pillLoaded" class="mono">--</b><span>加载中</span></div>
       <canvas id="pillSpark" width="132" height="30"></canvas>
     </div>
@@ -174,7 +174,7 @@ document.documentElement.dataset.theme=ok[t]?t
                 <button id="rotBtn" onclick="toggleRotate()">⟳</button>
                 <input type="range" id="rotSpeed" min="0" max="100" value="18" oninput="setRotSpeed(this.value)">
                 <button id="pvRetry" onclick="retryPreviewResources()" title="重试资源准备" style="display:none">↻</button>
-                <button id="pvVersions" onclick="openDedupe()" title="该体有多个磁盘副本，去副本面板逐版本预览并选定" style="display:none">副本</button>
+                <button id="pvVersions" onclick="openDedupe()" title="该物理体有多份磁盘副本,在「处理副本」中逐版本预览并选定" style="display:none">副本</button>
                 <button id="fsOpen">⛶</button>
               </div>
             </div>
@@ -191,7 +191,7 @@ document.documentElement.dataset.theme=ok[t]?t
               </div>
               <div class="row dual">
                 <button onclick="fillCurrentPos()">取当前</button>
-                <button class="primary" onclick="doTeleport()">传送结构</button>
+                <button class="primary" onclick="doTeleport()">传送物理体</button>
               </div>
               <div class="row">
                 <span class="opLabel">玩家</span>
@@ -200,17 +200,17 @@ document.documentElement.dataset.theme=ok[t]?t
               </div>
             </div>
             <div class="opGroup">
-              <div class="opTitle"><span>物理与恢复</span><span class="opHint">两个是不同的东西,悬停看说明</span></div>
+              <div class="opTitle"><span>物理与恢复</span><span class="opHint">各按钮相互独立,悬停看说明</span></div>
               <div class="row dual">
                 <button id="pauseBtn" class="warnb" onclick="doPauseCurrent()">⏸</button>
                 <button id="freezeBtn" class="warnb" onclick="doFreezeCurrent()">❄</button>
               </div>
               <div class="row dual">
-                <button id="forceBtn" onclick="doForceCurrent()">常驻加载[断链处理]</button>
+                <button id="forceBtn" onclick="doForceCurrent()">常驻加载</button>
                 <button id="clearVelBtn" onclick="doClearVelocity()">清除速度</button>
               </div>
               <div class="row" id="adoptRow" style="display:none">
-                <button onclick="doAdopt()">收养找回(含依赖)</button>
+                <button onclick="doAdopt()">收养(含依赖)</button>
                 <span class="opHint">重建加载指针,数据不动盘</span>
               </div>
             </div>
@@ -281,8 +281,8 @@ document.documentElement.dataset.theme=ok[t]?t
       <div id="rBody"><div id="rDetailEmpty"><span class="big">♲</span><span>选择一个备份物理体查看详情</span></div></div>
       <div class="ops" id="rOps" style="display:none">
         <div class="row">
-          <button class="primary" id="restoreGroupBtn" onclick="restoreCurrentGroup()">恢复该依赖组</button>
-          <button class="danger" onclick="purgeCurrentGroup()">彻底删除该依赖组</button>
+          <button class="primary" id="restoreGroupBtn" onclick="restoreCurrentGroup()">恢复该物理组</button>
+          <button class="danger" onclick="purgeCurrentGroup()">彻底删除该物理组</button>
           <span class="muted" style="font-size:11px">恢复后会在保存位置重新加载</span>
         </div>
       </div>
@@ -331,7 +331,7 @@ document.documentElement.dataset.theme=ok[t]?t
   <div class="manualLayout"><div id="manualTabs"></div><div id="manualContent"></div></div>
 </div></dialog>
 <dialog id="copyBack" class="panelBack"><div class="widePanel copyResolverPanel">
-  <div class="wideHead"><h3>处理物理结构副本</h3><button onclick="closeDedupe()">✕</button></div>
+  <div class="wideHead"><h3>处理副本</h3><button onclick="closeDedupe()">✕</button></div>
   <div class="copyResolver">
     <div class="copyPanelBody" id="copyPanelBody"></div>
     <div class="copyPreviewColumn"><div id="copyPreviewHost" class="previewHost"></div><div id="copyPreviewNote"></div><div id="copyComp"></div></div>

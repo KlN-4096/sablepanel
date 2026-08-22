@@ -80,8 +80,8 @@ function updatePreviewStatus(status, detail) {
   else if (status === 'lod') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ` · ${(detail && detail.count) || 0} 个模型组已简化`;
   else if (status === 'resource_failed') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ' · 资源简化';
   else if (status === 'resource_unavailable') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ' · 当前浏览器仅支持基础预览';
-  else if (status === 'unsupported') info.textContent = (detail || '需要 WebGL2') + '，已保留结构信息';
-  else if (status === 'too_large') info.textContent = '结构过大，保留统计信息';
+  else if (status === 'unsupported') info.textContent = (detail || '需要 WebGL2') + ',已保留结构信息';
+  else if (status === 'too_large') info.textContent = '结构过大,保留统计信息';
   else if (status === 'failed') info.textContent = T.pvFail + previewErrorLabel(detail);
 }
 
@@ -89,8 +89,8 @@ function updatePreviewStatus(status, detail) {
    它不是故障,是面板拒绝在多份磁盘副本之间瞎猜当前版本(判据只有运行证据)。 */
 function previewErrorLabel(code) {
   return ({
-    preview_version_ambiguous:'该体在磁盘上有多份副本，无法判断哪份是当前版本',
-    preview_busy:'预览队列已满，请稍后重试',
+    preview_version_ambiguous:'该物理体在磁盘上有多份副本,无法判断哪份是当前版本',
+    preview_busy:'预览队列已满,请稍后重试',
     preview_failed:'结构提取失败',
     preview_resource_failed:'预览资源准备失败',
     preview_too_large:'结构过大'
