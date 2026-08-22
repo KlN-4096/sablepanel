@@ -705,13 +705,12 @@ test('UI-03 切服要清掉图表窗口和悬浮提示', async () => {
   evalIn(sandbox, "authenticated = true; SERVERS = [{id:'A',self:true},{id:'B'}]; toast = () => {}");
   evalIn(sandbox, "STATS = {t:[], loaded:{}, body_cost_total:1, top_cost:[]}");
   // A 服上用户切到 15 分钟窗口、鼠标停在某个点上
-  evalIn(sandbox, "CHART.span = 900; CHART.hoverIndex = 5");
+  evalIn(sandbox, "CHART.span = 900; CHART.hoverTime = 12345");
   evalIn(sandbox, "const tip = document.getElementById('chartTip'); tip.style.display = 'block'; tip.innerHTML = 'A 服的悬浮'");
 
   // 断言点是"重置完成、新数据还没到"这一段:switchServer 的重置是同步的,所以这里不 await
   const switching = evalIn(sandbox, 'switchServer')('B');
   assert.equal(evalIn(sandbox, 'CHART.span'), 300, '窗口预设要回到默认,不能带着上一个服的选择');
-  assert.equal(evalIn(sandbox, 'CHART.hoverIndex'), -1);
   assert.equal(evalIn(sandbox, 'CHART.hoverTime'), null);
   assert.equal(evalIn(sandbox, "document.getElementById('chartTip').style.display"), 'none',
     '空图上不该还挂着上一个服的悬浮提示');

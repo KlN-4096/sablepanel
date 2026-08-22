@@ -61,6 +61,12 @@ public final class RestoreOps {
             }
             if (!errors.isEmpty()) throw new IllegalStateException("回滚前残留清理失败: " + String.join(" | ", errors));
         }
+        clearOperationalState(targets);
+        this.tx.requireTargetsAbsent(targets, warnings);
+    }
+
+    /** 恢复前清空目标的暂停/常驻意图并落盘;主线程执行,persist 在 finally 保证意图文件不掉队 */
+    private void clearOperationalState(Collection<UUID> targets) throws Exception {
         try {
             this.kit.onMainUntilComplete(() -> {
                 this.tx.clearOperationalStateOnMain(targets);
@@ -70,7 +76,6 @@ public final class RestoreOps {
             PauseService.persist();
             ForceLoadService.persist();
         }
-        this.tx.requireTargetsAbsent(targets, warnings);
     }
 
     public JsonObject restoreRecycleGroups(List<String> groupIds) {
@@ -164,15 +169,7 @@ public final class RestoreOps {
         Map<UUID, Integer> existingEntries = new HashMap<>();
         for (UUID uuid : targets) existingEntries.put(uuid, scan.entriesOf(uuid).size());
         if (!replaceExisting) requireRestoreTargetsFree(targets, existingEntries);
-        try {
-            this.kit.onMainUntilComplete(() -> {
-                this.tx.clearOperationalStateOnMain(targets);
-                return new JsonObject();
-            });
-        } finally {
-            PauseService.persist();
-            ForceLoadService.persist();
-        }
+        clearOperationalState(targets);
         // 同一趟扫描顺路建 plot 槽位占用表:删除释放的槽位会被 sable 按首位适配复用给新体,
         // 而恢复用的 allocateSubLevel 只查加载态 —— 不拦下来就会造出"同槽双体"(加载互斥)
         Map<DiskScanner.PlotKey, Set<UUID>> plotOwners = DiskScanner.plotOwners(scan.meta());

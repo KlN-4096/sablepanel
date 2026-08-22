@@ -174,16 +174,6 @@ public final class BodyIndex {
                 && left.contents() == right.contents();
     }
 
-    /**
-     * 快照口径的"已加载"判定,任意线程可读、零磁盘 IO。
-     * <p>
-     * 用来在建依赖链前先问一句"这体是不是本来就加载着"——是的话整条链都是白建的。
-     * 快照最多滞后一轮刷新,判错了后续主线程还会再核一次,代价只是一次重试。
-     */
-    public boolean isLoaded(UUID uuid) {
-        return this.runtime.containsKey(uuid);
-    }
-
     /** 运行时操作完成后立即修正坐标缓存,避免面板等到下一次周期刷新。 */
     public void updateRuntimePosition(UUID uuid, String dim, double[] position) {
         if (position == null || position.length != 3) {

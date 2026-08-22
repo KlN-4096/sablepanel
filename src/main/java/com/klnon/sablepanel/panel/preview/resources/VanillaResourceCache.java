@@ -20,6 +20,7 @@ import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.Properties;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -57,12 +58,7 @@ public final class VanillaResourceCache {
         }
     }
 
-    @FunctionalInterface
-    public interface ProgressListener {
-        void update(Progress progress);
-    }
-
-    private static final ProgressListener NO_PROGRESS = progress -> { };
+    private static final Consumer<Progress> NO_PROGRESS = progress -> { };
 
     public record Baseline(Path archive, String fingerprint) {}
 
@@ -70,9 +66,9 @@ public final class VanillaResourceCache {
     private final Downloader downloader;
     private final long expectedSize;
     private final String expectedSha256;
-    private final ProgressListener progressListener;
+    private final Consumer<Progress> progressListener;
 
-    public VanillaResourceCache(Path instanceRoot, ProgressListener progressListener) {
+    public VanillaResourceCache(Path instanceRoot, Consumer<Progress> progressListener) {
         this(instanceRoot, new HttpDownloader(CLIENT_SIZE, progressListener), CLIENT_SIZE, CLIENT_SHA256,
                 progressListener);
     }
@@ -82,7 +78,7 @@ public final class VanillaResourceCache {
     }
 
     VanillaResourceCache(Path instanceRoot, Downloader downloader, long expectedSize, String expectedSha256,
-                         ProgressListener progressListener) {
+                         Consumer<Progress> progressListener) {
         this.instanceRoot = Objects.requireNonNull(instanceRoot, "instanceRoot");
         this.downloader = Objects.requireNonNull(downloader, "downloader");
         this.expectedSize = expectedSize;
@@ -149,7 +145,7 @@ public final class VanillaResourceCache {
 
     private void report(Phase phase, String source, long downloaded, long total, String message) {
         try {
-            this.progressListener.update(new Progress(phase, source, downloaded, total, message));
+            this.progressListener.accept(new Progress(phase, source, downloaded, total, message));
         } catch (RuntimeException ignored) {
         }
     }
@@ -217,9 +213,9 @@ public final class VanillaResourceCache {
     private static final class HttpDownloader implements Downloader {
         private final HttpClient client;
         private final long maxBytes;
-        private final ProgressListener progressListener;
+        private final Consumer<Progress> progressListener;
 
-        private HttpDownloader(long maxBytes, ProgressListener progressListener) {
+        private HttpDownloader(long maxBytes, Consumer<Progress> progressListener) {
             this.maxBytes = maxBytes;
             this.progressListener = progressListener == null ? NO_PROGRESS : progressListener;
             this.client = HttpClient.newBuilder()
@@ -268,7 +264,7 @@ public final class VanillaResourceCache {
                         out.write(buffer, 0, read);
                         if (total >= nextProgress) {
                             try {
-                                this.progressListener.update(new Progress(Phase.DOWNLOADING, sourceName(source), total,
+                                this.progressListener.accept(new Progress(Phase.DOWNLOADING, sourceName(source), total,
                                         declared >= 0 ? declared : this.maxBytes, source.toString()));
                             } catch (RuntimeException ignored) {
                             }

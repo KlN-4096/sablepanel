@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.TreeSet;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -65,19 +66,14 @@ public final class PreviewSubsystem implements AutoCloseable {
         return submitLoaded("online@" + uuid, () -> this.onlineSource.load(uuid));
     }
 
-    public Result renderSpm2Async(String key, TagLoader loader) {
+    public Result renderSpm2Async(String key, Callable<CompoundTag> loader) {
         ensureOpen();
         this.resourcePreparation.start();
         Objects.requireNonNull(loader, "loader");
         return submitLoaded("load@" + key, () -> {
-            CompoundTag tag = loader.load();
+            CompoundTag tag = loader.call();
             return tag == null ? null : new PreviewSource.Loaded(key + "@" + tagHash(tag), tag);
         });
-    }
-
-    @FunctionalInterface
-    public interface TagLoader {
-        CompoundTag load() throws Exception;
     }
 
     public void retryResources() {
@@ -183,7 +179,7 @@ public final class PreviewSubsystem implements AutoCloseable {
         return new Encoded(Spm2Codec.encode(structure.toSpm2(additions)), cacheable);
     }
 
-    private Result submitLoaded(String requestKey, LoadedSource source) {
+    private Result submitLoaded(String requestKey, Callable<PreviewSource.Loaded> source) {
         synchronized (this.cache) {
             Mailbox.prune(this.tasks, System.nanoTime() - TERMINAL_TASK_RETENTION_NANOS);
             Mailbox<Result> existing = this.tasks.get(requestKey);
@@ -199,7 +195,7 @@ public final class PreviewSubsystem implements AutoCloseable {
             try {
                 this.extraction.submit(() -> {
                     try {
-                        PreviewSource.Loaded loaded = source.load();
+                        PreviewSource.Loaded loaded = source.call();
                         if (loaded == null) {
                             task.complete(Result.notFound());
                             return;
@@ -241,11 +237,6 @@ public final class PreviewSubsystem implements AutoCloseable {
     }
 
     private record Encoded(byte[] payload, boolean cacheable) {}
-
-    @FunctionalInterface
-    private interface LoadedSource {
-        PreviewSource.Loaded load() throws Exception;
-    }
 
     public ResourceResult resource(String id, String hash) {
         try {

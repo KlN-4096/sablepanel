@@ -45,10 +45,10 @@ class OpKitLoadOrderTest {
                 diskTail, List.of(meta(3, List.of(runtimeOnly))));
         Set<UUID> runtimeGroup = Set.of(bridge, runtimeOnly);
 
-        List<UUID> expanded = OpKit.selectDependencyGroups(List.of(bridge), disk,
+        List<Set<UUID>> expanded = OpKit.selectDependencyGroupSets(List.of(bridge), disk,
                 Map.of(bridge, runtimeGroup, runtimeOnly, runtimeGroup));
 
-        assertEquals(runtimeGroup, Set.copyOf(expanded));
+        assertEquals(List.of(runtimeGroup), expanded);
     }
 
     @Test
@@ -98,11 +98,11 @@ class OpKitLoadOrderTest {
         Set<UUID> balloonChain = Set.of(balloon, balloonPart);
         Set<UUID> cityChain = Set.of(ancientCity, balloon, balloonPart);
 
-        List<UUID> selected = OpKit.selectDependencyGroups(List.of(balloon), Map.of(), Map.of(
+        List<Set<UUID>> selected = OpKit.selectDependencyGroupSets(List.of(balloon), Map.of(), Map.of(
                 balloon, balloonChain, ancientCity, cityChain));
 
-        assertEquals(balloonChain, Set.copyOf(selected));
-        assertFalse(selected.contains(ancientCity));
+        assertEquals(List.of(balloonChain), selected);
+        assertFalse(selected.get(0).contains(ancientCity));
     }
 
     @Test
@@ -299,9 +299,9 @@ class OpKitLoadOrderTest {
                 root, List.of(meta(0, List.of(dependency))),
                 dependency, List.of(meta(1, List.of(root))));
 
-        List<UUID> expanded = OpKit.selectDependencyGroups(List.of(root), disk, Map.of());
+        List<Set<UUID>> expanded = OpKit.selectDependencyGroupSets(List.of(root), disk, Map.of());
 
-        assertEquals(Set.of(root, dependency), Set.copyOf(expanded));
+        assertEquals(List.of(Set.of(root, dependency)), expanded);
     }
 
     @Test

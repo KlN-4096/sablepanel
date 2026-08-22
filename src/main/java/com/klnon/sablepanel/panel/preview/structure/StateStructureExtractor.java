@@ -58,7 +58,7 @@ public final class StateStructureExtractor {
                 });
                 palette.get(index).count++;
                 voxels.add(gx); voxels.add(gy); voxels.add(gz); voxels.add(index);
-                occupied.add(pack(gx, gy, gz));
+                occupied.add(BlockPos.asLong(gx, gy, gz));
                 minX = Math.min(minX, gx);
                 minY = Math.min(minY, gy);
                 minZ = Math.min(minZ, gz);
@@ -292,9 +292,9 @@ public final class StateStructureExtractor {
     }
 
     private static boolean isOccluded(LongSet occupied, int x, int y, int z) {
-        return occupied.contains(pack(x + 1, y, z)) && occupied.contains(pack(x - 1, y, z))
-                && occupied.contains(pack(x, y + 1, z)) && occupied.contains(pack(x, y - 1, z))
-                && occupied.contains(pack(x, y, z + 1)) && occupied.contains(pack(x, y, z - 1));
+        return occupied.contains(BlockPos.asLong(x + 1, y, z)) && occupied.contains(BlockPos.asLong(x - 1, y, z))
+                && occupied.contains(BlockPos.asLong(x, y + 1, z)) && occupied.contains(BlockPos.asLong(x, y - 1, z))
+                && occupied.contains(BlockPos.asLong(x, y, z + 1)) && occupied.contains(BlockPos.asLong(x, y, z - 1));
     }
 
     private static Codec<PalettedContainer<BlockState>> codec() {
@@ -305,10 +305,6 @@ public final class StateStructureExtractor {
         private static final Codec<PalettedContainer<BlockState>> CODEC = PalettedContainer.codecRW(
                 Block.BLOCK_STATE_REGISTRY, BlockState.CODEC, PalettedContainer.Strategy.SECTION_STATES,
                 Blocks.AIR.defaultBlockState());
-    }
-
-    private static long pack(int x, int y, int z) {
-        return BlockPos.asLong(x, y, z);
     }
 
     private record Section(int cx, int cz, int sy, PalettedContainer<BlockState> states) {

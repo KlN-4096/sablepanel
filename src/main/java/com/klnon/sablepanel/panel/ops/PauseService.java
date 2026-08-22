@@ -53,15 +53,9 @@ public final class PauseService {
         return REQUESTED.contains(uuid);
     }
 
-    /**
-     * 三个入参保留在同一个判定点，测试明确约束它们彼此独立：只有显式物理暂停才固定。
-     */
+    /** 只有显式物理暂停才固定;冻结/常驻不参与该判定 */
     private static boolean shouldHold(UUID uuid) {
-        return holdRequired(REQUESTED.contains(uuid), false, false);
-    }
-
-    static boolean holdRequired(boolean paused, boolean frozen, boolean forced) {
-        return paused;
+        return REQUESTED.contains(uuid);
     }
 
     /** 主线程:显式暂停集合变化后重挂/解开约束。 */
@@ -143,17 +137,6 @@ public final class PauseService {
     /** 主线程(PanelObserver 体卸载/移除回调):约束随体消亡,只丢弃句柄,意图保留 */
     public static void onBodyUnloaded(UUID uuid) {
         HANDLES.remove(uuid);
-    }
-
-    /** 主线程(面板传送暂停体后):在新位置重新锁定 */
-    public static void reanchor(ServerSubLevel sl) {
-        if (!shouldHold(sl.getUniqueId())) return;
-        try {
-            replaceConstraint(sl.getUniqueId(), () -> createConstraint(sl));
-        } catch (Throwable t) {
-            SablePanel.LOGGER.warn("sablepanel: reanchoring body {} failed", sl.getUniqueId(), t);
-            throw new IllegalStateException("传送后固定物理失败: " + sl.getUniqueId(), t);
-        }
     }
 
     /** 主线程:移动锁定体时旧约束必须先拆，避免新旧世界锚点把体拉到中间。 */

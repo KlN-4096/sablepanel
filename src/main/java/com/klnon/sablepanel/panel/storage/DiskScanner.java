@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -184,7 +185,7 @@ public final class DiskScanner {
                     if (parsed == null) {
                         List<DiskEntry> fresh = new ArrayList<>();
                         forEachEntry(p, dir, rx, rz, 4096, (idx, tag) -> {
-                            DiskEntry e = toEntry(new EntryKey(dim, rx, rz, si, idx), tag, false);
+                            DiskEntry e = toEntry(new EntryKey(dim, rx, rz, si, idx), tag);
                             if (e != null) fresh.add(e);
                         });
                         parsed = fresh;
@@ -355,7 +356,7 @@ public final class DiskScanner {
 
     /** 流式严格遍历 holding 指针；目标定位和有上限的检查不必先物化全服指针表。 */
     public static void forEachPointerStrict(Map<String, Path> dims, List<String> warnings,
-                                            PointerConsumer consumer) throws IOException {
+                                            Consumer<PointerReference> consumer) throws IOException {
         List<Map.Entry<String, Path>> dimensions = new ArrayList<>(dims.entrySet());
         dimensions.sort(Map.Entry.comparingByKey());
         for (Map.Entry<String, Path> dimension : dimensions) {
@@ -376,11 +377,6 @@ public final class DiskScanner {
                 });
             }
         }
-    }
-
-    @FunctionalInterface
-    public interface PointerConsumer {
-        void accept(PointerReference reference);
     }
 
     /**
@@ -706,7 +702,7 @@ public final class DiskScanner {
         }
     }
 
-    private static DiskEntry toEntry(EntryKey key, CompoundTag tag, boolean reachable) {
+    private static DiskEntry toEntry(EntryKey key, CompoundTag tag) {
         try {
             UUID uuid = tag.getUUID("uuid");
             String name = tag.contains("display_name") ? tag.getString("display_name") : null;
@@ -727,7 +723,7 @@ public final class DiskScanner {
             int blocks = countBlocks(plot, ids);
             boolean userData = tag.contains("user_data") && !tag.getCompound("user_data").isEmpty();
             int[] be = countBlockEntities(plot);
-            return new DiskEntry(key, uuid, name, pos, size, blocks, deps, reachable,
+            return new DiskEntry(key, uuid, name, pos, size, blocks, deps, false,
                     plot.getInt("plot_x"), plot.getInt("plot_z"), List.copyOf(ids), userData, be[0], be[1]);
         } catch (Exception e) {
             return null;
@@ -736,7 +732,7 @@ public final class DiskScanner {
 
     /** 从回收站 NBT 生成与在线索引一致的静态摘要。 */
     public static DiskEntry summarize(EntryKey key, CompoundTag tag) {
-        return toEntry(key, tag, false);
+        return toEntry(key, tag);
     }
 
     /** @return [方块实体数, 其中有内容(物品/告示牌文字)的个数] */

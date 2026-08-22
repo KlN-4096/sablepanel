@@ -237,24 +237,8 @@ public final class PanelApiService {
             JsonObject body = request.jsonBody();
             String scanId = body.has("scan_id") ? body.get("scan_id").getAsString() : "";
             if (!scanId.matches("[0-9a-z]+-[0-9a-f]{8}")) throw new IllegalArgumentException("scan_id 无效");
-            Set<String> pointers = new LinkedHashSet<>();
-            JsonArray pointerValues = body.getAsJsonArray("pointers");
-            if (pointerValues != null) {
-                for (var value : pointerValues) {
-                    String text = value.getAsString();
-                    if (!text.matches("[0-9a-f]{16}")) throw new IllegalArgumentException("pointers 含无效值");
-                    pointers.add(text);
-                }
-            }
-            Set<String> tracking = new LinkedHashSet<>();
-            JsonArray trackingValues = body.getAsJsonArray("tracking");
-            if (trackingValues != null) {
-                for (var value : trackingValues) {
-                    String text = value.getAsString();
-                    if (!text.matches("[0-9a-f]{16}")) throw new IllegalArgumentException("tracking 含无效值");
-                    tracking.add(text);
-                }
-            }
+            Set<String> pointers = readHexSet(body, "pointers");
+            Set<String> tracking = readHexSet(body, "tracking");
             Set<UUID> forced = readUuidSet(body, "forced");
             Set<UUID> paused = readUuidSet(body, "paused");
             int total = pointers.size() + tracking.size() + forced.size() + paused.size();
@@ -561,6 +545,19 @@ public final class PanelApiService {
         Set<UUID> result = new LinkedHashSet<>();
         if (values == null) return result;
         for (var value : values) result.add(UUID.fromString(value.getAsString()));
+        return result;
+    }
+
+    /** 一致性修复的 16 位十六进制 id 集合(悬空指针/失效追踪点共用同一编码) */
+    private static Set<String> readHexSet(JsonObject body, String name) {
+        Set<String> result = new LinkedHashSet<>();
+        JsonArray values = body.getAsJsonArray(name);
+        if (values == null) return result;
+        for (var value : values) {
+            String text = value.getAsString();
+            if (!text.matches("[0-9a-f]{16}")) throw new IllegalArgumentException(name + " 含无效值");
+            result.add(text);
+        }
         return result;
     }
 

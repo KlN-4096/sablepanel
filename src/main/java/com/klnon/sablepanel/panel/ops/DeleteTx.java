@@ -334,24 +334,6 @@ final class DeleteTx {
         }
     }
 
-    private static DependencyTransition changedDependencyRewrites(List<DependencyRewrite> before,
-                                                                  List<DependencyRewrite> after) {
-        if (before.size() != after.size()) throw new IllegalArgumentException("依赖改写状态不匹配");
-        List<DependencyRewrite> changedBefore = new ArrayList<>();
-        List<DependencyRewrite> changedAfter = new ArrayList<>();
-        for (int index = 0; index < before.size(); index++) {
-            DependencyRewrite previous = before.get(index);
-            DependencyRewrite next = after.get(index);
-            boolean sameTarget = previous.uuid().equals(next.uuid()) && previous.key().equals(next.key())
-                    && java.util.Objects.equals(previous.pointer(), next.pointer());
-            if (!sameTarget) throw new IllegalArgumentException("依赖改写目标不匹配");
-            if (previous.updated().equals(next.updated())) continue;
-            changedBefore.add(previous);
-            changedAfter.add(next);
-        }
-        return new DependencyTransition(List.copyOf(changedBefore), List.copyOf(changedAfter));
-    }
-
     private void writeDependencyTags(List<DependencyRewrite> rewrites) throws Exception {
         Set<SubLevelStorage> touched = new LinkedHashSet<>();
         for (DependencyRewrite rewrite : rewrites) {
@@ -926,9 +908,9 @@ final class DeleteTx {
 
     static GlobalSavedSubLevelPointer fallbackPointer(DiskScanner.EntryKey key, CompoundTag tag) {
         CompoundTag posTag = tag.getCompound("pose").getCompound("position");
-        int chunkX = OpKit.clamp(((int) Math.floor(posTag.getDouble("x"))) >> 4,
+        int chunkX = Math.clamp(((int) Math.floor(posTag.getDouble("x"))) >> 4,
                 key.rx() * 32, key.rx() * 32 + 31);
-        int chunkZ = OpKit.clamp(((int) Math.floor(posTag.getDouble("z"))) >> 4,
+        int chunkZ = Math.clamp(((int) Math.floor(posTag.getDouble("z"))) >> 4,
                 key.rz() * 32, key.rz() * 32 + 31);
         return new GlobalSavedSubLevelPointer(new ChunkPos(chunkX, chunkZ),
                 (short) key.storage(), (short) key.index());

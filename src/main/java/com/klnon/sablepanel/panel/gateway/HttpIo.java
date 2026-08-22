@@ -104,12 +104,7 @@ final class HttpIo {
     }
 
     static void send(HttpExchange ex, int code, String type, byte[] body, boolean tryGzip) throws IOException {
-        send(ex, code, type, body, tryGzip, Map.of());
-    }
-
-    static void send(HttpExchange ex, int code, String type, byte[] body, boolean tryGzip,
-                     Map<String, String> headers) throws IOException {
-        send(ex, code, type, body, tryGzip, headers, null);
+        send(ex, code, type, body, tryGzip, Map.of(), null);
     }
 
     /** 唯一发送路径。{@code preGz} 非空 = 预压字节可用(对端接受即发,精确 Content-Length,无阈值)。 */

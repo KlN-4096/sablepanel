@@ -617,6 +617,12 @@ header .hbtn.stale{border-color:var(--warn);color:var(--warn)}
 .compRow .cnum{font-family:var(--mono);color:var(--dim);font-size:11.5px}
 .compMore{cursor:pointer;color:var(--acc);font-size:11.5px;padding:5px 0;user-select:none}
 .compMore:hover{text-decoration:underline}
+/* 原生 <details> 折叠:去默认三角,开合各显示一种标签 */
+.compRest summary{list-style:none}
+.compRest summary::-webkit-details-marker{display:none}
+.compRest .ifOpen{display:none}
+.compRest[open] .ifOpen{display:inline}
+.compRest[open] .ifClosed{display:none}
 /* 多选 */
 .gsel,.msel{width:13px;height:13px;flex:none;cursor:pointer;margin:0}
 /* 收藏星标:加大易点;未收藏弱化,hover 或已收藏点亮 */

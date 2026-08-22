@@ -141,14 +141,20 @@ function visibleGroupUuids(uuids){
   }
   return [...expanded];
 }
-/* 物理暂停按完整依赖组执行:全部固定后清除线速度和角速度,重启后保持。 */
-async function setPausedBodies(uuids, paused){
-  if (!uuids.length) return;
-  const r = await submitJob('/api/ops/pause', {method:'POST', body: JSON.stringify({uuids, paused})});
-  if (!r) return;
-  for (const u of visibleGroupUuids(uuids)) paused ? PAUSED.add(u) : PAUSED.delete(u);
+/* 暂停/冻结/常驻三个整组开关共用一条提交路径:提交作业→乐观更新对应集合→重画。
+   作业失败时下一次 loadBodies 会用服务端真值纠正回来。 */
+async function setBodyFlag(route, key, uuids, on, set){
+  if (!uuids.length) return null;
+  const r = await submitJob(route, {method:'POST', body: JSON.stringify({uuids, [key]: on})});
+  if (!r) return null;
+  for (const u of visibleGroupUuids(uuids)) on ? set.add(u) : set.delete(u);
   renderAll();
   if (SEL) renderDetail();
+  return r;
+}
+/* 物理暂停按完整依赖组执行:全部固定后清除线速度和角速度,重启后保持。 */
+function setPausedBodies(uuids, paused){
+  return setBodyFlag('/api/ops/pause', 'paused', uuids, paused, PAUSED);
 }
 function doPauseCurrent(){
   if (SEL) setPausedBodies([SEL.uuid], !PAUSED.has(SEL.uuid));
@@ -158,13 +164,8 @@ function doPauseSelected(paused){
 }
 /* 暂停 tick(冻结):后端按整个依赖组生效,点一个体会连坐全组。
    恢复 tick 才是危险动作 —— 大组一旦重新开跑就是主线程被压垮的那种崩,所以只在这头弹确认。 */
-async function setFrozenBodies(uuids, frozen){
-  if (!uuids.length) return;
-  const r = await submitJob('/api/ops/freeze', {method:'POST', body: JSON.stringify({uuids, frozen})});
-  if (!r) return;
-  for (const u of visibleGroupUuids(uuids)) frozen ? FROZEN.add(u) : FROZEN.delete(u);
-  renderAll();
-  if (SEL) renderDetail();
+function setFrozenBodies(uuids, frozen){
+  return setBodyFlag('/api/ops/freeze', 'frozen', uuids, frozen, FROZEN);
 }
 async function doFreezeCurrent(){
   if (!SEL) return;
@@ -189,19 +190,10 @@ async function doFreezeSelected(frozen){
   setFrozenBodies(uuids, frozen);
 }
 /* 常驻加载只管理 sable force-load ticket:不清速度、不固定物理、不暂停 tick。
-   取消时整组保存到磁盘并退出活动态。 */
-async function setForcedBodies(uuids, forced){
-  if (!uuids.length) return null;
-  const r = await submitJob('/api/ops/force_load', {method:'POST', body: JSON.stringify({uuids, forced})});
-  if (!r) return null;
-  // 乐观更新;作业失败时下一次 loadBodies 会用服务端真值纠正回来。
-  // 取消常驻不再清暂停/冻结意图(独立功能,意图保留到下次加载重新生效)。
-  for (const u of visibleGroupUuids(uuids)) {
-    forced ? FORCED.add(u) : FORCED.delete(u);
-  }
-  renderAll();
-  if (SEL) renderDetail();
-  return r;   // 副本对话框的唤醒出口要拿 job seq 等它结束
+   取消时整组保存到磁盘并退出活动态;取消不清暂停/冻结意图(独立功能,下次加载重新生效)。
+   返回值给自动修复等调用方拿 job seq 等终态。 */
+function setForcedBodies(uuids, forced){
+  return setBodyFlag('/api/ops/force_load', 'forced', uuids, forced, FORCED);
 }
 /**
  * 整维度停跑/恢复物理 —— sable 自己的 setPaused,跳掉 Rapier3D.step 那一整段。

@@ -310,6 +310,8 @@ let thumbObserver = null;
 function observeThumbs(){
   const boxes = [...document.querySelectorAll('.bthumb[data-tu]')]
     .filter(box => Number(box.dataset.tb) <= THUMB_MAX_BLOCKS);
+  // typeof 一道闸不够:races 的 vm 沙箱(以及别的半真环境)会把未定义全局兜成假构造器,
+  // 造出来的实例没有方法 —— 三连方法探测在真浏览器里恒真,在这类环境里是唯一的回退开关
   if (!thumbObserver && typeof IntersectionObserver !== 'undefined') {
     try {
       const observer = new IntersectionObserver(entries => {
@@ -658,7 +660,6 @@ function focusBody(uuid){
 /* ===================== 详情 ===================== */
 function select(b, g) {
   const sameMesh = SEL && SEL.uuid === b.uuid && MESH_UUID === b.uuid;
-  if (!sameMesh) compExpanded = {};
   SEL = b; SELG = g;
   const opening = DETAIL_UUID !== b.uuid;
   const fromBrowse = DETAIL_UUID === null;
@@ -839,9 +840,7 @@ function renderDetail(){
   // 目的坐标与当前坐标分离:仅在切换选中体时预填一次,周期刷新不覆盖用户输入
   if (tpFilledFor !== b.uuid) {
     tpFilledFor = b.uuid;
-    document.getElementById('tx').value = pos[0]|0;
-    document.getElementById('ty').value = pos[1]|0;
-    document.getElementById('tz').value = pos[2]|0;
+    fillCoordInputs(pos);
   }
   document.getElementById('adoptRow').style.display = b.state === 'orphan' ? 'flex' : 'none';
   document.getElementById('dedupeBtn').style.display = (b.copies > 1 || g.dup) ? '' : 'none';
@@ -871,14 +870,16 @@ function renderDetail(){
   autoRepairBtn.title = T.autoRepairHint;
   loadPlayers();
 }
+function fillCoordInputs(pos){
+  document.getElementById('tx').value = pos[0]|0;
+  document.getElementById('ty').value = pos[1]|0;
+  document.getElementById('tz').value = pos[2]|0;
+}
 /* 把当前坐标填进目的坐标输入框(想基于当前位置微调时用) */
 function fillCurrentPos(){
   if (!SEL) return;
   const rt = SEL.runtime || {};
-  const pos = rt.x !== undefined ? [rt.x, rt.y, rt.z] : SEL.pos;
-  document.getElementById('tx').value = pos[0]|0;
-  document.getElementById('ty').value = pos[1]|0;
-  document.getElementById('tz').value = pos[2]|0;
+  fillCoordInputs(rt.x !== undefined ? [rt.x, rt.y, rt.z] : SEL.pos);
 }
 /* 传送玩家下拉:保留已选玩家,列表为空时禁用按钮。请求失败不能伪装成无人在线。 */
 function renderPlayerSelect(){
@@ -896,11 +897,8 @@ function renderPlayerSelect(){
   // 玩家列表异步回来时别把 renderDetail 的作业置灰覆写掉(传送自身会依链加载,不设加载门)
   if (btn) btn.disabled = !PLAYERS.length || !!(SEL && BUSY.get(SEL.uuid));
 }
-/* 成分表默认只列前 30 种,点"展开"看全部;切体时复位 */
+/* 成分表默认只列前 30 种,剩余折进原生 <details>;切体时 innerHTML 重建自动复位折叠态 */
 const COMP_PAGE = 30;
-/* 键=方块清单容器 id;undefined 与折叠等价,复位只需清空 */
-let compExpanded = {};
-function toggleComp(id){ compExpanded[id] = !compExpanded[id]; renderComposition(); }
 function renderComposition(){
   const selected = VIEW==='recycle' ? RSEL : SEL;
   for (const box of [document.getElementById('compList'), document.getElementById('rCompList'),
@@ -909,17 +907,17 @@ function renderComposition(){
     if (!MESH_DATA || !selected || MESH_UUID !== selected.uuid) { box.innerHTML = ''; continue; }
     const pal = [...MESH_DATA.palette].sort((a,b)=>b.count-a.count);
     const total = pal.reduce((s,p)=>s+p.count,0) || 1;
-    const open = compExpanded[box.id];
-    const shown = open ? pal : pal.slice(0, COMP_PAGE);
-    const rest = pal.length - shown.length;
-    box.innerHTML = (box.id==='compList'||box.id==='rCompList'||box.id==='copyComp'
-      ? `<h4>${T.composition}${MESH_DATA.truncated?T.pvTrunc:''}</h4>` : '') +
-      shown.map(p => `<div class="compRow">
+    const row = p => `<div class="compRow">
         <span class="chip" style="background:#${(p.color>>>0).toString(16).padStart(6,'0')}"></span>
         <span class="cname" title="${esc(p.id)}">${esc(p.zh)}</span>
         <span class="cnum">${fmt(p.count)} · ${(p.count/total*100).toFixed(1)}%</span>
-      </div>`).join('') +
-      (rest > 0 ? `<div class="compRow compMore" onclick="toggleComp('${box.id}')">▾ ${T.compMore(rest)}</div>`
-       : open && pal.length > COMP_PAGE ? `<div class="compRow compMore" onclick="toggleComp('${box.id}')">▴ ${T.compLess}</div>` : '');
+      </div>`;
+    const rest = pal.slice(COMP_PAGE);
+    box.innerHTML = (box.id==='compList'||box.id==='rCompList'||box.id==='copyComp'
+      ? `<h4>${T.composition}${MESH_DATA.truncated?T.pvTrunc:''}</h4>` : '') +
+      pal.slice(0, COMP_PAGE).map(row).join('') +
+      (rest.length ? `<details class="compRest"><summary class="compRow compMore"><span
+        class="ifClosed">▾ ${T.compMore(rest.length)}</span><span class="ifOpen">▴ ${T.compLess}</span></summary>${
+        rest.map(row).join('')}</details>` : '');
   }
 }

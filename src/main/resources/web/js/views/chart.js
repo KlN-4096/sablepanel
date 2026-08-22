@@ -1,7 +1,7 @@
 'use strict';
 /* 性能图表:窗口预设 + canvas 绘制 + 悬停交互。数据始终是 /api/stats 的内存 15 分钟窗口,
    预设只决定本地裁剪多长的尾部,切预设不重新请求 */
-onServerReset(() => { CHART.span = 300; CHART.hoverIndex = -1; CHART.hoverTime = null; });
+onServerReset(() => { CHART.span = 300; CHART.hoverTime = null; });
 function renderChartPresets(){
   const box = document.getElementById('chartPresets');
   if (!box) return;
@@ -18,7 +18,7 @@ function updateChartControls(){
   document.getElementById('chartMeta').textContent = status ? `${status} · ${meta}` : meta;
 }
 function setChartPreset(seconds){
-  CHART.span = seconds; CHART.hoverIndex = -1; CHART.hoverTime = null;
+  CHART.span = seconds; CHART.hoverTime = null;
   document.getElementById('chartTip').style.display='none';
   renderStats();
   drawPhysChart(document.getElementById('physChart'),true);
@@ -139,7 +139,7 @@ function chartMouseMove(event){
   if (localX<g.left||localX>g.left+g.plotW) { chartMouseLeave(); return; }
   const target=g.from+(localX-g.left)/g.plotW*(g.to-g.from);
   const frame=chartHoverFrame(times,target);
-  CHART.hoverIndex=frame.left; CHART.hoverTime=frame.time;
+  CHART.hoverTime=frame.time;
   const tip=document.getElementById('chartTip');
   tip.innerHTML=`<b>${fmtDateTime(frame.time*1000)}</b>`+series.map(item=>{
     const value=chartFrameValue(frame,item.values);
@@ -153,7 +153,7 @@ function chartMouseMove(event){
   drawPhysChart(cv,true);
 }
 function chartMouseLeave(){
-  CHART.hoverIndex=-1; CHART.hoverTime=null; document.getElementById('chartTip').style.display='none';
+  CHART.hoverTime=null; document.getElementById('chartTip').style.display='none';
   drawPhysChart(document.getElementById('physChart'),true);
 }
 function initChartInteractions(){

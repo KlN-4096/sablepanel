@@ -61,7 +61,6 @@ function renderStats(){
     const tip = document.getElementById('chartTip');
     tip.style.display = 'none';
     tip.innerHTML = '';
-    CHART.hoverIndex = -1;
     CHART.hoverTime = null;
   }
 }

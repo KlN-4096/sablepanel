@@ -31,6 +31,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -54,11 +56,6 @@ public final class TeleportOps {
     }
 
     @FunctionalInterface
-    interface RuntimeSampler {
-        RuntimeObservation sample() throws Exception;
-    }
-
-    @FunctionalInterface
     interface WaitStep {
         void await() throws InterruptedException;
     }
@@ -71,11 +68,6 @@ public final class TeleportOps {
     @FunctionalInterface
     interface TicketCheck {
         boolean test(TicketRef ticket) throws Exception;
-    }
-
-    @FunctionalInterface
-    interface PositionMover {
-        void move(Vector3d target);
     }
 
     TeleportOps(OpKit kit) {
@@ -166,11 +158,6 @@ public final class TeleportOps {
                 && Math.abs(position[0] - x) <= POSITION_EPSILON
                 && Math.abs(position[1] - y) <= POSITION_EPSILON
                 && Math.abs(position[2] - z) <= POSITION_EPSILON;
-    }
-
-    static boolean entryPositionMatches(String expectedEntry, DiskScanner.EntryKey entry,
-                                        double[] position, double x, double y, double z) {
-        return expectedEntry != null && expectedEntry.equals(entry.id()) && positionMatches(position, x, y, z);
     }
 
     /** 整组物理暂停/恢复；暂停成功后清除组内全部线速度和角速度。 */
@@ -473,14 +460,14 @@ public final class TeleportOps {
         return new ForceTicketPlan(keep, Set.copyOf(release));
     }
 
-    static Set<UUID> awaitSettledRuntimeMembers(RuntimeSampler sampler, WaitStep waitStep,
+    static Set<UUID> awaitSettledRuntimeMembers(Callable<RuntimeObservation> sampler, WaitStep waitStep,
                                                 int quietTicks, int maxObservedTicks) throws Exception {
         Set<UUID> observed = new LinkedHashSet<>();
         int lastTick = Integer.MIN_VALUE;
         int ticksWithoutNewMembers = 0;
         int observedTicks = 0;
         while (true) {
-            RuntimeObservation current = sampler.sample();
+            RuntimeObservation current = sampler.call();
             if (current.tick() != lastTick) {
                 lastTick = current.tick();
                 observedTicks++;
@@ -1103,11 +1090,11 @@ public final class TeleportOps {
     }
 
     static void alignBottomCenter(Supplier<Vector3d> pose, Supplier<Vector3d> anchor,
-                                  PositionMover move, Vector3d desired) {
+                                  Consumer<Vector3d> move, Vector3d desired) {
         Vector3d actual = anchor.get();
         for (int attempt = 0; attempt < POSITION_CORRECTION_ATTEMPTS; attempt++) {
             Vector3d targetPose = pose.get().add(desired).sub(actual);
-            move.move(targetPose);
+            move.accept(targetPose);
             actual = anchor.get();
             if (positionMatches(new double[]{actual.x, actual.y, actual.z},
                     desired.x, desired.y, desired.z)) return;

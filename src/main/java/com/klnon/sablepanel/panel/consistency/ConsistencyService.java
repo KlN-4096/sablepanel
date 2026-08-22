@@ -283,10 +283,6 @@ public final class ConsistencyService {
         return dangling;
     }
 
-    private static void requirePointerRepairBounded(List<PointerIssue> pointers) {
-        requireRepairBounded(pointers, List.of());
-    }
-
     private static void requireRepairBounded(List<PointerIssue> pointers,
                                              List<TrackingPointService.Issue> tracking) {
         Set<EntryFileKey> files = new LinkedHashSet<>();

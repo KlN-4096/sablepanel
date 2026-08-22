@@ -109,7 +109,7 @@ class PanelTransportTest {
     @Test
     void largeJsonResponseUsesGzipAndRoundTrips() throws Exception {
         byte[] body = ("{\"value\":\"" + "x".repeat(20_000) + "\"}").getBytes();
-        PanelFrame frame = PanelWire.response(3, new PanelResponse(200, "application/json", body, true));
+        PanelFrame frame = PanelWire.response(3, new PanelResponse(200, "application/json", body, true), true);
         assertTrue(frame.meta().get("gzip").getAsBoolean());
         PanelResponse decoded = PanelWire.response(frame);
         assertEquals(200, decoded.status());
@@ -128,7 +128,7 @@ class PanelTransportTest {
         PanelResponse source = new PanelResponse(200, "application/vnd.sablepanel.resource-shard",
                 new byte[]{1, 2, 3}, false, Map.of("ETag", "\"abc\"", "Cache-Control", "private"));
 
-        PanelResponse decoded = PanelWire.response(PanelWire.response(12, source));
+        PanelResponse decoded = PanelWire.response(PanelWire.response(12, source, true));
 
         assertEquals(source.contentType(), decoded.contentType());
         assertEquals(source.headers(), decoded.headers());

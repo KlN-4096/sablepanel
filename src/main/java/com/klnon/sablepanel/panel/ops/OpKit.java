@@ -73,10 +73,6 @@ public final class OpKit {
     }
 
     /** 加载中的体以 Sable 当前运行链为准；未加载体才使用严格磁盘依赖闭包。 */
-    List<UUID> expandToDependencyGroups(Collection<UUID> roots) throws Exception {
-        return dependencyGroups(roots).members();
-    }
-
     DependencySelection dependencyGroups(Collection<UUID> roots) throws Exception {
         return dependencyGroups(roots, false);
     }
@@ -168,14 +164,6 @@ public final class OpKit {
         LinkedHashSet<UUID> members = new LinkedHashSet<>();
         components.forEach(members::addAll);
         return new DependencySelection(requested, List.copyOf(members), components);
-    }
-
-    static List<UUID> selectDependencyGroups(Collection<UUID> roots,
-                                             Map<UUID, List<DiskScanner.EntryMeta>> disk,
-                                             Map<UUID, Set<UUID>> runtime) {
-        LinkedHashSet<UUID> all = new LinkedHashSet<>();
-        selectDependencyGroupSets(roots, disk, runtime).forEach(all::addAll);
-        return List.copyOf(all);
     }
 
     static List<Set<UUID>> selectDependencyGroupSets(Collection<UUID> roots,
@@ -881,10 +869,10 @@ public final class OpKit {
             }
             CompoundTag posTag = fresh.getCompound("pose").getCompound("position");
             int cx = plan.cold() != null ? plan.cold().chunkX()
-                    : clamp(((int) Math.floor(posTag.getDouble("x"))) >> 4,
+                    : Math.clamp(((int) Math.floor(posTag.getDouble("x"))) >> 4,
                     plan.key().rx() * 32, plan.key().rx() * 32 + 31);
             int cz = plan.cold() != null ? plan.cold().chunkZ()
-                    : clamp(((int) Math.floor(posTag.getDouble("z"))) >> 4,
+                    : Math.clamp(((int) Math.floor(posTag.getDouble("z"))) >> 4,
                     plan.key().rz() * 32, plan.key().rz() * 32 + 31);
             GlobalSavedSubLevelPointer ptr = new GlobalSavedSubLevelPointer(
                     new ChunkPos(cx, cz), (short) plan.key().storage(), (short) plan.key().index());
@@ -899,10 +887,6 @@ public final class OpKit {
 
     static boolean preparedTagMatches(CompoundTag expected, CompoundTag actual) {
         return actual != null && expected.equals(actual);
-    }
-
-    static int clamp(int v, int lo, int hi) {
-        return Math.max(lo, Math.min(hi, v));
     }
 
     ServerLevel levelOf(String dim) {

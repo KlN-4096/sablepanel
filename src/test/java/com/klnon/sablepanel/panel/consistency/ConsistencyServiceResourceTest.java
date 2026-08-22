@@ -82,11 +82,11 @@ class ConsistencyServiceResourceTest {
         scan.setAccessible(true);
         List<?> issues = (List<?>) scan.invoke(null,
                 Map.of(DIMENSION, directory), Set.of(), new ArrayList<>());
-        Method bound = ConsistencyService.class.getDeclaredMethod("requirePointerRepairBounded", List.class);
+        Method bound = ConsistencyService.class.getDeclaredMethod("requireRepairBounded", List.class, List.class);
         bound.setAccessible(true);
 
         InvocationTargetException error = assertThrows(InvocationTargetException.class,
-                () -> bound.invoke(null, issues));
+                () -> bound.invoke(null, issues, List.of()));
         assertTrue(error.getCause() instanceof IllegalArgumentException);
         assertTrue(error.getCause().getMessage().contains("分批选择"));
     }

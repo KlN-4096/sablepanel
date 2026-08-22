@@ -18,7 +18,7 @@ import java.util.function.Function;
 public final class ResourcePreparation implements AutoCloseable {
     @FunctionalInterface
     public interface Task {
-        VanillaResourceCache.Baseline run(VanillaResourceCache.ProgressListener progress) throws Exception;
+        VanillaResourceCache.Baseline run(java.util.function.Consumer<VanillaResourceCache.Progress> progress) throws Exception;
     }
 
     private static final int QUEUE_LIMIT = 8;

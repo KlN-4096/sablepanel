@@ -139,7 +139,6 @@ function clearRecycleSelection(){ R_SELECTED.clear(); renderRecycle(); }
 function selectRecycleBody(groupId, uuid){
   const group=RECYCLE_BY_ID.get(groupId), body=group&&(group.bodies||[]).find(item=>item.uuid===uuid);
   if (!body) return;
-  if (!RSEL || RSEL.uuid!==uuid) compExpanded={};
   RSELG=group; RSEL=body; renderRecycleDetail(); renderRecycle();
   loadRecycleMesh(groupId,uuid);
 }

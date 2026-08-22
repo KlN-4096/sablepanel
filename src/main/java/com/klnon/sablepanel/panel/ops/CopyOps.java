@@ -71,7 +71,7 @@ public final class CopyOps {
     public CompoundTag copyVersionTag(UUID uuid, String versionId) throws Exception {
         List<String> warnings = new ArrayList<>();
         CopyVersionScanner.Version version = requireVersion(
-                inspectVersionState(uuid, warnings).scan(), versionId, false);
+                inspectVersionState(uuid, warnings).scan(), versionId);
         CopyVersionScanner.Copy preview = version.copies().stream()
                 .filter(copy -> copy.uuid().equals(uuid)).findFirst()
                 .orElseGet(() -> version.copies().stream().max(
@@ -96,18 +96,15 @@ public final class CopyOps {
                 Set.copyOf(external), Map.copyOf(active), runtimeVersion == null ? null : runtimeVersion.id());
     }
 
-    private static CopyVersionScanner.Version requireVersion(CopyVersionScanner.Scan scan, String versionId,
-                                                              boolean complete) {
-        CopyVersionScanner.Version version = scan.versions().stream()
+    private static CopyVersionScanner.Version requireVersion(CopyVersionScanner.Scan scan, String versionId) {
+        return scan.versions().stream()
                 .filter(candidate -> candidate.id().equals(versionId)).findFirst()
                 .orElseThrow(() -> new IllegalStateException("副本版本已经变化，请重新扫描"));
-        if (complete && !version.complete()) throw new IllegalStateException("不能选择依赖不完整的版本");
-        return version;
     }
 
     private static CopyVersionScanner.Version requireSelectableVersion(CopyVersionScanner.Scan scan,
                                                                         String versionId) {
-        CopyVersionScanner.Version version = requireVersion(scan, versionId, false);
+        CopyVersionScanner.Version version = requireVersion(scan, versionId);
         if (!version.complete() && !CopyVersionScanner.repairableCurrent(scan, version)) {
             throw new IllegalStateException("不能选择依赖不完整的版本");
         }

@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 绕过去的路:守卫跑完之后调用方又追加了字段、集群节点自己应答的 {@code /api/servers}
  * 压根不经过 API 层、异常路径直接构造响应。
  * <p>
- * 真正的必经之路只有 {@link PanelWire#response(long, PanelResponse)} ——
+ * 真正的必经之路只有 {@link PanelWire#response(long, PanelResponse, boolean)} ——
  * {@code PanelTcpServer} 和 {@code PanelTcpClient} 两边所有 {@code sendResponse} 都过它。
  * 本用例判的就是这一点:超限出来的必须是一个小的 500 帧,不是异常(异常等于断连),
  * 也不是缺字段的 200。
@@ -37,7 +37,7 @@ class PanelWireLimitTest {
 
     @Test
     void oversizedResponseBecomesASmallErrorFrameNotADroppedConnection() throws Exception {
-        PanelFrame frame = PanelWire.response(7, oversized(false));
+        PanelFrame frame = PanelWire.response(7, oversized(false), true);
 
         assertEquals(PanelFrame.RESPONSE, frame.type());
         assertEquals(7, frame.requestId(), "帧号要保持,否则请求方那边会一直挂到超时");
@@ -55,7 +55,7 @@ class PanelWireLimitTest {
      */
     @Test
     void oversizedCompressibleResponseIsCappedBeforeItIsCompressed() throws Exception {
-        PanelFrame frame = PanelWire.response(9, oversized(true));
+        PanelFrame frame = PanelWire.response(9, oversized(true), true);
 
         assertEquals(500, frame.meta().get("status").getAsInt(),
                 "能压缩不等于能发:接收侧解压同样有上限");
@@ -67,7 +67,7 @@ class PanelWireLimitTest {
     @Test
     void ordinaryResponseGoesThroughUntouched() throws Exception {
         byte[] body = "{\"ok\":true}".getBytes(StandardCharsets.UTF_8);
-        PanelFrame frame = PanelWire.response(3, new PanelResponse(200, "application/json", body, false));
+        PanelFrame frame = PanelWire.response(3, new PanelResponse(200, "application/json", body, false), true);
 
         assertEquals(200, frame.meta().get("status").getAsInt());
         assertArrayEquals(body, frame.body(), "没超限的响应必须原样发出");

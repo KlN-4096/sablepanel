@@ -235,42 +235,40 @@ public final class RecycleStore {
     }
 
     private String commit(Stage stage, String state) throws IOException {
-        requirePending(stage);
-        if (RecycleVersions.hasOldMarker(stage.directory)) throw new IOException("旧版本事务不能注册为最新版本");
-        long now = System.currentTimeMillis();
-        stage.manifest.addProperty("state", state);
-        stage.manifest.addProperty("deleted_at", now);
-        writeJsonAtomic(stage.directory.resolve(MANIFEST), stage.manifest);
-        Files.createDirectories(this.root);
-        Path destination = this.root.resolve(stage.id);
-        if (Files.exists(destination)) throw new IOException("回收组 ID 已存在: " + stage.id);
-        Set<String> previous = this.versions.prepareVersionTransaction(stage.directory, stage.manifest);
-        AtomicIo.move(stage.directory, destination);
-        stage.committed = true;
-        this.versions.registerLatest(stage.id, RecycleVersions.bodyUuids(stage.manifest), previous);
-        try {
-            this.versions.completeVersionTransaction(destination);
-        } catch (Exception error) {
-            SablePanel.LOGGER.warn("sablepanel: recycle version transaction remains pending for {}", stage.id, error);
-        }
-        invalidateCaches();
-        return stage.id;
+        return commit(stage, state, true);
     }
 
     private String commitArchived(Stage stage, String state) throws IOException {
+        return commit(stage, state, false);
+    }
+
+    /** latest=true 注册为最新版本(带版本事务);false 归档旧版本,不进版本索引 */
+    private String commit(Stage stage, String state, boolean latest) throws IOException {
         requirePending(stage);
-        if (!state.equals(RecycleVersions.archivedState(stage.directory))) {
+        if (latest && RecycleVersions.hasOldMarker(stage.directory)) {
+            throw new IOException("旧版本事务不能注册为最新版本");
+        }
+        if (!latest && !state.equals(RecycleVersions.archivedState(stage.directory))) {
             throw new IOException("旧版本事务标记与提交状态不一致");
         }
-        long now = System.currentTimeMillis();
         stage.manifest.addProperty("state", state);
-        stage.manifest.addProperty("deleted_at", now);
+        stage.manifest.addProperty("deleted_at", System.currentTimeMillis());
         writeJsonAtomic(stage.directory.resolve(MANIFEST), stage.manifest);
         Files.createDirectories(this.root);
         Path destination = this.root.resolve(stage.id);
         if (Files.exists(destination)) throw new IOException("回收组 ID 已存在: " + stage.id);
+        Set<String> previous = latest
+                ? this.versions.prepareVersionTransaction(stage.directory, stage.manifest) : null;
         AtomicIo.move(stage.directory, destination);
         stage.committed = true;
+        if (latest) {
+            this.versions.registerLatest(stage.id, RecycleVersions.bodyUuids(stage.manifest), previous);
+            try {
+                this.versions.completeVersionTransaction(destination);
+            } catch (Exception error) {
+                SablePanel.LOGGER.warn("sablepanel: recycle version transaction remains pending for {}", stage.id, error);
+            }
+        }
         invalidateCaches();
         return stage.id;
     }

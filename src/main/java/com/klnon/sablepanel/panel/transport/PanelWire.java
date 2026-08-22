@@ -19,7 +19,7 @@ final class PanelWire {
      * 单个响应体的硬上限,给帧头和 meta 留一档余量。
      * <p>
      * 这是唯一不可绕过的那道。两边的 {@code sendResponse} 全部经过
-     * {@link #response(long, PanelResponse)}:集群节点自己应答的 {@code /api/servers} 和
+     * {@link #response(long, PanelResponse, boolean)}:集群节点自己应答的 {@code /api/servers} 和
      * {@code /api/cluster/token}、跨服转发、401、以及各处 catch 出来的 500 都在内。
      * 各构建点的字节预算只是"内容目标",算的是自己那一部分——管不到调用方随后追加的字段,
      * 也管不到将来新增的端点,所以那些都不能当成上限。
@@ -60,11 +60,7 @@ final class PanelWire {
                 string(meta, "token"), string(meta, "target"));
     }
 
-    static PanelFrame response(long id, PanelResponse response) throws IOException {
-        return response(id, response, true);
-    }
-
-    private static PanelFrame response(long id, PanelResponse response, boolean allowCompression) throws IOException {
+    static PanelFrame response(long id, PanelResponse response, boolean allowCompression) throws IOException {
         PanelResponse capped = cap(response);
         byte[] body = capped.body();
         boolean compressed = allowCompression && capped.compressible() && body.length > COMPRESS_AFTER;

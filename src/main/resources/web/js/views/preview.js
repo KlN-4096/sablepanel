@@ -3,8 +3,7 @@
 let previewRuntime = null;
 let fsMode = false;
 let previewRequestSeq = 0, previewAbort = null;
-let dragging = false, autoRotate = localStorage.getItem('spRot') !== '0';
-let rotSpeed = parseFloat(localStorage.getItem('spRotSpeed') || '0.18');
+let autoRotate = localStorage.getItem('spRot') !== '0';
 
 /* previewWrap 挪宿主(视图切换/副本弹层开合共用):画布节点常驻复用,
    搬完把 renderer 的 canvas 拽回容器首位 —— 三处此前各抄一份 */
@@ -32,7 +31,8 @@ function initGL() {
     onPointerMove: pointer => moveHoverTip(pointer)
   }).init();
   updateRotateUi();
-  const speed = document.getElementById('rotSpeed'); if (speed) speed.value = Math.round(rotSpeed / 1.5 * 100);
+  const speed = document.getElementById('rotSpeed');
+  if (speed) speed.value = Math.round(parseFloat(localStorage.getItem('spRotSpeed') || '0.18') / 1.5 * 100);
 }
 
 function updateRotateUi() {
@@ -146,7 +146,7 @@ function moveHoverTip(pointer) {
 }
 
 function toggleRotate() { if (previewRuntime) previewRuntime.toggleRotate(); else { autoRotate = !autoRotate; updateRotateUi(); } }
-function setRotSpeed(value) { rotSpeed = Number(value) / 100 * 1.5; localStorage.setItem('spRotSpeed', String(rotSpeed)); if (previewRuntime) previewRuntime.setRotSpeed(value); }
+function setRotSpeed(value) { if (previewRuntime) previewRuntime.setRotSpeed(value); }
 async function retryPreviewResources() {
   const context = captureCtx();
   try {

@@ -34,14 +34,6 @@ class PauseServiceAnchorTest {
     }
 
     @Test
-    void onlyExplicitPhysicsPauseRequiresAConstraint() {
-        assertTrue(PauseService.holdRequired(true, false, false));
-        assertFalse(PauseService.holdRequired(false, true, false));
-        assertFalse(PauseService.holdRequired(false, false, true));
-        assertFalse(PauseService.holdRequired(false, false, false));
-    }
-
-    @Test
     void physicsPauseLocksBeforeClearingVelocity() {
         List<String> calls = new ArrayList<>();
 
@@ -167,15 +159,9 @@ class PauseServiceAnchorTest {
 
     @Test
     void teleportDiskVerificationUsesTheSamePositionTolerance() {
-        var current = new com.klnon.sablepanel.panel.storage.DiskScanner.EntryKey("overworld", 0, 0, 0, 1);
-        var stale = new com.klnon.sablepanel.panel.storage.DiskScanner.EntryKey("overworld", 0, 0, 0, 2);
         assertTrue(TeleportOps.positionMatches(new double[]{10.05, 20.05, 30.05}, 10, 20, 30));
         assertFalse(TeleportOps.positionMatches(new double[]{10.11, 20, 30}, 10, 20, 30));
         assertFalse(TeleportOps.positionMatches(new double[]{10, 20}, 10, 20, 30));
-        assertTrue(TeleportOps.entryPositionMatches(current.id(), current,
-                new double[]{10, 20, 30}, 10, 20, 30));
-        assertFalse(TeleportOps.entryPositionMatches(current.id(), stale,
-                new double[]{10, 20, 30}, 10, 20, 30));
     }
 
     @Test
