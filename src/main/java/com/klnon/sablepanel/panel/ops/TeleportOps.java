@@ -284,6 +284,9 @@ public final class TeleportOps {
         List<UUID> succeeded = new ArrayList<>();
         List<String> failures = new ArrayList<>();
         Exception firstFailure = null;
+        // 界内宇宙=整批选择的成员集:T1 分组过期(选组时脱开、执行时又挂回)导致链跨组时,
+        // 跨的仍是同批成员,放行;真正的局外体才触发中止。
+        Set<UUID> universe = Set.copyOf(selection.members());
         for (Set<UUID> component : selection.components()) {
             OpKit.DependencySelection group = componentSelection(selection, component);
             try {
@@ -294,7 +297,7 @@ public final class TeleportOps {
                     // 每组动手前取新的全局票快照:上一组刚摘掉的票不能被当成"操作期间被人动了票"
                     Set<UUID> snapshot = this.kit.onMainUntilComplete(
                             () -> ForceLoadService.forcedOnMain(this.kit.server));
-                    disableForceLoad(group, snapshot);
+                    disableForceLoad(group, snapshot, universe);
                     members = group.members();
                 }
                 succeeded.addAll(members);
@@ -528,23 +531,23 @@ public final class TeleportOps {
     }
 
     private JsonObject disableForceLoad(OpKit.DependencySelection selection,
-                                        Set<UUID> forcedSnapshot) throws Exception {
+                                        Set<UUID> forcedSnapshot, Set<UUID> universe) throws Exception {
         List<UUID> uuids = selection.members();
         Map<UUID, Set<String>> originalTickets = new LinkedHashMap<>();
         Map<UUID, StoredSnapshot> expectedStored = new LinkedHashMap<>();
         Map<UUID, DiskScanner.EntryKey> savedEntries = new LinkedHashMap<>();
+        // ThreadLocal 到不了主线程,在作业线程上取出捕获进 lambda(enable 侧同一句式)
+        JobService.Job job = JobService.current();
         try {
             JsonObject out = this.kit.onMainUntilComplete(() -> {
                 requireForcedTicketSnapshot(forcedSnapshot, ForceLoadService.forcedOnMain(this.kit.server));
                 Set<ServerLevel> touched = new LinkedHashSet<>();
                 Set<String> changedMetadata = new LinkedHashSet<>();
-                JobService.Job job = JobService.current();
                 originalTickets.putAll(ForceLoadService.panelTicketDimensionsOnMain(this.kit.server, uuids));
                 finishUnforce(new UnforceActions(
                         // 取消常驻只退出常驻本身:暂停/冻结意图刻意保留,体重新加载时由观察器按意图重新生效。
                         () -> {
                             if (job != null) job.phase("复核前置状态");
-                            this.kit.requirePreparedDependencyGroupsOnMain(selection);
                             Set<UUID> otherTickets = new LinkedHashSet<>();
                             for (UUID uuid : uuids) {
                                 if (ForceLoadService.hasOtherTicketOnMain(this.kit.server, uuid)) {
@@ -557,7 +560,7 @@ public final class TeleportOps {
                         },
                         () -> {
                             if (job != null) job.phase("卸载到存档");
-                            unloadGroupsOnMain(selection, touched, expectedStored);
+                            unloadGroupsOnMain(selection, universe, touched, expectedStored);
                         },
                         () -> {
                             if (job != null) job.phase("保存存档");
@@ -778,19 +781,29 @@ public final class TeleportOps {
         }
     }
 
-    private void unloadGroupsOnMain(OpKit.DependencySelection selection, Set<ServerLevel> touched,
+    /**
+     * 执行时定组:不再拿作业线程算好的组快照与现实做精确比对,而是在本切片内按真实链分解
+     * 闭包逐个卸载。快照与执行之间隔着若干 tick,活体组(绳缆挂/脱)在窗口里必变;切片内
+     * sable 不 tick,链不可能再动 —— 窗口归零。两道保险丝保留:链引入选择之外的成员
+     * (局外体中途拴上来)中止;闭包内非对称(挂接进行到一半的 1~2 tick)无覆盖锚点中止,
+     * 重试即过。每个闭包仍整链一次 moveToUnloaded:每成员落盘的 loading_dependencies =
+     * 所在闭包,与该瞬间真实拓扑一致 —— 逐成员分波排空会把跨波依赖写丢(断链制造机),已否决。
+     * 界内宇宙按整批选择计:T1 分组过期导致闭包跨组时,先到的组整链卸载,后到的组只剩摘票。
+     */
+    private void unloadGroupsOnMain(OpKit.DependencySelection selection, Set<UUID> universe,
+                                    Set<ServerLevel> touched,
                                     Map<UUID, StoredSnapshot> expectedStored) {
-        for (Set<UUID> component : selection.components()) {
-            Map<UUID, Set<UUID>> runtimeGroups = new LinkedHashMap<>();
-            for (UUID uuid : component) {
-                if (this.kit.resolveLoaded(uuid) == null) continue;
-                runtimeGroups.put(uuid, this.kit.loadedDependencyMembersOnMain(List.of(uuid)));
-            }
-            if (runtimeGroups.isEmpty()) continue;
-            UUID anchorUuid = exactGroupAnchor(component, selection.roots(), runtimeGroups);
+        Map<UUID, Set<UUID>> runtimeGroups = new LinkedHashMap<>();
+        for (UUID uuid : selection.members()) {
+            if (this.kit.resolveLoaded(uuid) == null) continue;
+            runtimeGroups.put(uuid, this.kit.loadedDependencyMembersOnMain(List.of(uuid)));
+        }
+        for (Set<UUID> closure : executionClosures(universe, runtimeGroups)) {
+            UUID anchorUuid = exactGroupAnchor(closure, selection.roots(), runtimeGroups);
             ServerSubLevel anchor = this.kit.resolveLoaded(anchorUuid);
             if (anchor == null) throw new IllegalStateException("完整卸载锚点已卸载: " + anchorUuid);
             Collection<ServerSubLevel> chain = SubLevelHelper.getLoadingDependencyChain(anchor);
+            // 闭包可能带进同批其他组的成员(T1 分组过期时),组级预检罩不住,他模组持票在此复查
             Set<UUID> otherTickets = new LinkedHashSet<>();
             for (ServerSubLevel body : chain) {
                 if (ForceLoadService.hasOtherTicketOnMain(this.kit.server, body.getUniqueId())) {
@@ -826,6 +839,18 @@ public final class TeleportOps {
             }
             touched.add(level);
         }
+    }
+
+    /** 本切片真实链的闭包分解;链越界(局外体挂进来)即中止 —— 界内抖动放行,旁观者保险丝保留 */
+    static List<Set<UUID>> executionClosures(Set<UUID> universe, Map<UUID, Set<UUID>> runtimeGroups) {
+        for (Map.Entry<UUID, Set<UUID>> entry : runtimeGroups.entrySet()) {
+            if (universe.containsAll(entry.getValue())) continue;
+            Set<UUID> outside = new LinkedHashSet<>(entry.getValue());
+            outside.removeAll(universe);
+            throw new IllegalStateException(
+                    "运行链引入了选择之外的成员，已中止: " + entry.getKey() + " -> " + outside);
+        }
+        return OpKit.mergeOverlappingGroups(runtimeGroups.values());
     }
 
     static UUID exactGroupAnchor(Set<UUID> expected, Collection<UUID> preferred,

@@ -317,7 +317,7 @@ public final class OpKit {
         return Map.copyOf(plans);
     }
 
-    private static List<Set<UUID>> mergeOverlappingGroups(Collection<Set<UUID>> selected) {
+    static List<Set<UUID>> mergeOverlappingGroups(Collection<Set<UUID>> selected) {
         List<Set<UUID>> groups = new ArrayList<>();
         for (Set<UUID> group : selected) {
             Set<UUID> merged = new LinkedHashSet<>(group);

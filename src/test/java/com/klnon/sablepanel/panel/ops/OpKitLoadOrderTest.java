@@ -187,6 +187,40 @@ class OpKitLoadOrderTest {
     }
 
     @Test
+    void unforceResolvesClosuresAtExecutionInsteadOfExactSnapshotMatch() {
+        UUID a = UUID.randomUUID();
+        UUID b = UUID.randomUUID();
+        UUID c = UUID.randomUUID();
+        UUID d = UUID.randomUUID();
+        UUID rope = UUID.randomUUID();
+        Set<UUID> universe = Set.of(a, b, c, d, rope);
+        Set<UUID> core = Set.of(a, b, c, d);
+
+        // 脱开瞬间:四体核心与绳子是两个干净闭包,各自可卸 —— 旧精确比对在此整组失败
+        Map<UUID, Set<UUID>> detached = Map.of(a, core, b, core, c, core, d, core,
+                rope, Set.of(rope));
+        List<Set<UUID>> closures = TeleportOps.executionClosures(universe, detached);
+        assertEquals(Set.of(core, Set.of(rope)), Set.copyOf(closures));
+        assertEquals(a, TeleportOps.exactGroupAnchor(core, List.of(a), detached));
+
+        // 挂接进行到一半(非对称重叠):合并成一个闭包但无覆盖锚点 —— 仍中止,重试即过
+        Map<UUID, Set<UUID>> midAttach = new java.util.LinkedHashMap<>(detached);
+        midAttach.put(rope, Set.of(rope, a));
+        assertEquals(List.of(universe), TeleportOps.executionClosures(universe, midAttach));
+        assertThrows(IllegalStateException.class,
+                () -> TeleportOps.exactGroupAnchor(universe, List.of(a), midAttach));
+    }
+
+    @Test
+    void unforceStillAbortsWhenABystanderRopesIntoTheChain() {
+        UUID target = UUID.randomUUID();
+        UUID bystander = UUID.randomUUID();
+
+        assertThrows(IllegalStateException.class, () -> TeleportOps.executionClosures(
+                Set.of(target), Map.of(target, Set.of(target, bystander))));
+    }
+
+    @Test
     void cancelForceLoadUsesTheRootThatCoversTheWholeMergedComponent() {
         UUID balloon = UUID.randomUUID();
         UUID balloonPart = UUID.randomUUID();
