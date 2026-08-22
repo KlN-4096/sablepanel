@@ -700,21 +700,25 @@ public final class TeleportOps {
      */
     public JsonObject setFrozen(List<UUID> requested, boolean frozen) throws Exception {
         List<UUID> uuids;
-        if (frozen) {
-            uuids = this.kit.onMain(() -> {
-                List<UUID> members = this.kit.loadedDependencyGroupsOnMain(requested, true).members();
-                requireLoadedGroup(members);
-                FreezeService.applyOnMain(members, true);
-                return members;
-            });
-        } else {
-            OpKit.DependencySelection selection = this.kit.dependencyGroups(requested);
-            uuids = selection.members();
-            this.kit.onMain(() -> {
-                this.kit.requirePreparedDependencyGroupsOnMain(selection);
-                FreezeService.applyOnMain(uuids, false);
-                return null;
-            });
+        try {
+            if (frozen) {
+                uuids = this.kit.onMain(() -> {
+                    List<UUID> members = this.kit.loadedDependencyGroupsOnMain(requested, true).members();
+                    requireLoadedGroup(members);
+                    FreezeService.applyOnMain(members, true);
+                    return members;
+                });
+            } else {
+                OpKit.DependencySelection selection = this.kit.dependencyGroups(requested);
+                uuids = selection.members();
+                this.kit.onMain(() -> {
+                    this.kit.requirePreparedDependencyGroupsOnMain(selection);
+                    FreezeService.applyOnMain(uuids, false);
+                    return null;
+                });
+            }
+        } finally {
+            FreezeService.persist();
         }
         for (UUID uuid : requested) this.kit.audit(frozen ? "freeze" : "thaw", uuid, null, null);
         JsonObject out = new JsonObject();

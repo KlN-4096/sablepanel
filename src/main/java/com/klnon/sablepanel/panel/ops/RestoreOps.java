@@ -75,6 +75,7 @@ public final class RestoreOps {
         } finally {
             PauseService.persist();
             ForceLoadService.persist();
+            FreezeService.persist();
         }
     }
 
@@ -256,6 +257,7 @@ public final class RestoreOps {
         } finally {
             if (!paused.isEmpty()) PauseService.persist();
             ForceLoadService.persist();
+            FreezeService.persist();
         }
     }
 

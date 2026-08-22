@@ -39,11 +39,10 @@ public final class FreezeService {
         return Set.copyOf(FROZEN);
     }
 
-    /** 主线程:登记/解除冻结并落盘。方块实体下一 tick 自动生效,无需触碰已加载的体。 */
+    /** 主线程:登记/解除冻结。方块实体下一 tick 自动生效;调用方离开主线程后再 {@link #persist()}。 */
     public static void applyOnMain(Collection<UUID> uuids, boolean frozen) {
         if (frozen) FROZEN.addAll(uuids);
         else uuids.forEach(FROZEN::remove);
-        save();
     }
 
     /**
@@ -74,7 +73,8 @@ public final class FreezeService {
         FROZEN.addAll(FILE.loadUuids("frozen bodies"));
     }
 
-    private static void save() {
+    /** 作业线程:意图落盘。AtomicIo 的 Windows 重试最长睡半秒,不能睡在主线程上。 */
+    public static void persist() {
         FILE.saveUuids(FROZEN);
     }
 
