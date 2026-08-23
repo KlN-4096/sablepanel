@@ -11,6 +11,7 @@ document.addEventListener('click', e => {
     document.getElementById('srvPop').style.display = 'none';
 });
 /* ===================== 启动 ===================== */
+applyStaticI18n();
 loadFav();
 renderSortRows();
 initChartInteractions();

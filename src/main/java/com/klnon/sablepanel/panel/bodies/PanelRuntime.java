@@ -354,7 +354,7 @@ public final class PanelRuntime implements AutoCloseable {
             });
         } catch (Throwable error) {
             SablePanel.LOGGER.error("sablepanel: failed to detach native force-load tickets before shutdown", error);
-            throw new IllegalStateException("停服前常驻票清理失败，已中止正常停服保存", error);
+            throw new IllegalStateException("停服前常驻票清理失败,已中止正常停服保存", error);
         }
     }
 

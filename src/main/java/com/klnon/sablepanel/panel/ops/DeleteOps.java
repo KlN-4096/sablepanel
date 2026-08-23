@@ -105,7 +105,7 @@ public final class DeleteOps {
                 run.statuses.computeIfAbsent(target, DeleteTx.DeleteStatus::new);
             }
         }
-        if (run.statuses.size() > 500) throw new IllegalStateException("依赖组展开后超过 500 个物理体");
+        if (run.statuses.size() > 500) throw new IllegalStateException("物理组展开后超过 500 个物理体");
         prepareDeleteSemantics(run.components, run.statuses);
         stageDeleteBackups(run.components, run.statuses);
         if (!run.dependencyRewrites.isEmpty()) {
@@ -253,7 +253,7 @@ public final class DeleteOps {
                         state.get("frozen").getAsBoolean()));
             }
             if (conflict) {
-                this.tx.failComponent(component, statuses, "依赖组存在内容不同的副本，请先处理副本后重试删除");
+                this.tx.failComponent(component, statuses, "物理组存在内容不同的副本,请先处理副本后重试删除");
             }
         }
     }
@@ -322,7 +322,7 @@ public final class DeleteOps {
                         this.restore.restoreOperationalState(this.recycle.loadStage(component.stage));
                     } catch (Exception stateError) {
                         this.tx.failComponent(component, statuses,
-                                "删除未发生，但暂停/常驻状态恢复失败: " + messageOf(stateError));
+                                "删除未发生,但暂停/常驻状态恢复失败: " + messageOf(stateError));
                         try {
                             String groupId = this.recycle.commitRecoveryRequired(component.stage);
                             for (UUID uuid : component.targets) statuses.get(uuid).recycleGroup = groupId;
@@ -339,7 +339,7 @@ public final class DeleteOps {
                 RecycleStore.RestoreGroup rollback = this.recycle.loadStage(component.stage);
                 this.restore.restoreGroupData(rollback, true, warnings);
                 for (UUID uuid : component.targets) statuses.get(uuid).restored = true;
-                this.tx.failComponent(component, statuses, "删除失败，已从临时事务自动恢复原依赖组");
+                this.tx.failComponent(component, statuses, "删除失败,已从临时事务自动恢复原物理组");
                 restoredAny = true;
                 // 发生过 removeSubLevel 的组必须留下备份:sable 的 queuedDeletion 在 saveAll
                 // 失败时不会清空,盘上"看似还在"的条目仍可能被下一次自动保存清掉。
@@ -358,10 +358,10 @@ public final class DeleteOps {
                     String groupId = this.recycle.commitRecoveryRequired(component.stage);
                     for (UUID uuid : component.targets) statuses.get(uuid).recycleGroup = groupId;
                     this.tx.failComponent(component, statuses,
-                            "删除失败且自动恢复失败，完整备份已进入回收站: " + groupId);
+                            "删除失败且自动恢复失败,完整备份已进入回收站: " + groupId);
                 } catch (Exception keepError) {
                     this.tx.failComponent(component, statuses,
-                            "删除失败且自动恢复失败，内部事务已保留: " + component.stage.id());
+                            "删除失败且自动恢复失败,内部事务已保留: " + component.stage.id());
                     error.addSuppressed(keepError);
                     SablePanel.LOGGER.error("sablepanel: failed to expose recovery transaction {}",
                             component.stage.id(), keepError);

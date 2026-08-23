@@ -101,7 +101,7 @@ public final class CopyVersionScanner {
             throws IOException {
         List<Set<UUID>> groups = DiskScanner.selectedDependencyComponents(metadata, List.of(target));
         Set<UUID> members = groups.isEmpty() ? Set.of(target) : groups.get(0);
-        if (members.size() > MAX_MEMBERS) throw new IOException("副本依赖组超过 " + MAX_MEMBERS + " 个成员");
+        if (members.size() > MAX_MEMBERS) throw new IOException("副本物理组超过 " + MAX_MEMBERS + " 个成员");
         return Set.copyOf(members);
     }
 

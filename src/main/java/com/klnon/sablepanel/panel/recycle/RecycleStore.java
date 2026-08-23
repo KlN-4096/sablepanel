@@ -183,12 +183,12 @@ public final class RecycleStore {
                                String archivedState, int storedFiles, int pendingFiles) throws IOException {
         if (sources.isEmpty()) throw new IllegalArgumentException("回收组没有可备份条目");
         if (sources.size() > this.config.recycleMaxFiles) {
-            throw new IllegalStateException("该依赖组需要 " + sources.size()
-                    + " 个备份文件，超过当前回收站上限 " + this.config.recycleMaxFiles);
+            throw new IllegalStateException("该物理组需要 " + sources.size()
+                    + " 个备份文件,超过当前回收站上限 " + this.config.recycleMaxFiles);
         }
         if (sources.size() > this.config.recycleMaxFiles - storedFiles - pendingFiles) {
             throw new IllegalStateException("回收站已占用 " + storedFiles
-                    + " 个文件，待提交事务已占用 " + pendingFiles + " 个文件，剩余容量不足；请先人工彻底删除旧组");
+                    + " 个文件,待提交事务已占用 " + pendingFiles + " 个文件,剩余容量不足;请先人工彻底删除旧组");
         }
         Files.createDirectories(this.pendingRoot);
         String id = ID_TIME.format(LocalDateTime.now()) + "-" + UUID.randomUUID().toString().substring(0, 8);

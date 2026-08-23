@@ -58,7 +58,9 @@ function makeSandbox(state) {
     body: { classList: { add(){}, remove(){}, toggle(){} } },
     hidden: false,
   };
-  const store = new Map();
+  // spLang 钉死中文:navigator 经 Proxy 回落到宿主 Node 的 navigator(language='en-US'),
+  // 不钉的话 en 词典一存在,全部中文断言就整批换语言
+  const store = new Map([['spLang', 'zh']]);
   // 只放浏览器特有的东西;标准内置(Boolean/Array/…)由 Proxy 回落到宿主 globalThis ——
   // 手写清单漏一个就会被兜成 noop,`parts.filter(Boolean)` 会静悄悄把整个数组过滤空
   const sandbox = {
@@ -246,7 +248,7 @@ test('总览分别按依赖组和成员体统计规模', () => {
   assert.equal(summary.bodies, 4);
   evalIn(sandbox, 'renderDash()');
   const html = evalIn(sandbox, "document.getElementById('dashMid').innerHTML");
-  assert.match(html, /依赖组规模/);
+  assert.match(html, /物理组规模/);
   assert.match(html, /成员体规模/);
   assert.match(html, />1 组</);
   assert.match(html, />2 体</);
@@ -2529,6 +2531,27 @@ test('外部加载徽章:已加载且非面板常驻的体单独标出', async (
   const clean = evalIn(sandbox,
     "groupTags({bodies:[{uuid:'X',state:'stored'},{uuid:'U',state:'loaded'}]}).join('')");
   assert.ok(!clean.includes(evalIn(sandbox, 'T.forcedExternalBadge')), '未加载或面板常驻的体不标外部');
+});
+
+test('英文词典与中文完全奇偶:键集、类型、函数元数、MANUAL 页数', () => {
+  const { sandbox } = setup();
+  const report = JSON.parse(evalIn(sandbox, `JSON.stringify((() => {
+    const zh = Object.keys(DICT.zh), en = Object.keys(DICT.en);
+    return {
+      missing: zh.filter(k => !(k in DICT.en)),
+      extra: en.filter(k => !(k in DICT.zh)),
+      mismatch: zh.filter(k => (k in DICT.en) && (typeof DICT.zh[k] !== typeof DICT.en[k]
+        || (typeof DICT.zh[k] === 'function' && DICT.zh[k].length !== DICT.en[k].length))),
+      pages: [MANUAL.zh.length, MANUAL.en.length],
+      lang: LANG, sample: DICT.en.forceBody,
+    };
+  })())`));
+  assert.deepEqual(report.missing, [], '每个中文键都要有英文对应');
+  assert.deepEqual(report.extra, [], '英文不许有中文没有的键');
+  assert.deepEqual(report.mismatch, [], '词条类型与函数参数个数必须一致');
+  assert.deepEqual(report.pages, [6, 6], 'MANUAL 双语页数一致');
+  assert.equal(report.lang, 'zh', '沙箱必须钉死中文,否则全部中文断言换语言');
+  assert.equal(report.sample, 'Force-load', '英文用 MC 原生 force-load 词汇');
 });
 
 /* ---------- 运行 ---------- */

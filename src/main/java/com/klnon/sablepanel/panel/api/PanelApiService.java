@@ -235,13 +235,13 @@ public final class PanelApiService {
         this.routes.put("/api/recycle/restore", request -> {
             requirePost(request);
             List<String> groupIds = readRecycleIds(request);
-            return enqueue("回收站恢复", List.of(), groupIds.size() + " 个依赖组",
+            return enqueue("回收站恢复", List.of(), groupIds.size() + " 个物理组",
                     () -> this.ops.restore().restoreRecycleGroups(groupIds));
         });
         this.routes.put("/api/recycle/purge", request -> {
             requirePost(request);
             List<String> groupIds = readRecycleIds(request);
-            return enqueue("回收站彻底删除", List.of(), groupIds.size() + " 个依赖组",
+            return enqueue("回收站彻底删除", List.of(), groupIds.size() + " 个物理组",
                     () -> this.ops.restore().purgeRecycleGroups(groupIds));
         });
     }
@@ -592,7 +592,7 @@ public final class PanelApiService {
     private static List<String> readRecycleIds(PanelRequest request) {
         JsonArray values = request.jsonBody().getAsJsonArray("ids");
         if (values == null || values.isEmpty()) throw new IllegalArgumentException("ids 为空");
-        if (values.size() > 500) throw new IllegalArgumentException("单次最多处理 500 个依赖组");
+        if (values.size() > 500) throw new IllegalArgumentException("单次最多处理 500 个物理组");
         Set<String> result = new LinkedHashSet<>();
         for (var value : values) {
             String id = value.getAsString();

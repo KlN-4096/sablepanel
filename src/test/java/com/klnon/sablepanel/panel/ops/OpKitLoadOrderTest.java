@@ -168,7 +168,7 @@ class OpKitLoadOrderTest {
 
         assertEquals(List.of(living), known);
         assertEquals(1, failures.size());
-        assertTrue(failures.get(0).contains("依赖组根成员不存在"));
+        assertTrue(failures.get(0).contains("物理组根成员不存在"));
         assertTrue(failures.get(0).contains(deleted.toString().substring(0, 8)));
         assertEquals(List.of(living, deleted),
                 OpKit.knownForceLoadRoots(List.of(living, deleted),

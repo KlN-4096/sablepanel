@@ -133,7 +133,7 @@ public final class OpKit {
             if (!runtime.containsKey(root) && !disk.containsKey(root)) unknown.add(root);
         }
         if (unknown.isEmpty()) return requested;
-        failures.add("依赖组根成员不存在: " + shortUuids(unknown));
+        failures.add("物理组根成员不存在: " + shortUuids(unknown));
         return requested.stream().filter(root -> !unknown.contains(root)).toList();
     }
 
@@ -167,7 +167,7 @@ public final class OpKit {
         if (!coldRoots.isEmpty()) disk = strictScan(new ArrayList<>()).meta();
         Set<UUID> unknown = new LinkedHashSet<>();
         for (UUID root : coldRoots) if (!disk.containsKey(root)) unknown.add(root);
-        if (!unknown.isEmpty()) throw new IllegalStateException("依赖组根成员不存在: " + unknown);
+        if (!unknown.isEmpty()) throw new IllegalStateException("物理组根成员不存在: " + unknown);
         List<Set<UUID>> components = mergeOverlaps
                 ? selectForceLoadGroupSets(requested, disk, runtime)
                 : selectDependencyGroupSets(requested, disk, runtime);
@@ -193,7 +193,7 @@ public final class OpKit {
                     break;
                 }
                 if (!java.util.Collections.disjoint(existing, selected)) {
-                    throw new IllegalStateException("准备阶段依赖组相互重叠但不一致");
+                    throw new IllegalStateException("准备阶段物理组相互重叠但不一致");
                 }
             }
             if (!duplicate) groups.add(Set.copyOf(selected));
@@ -269,7 +269,7 @@ public final class OpKit {
                             "当前活动条目不在同次磁盘扫描中: " + uuid));
         }
         if (copies.size() == 1) return copies.get(0);
-        throw new IllegalStateException("依赖成员存在多份副本，无法选择常驻版本: " + uuid);
+        throw new IllegalStateException("依赖成员存在多份副本,无法选择常驻版本: " + uuid);
     }
 
     static Map<UUID, String> pointedForceLoadEntries(
@@ -355,7 +355,7 @@ public final class OpKit {
             if (body == null) missing.add(root);
             else members.addAll(loadingDependencyUuids(body));
         }
-        if (!missing.isEmpty()) throw new IllegalStateException("运行依赖组根成员未加载: " + missing);
+        if (!missing.isEmpty()) throw new IllegalStateException("运行物理组根成员未加载: " + missing);
         return Set.copyOf(members);
     }
 
@@ -393,7 +393,7 @@ public final class OpKit {
 
     static void requireExactRuntimeGroup(Set<UUID> expected, Set<UUID> actual, Set<UUID> missing) {
         if (!missing.isEmpty() || !actual.equals(expected)) {
-            throw new IllegalStateException("当前运行依赖组在操作期间发生变化: expected="
+            throw new IllegalStateException("当前运行物理组在操作期间发生变化: expected="
                     + expected + ", actual=" + actual + ", missing=" + missing);
         }
     }
@@ -413,7 +413,7 @@ public final class OpKit {
                 actual.add(member.getUniqueId());
             }
             if (!actual.equals(expected)) {
-                throw new IllegalStateException("当前运行依赖组在操作期间发生变化");
+                throw new IllegalStateException("当前运行物理组在操作期间发生变化");
             }
             Map<UUID, RuntimeSnapshot> snapshots = new LinkedHashMap<>();
             for (Map.Entry<UUID, ServerSubLevel> entry : bodies.entrySet()) {
@@ -453,7 +453,7 @@ public final class OpKit {
         Map<UUID, Set<UUID>> runtime = runtimeDependencyGroupsOnMain(requested);
         Set<UUID> missing = new LinkedHashSet<>(requested);
         missing.removeAll(runtime.keySet());
-        if (!missing.isEmpty()) throw new IllegalStateException("运行依赖组根成员未加载: " + missing);
+        if (!missing.isEmpty()) throw new IllegalStateException("运行物理组根成员未加载: " + missing);
         List<Set<UUID>> components = mergeOverlaps
                 ? selectForceLoadGroupSets(requested, Map.of(), runtime)
                 : selectDependencyGroupSets(requested, Map.of(), runtime);
@@ -546,7 +546,7 @@ public final class OpKit {
             throws IOException {
         CompoundTag tag = readVerified(dims, uuid, key);
         if (tag == null) {
-            throw new IOException("条目 " + key.id() + " 在准备阶段被 sable 搬迁，未执行删除，请重试");
+            throw new IOException("条目 " + key.id() + " 在准备阶段被 sable 搬迁,未执行删除,请重试");
         }
         return tag;
     }
