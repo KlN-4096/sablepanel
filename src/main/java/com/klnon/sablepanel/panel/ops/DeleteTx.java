@@ -1025,7 +1025,7 @@ final class DeleteTx {
         }
         if (deletedGroups.isEmpty()) return Map.of();
         Map<UUID, String> errors = new LinkedHashMap<>();
-        this.kit.onMain(() -> {
+        this.kit.onMainUntilComplete(() -> {
             for (Map<UUID, Map<DiskScanner.EntryKey, CompoundTag>> deleted : deletedGroups) {
                 errors.putAll(TrackingPointService.detachDeletedOnMain(this.kit.server, deleted));
             }

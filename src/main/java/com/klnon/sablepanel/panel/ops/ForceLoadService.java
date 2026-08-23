@@ -58,6 +58,8 @@ public final class ForceLoadService {
     private static final Set<UUID> REQUESTED = ConcurrentHashMap.newKeySet();
     /** 当前实际持票集合，供 HTTP 线程展示。 */
     private static final Set<UUID> ACTIVE = ConcurrentHashMap.newKeySet();
+    /** 被 Sable 永久 REMOVED 的意图本次运行不再后台复活；用户显式操作可按组件重开。 */
+    private static final Set<UUID> AUTO_RESTORE_BLOCKED = ConcurrentHashMap.newKeySet();
     private static final int STOP_DETACH_ATTEMPTS = 3;
     private static final IntentFile FILE = new IntentFile("forced.json");
 
@@ -76,6 +78,30 @@ public final class ForceLoadService {
 
     public static Set<UUID> requestedSnapshot() {
         return Set.copyOf(REQUESTED);
+    }
+
+    public static boolean autoRestoreAllowed(UUID uuid) {
+        return !AUTO_RESTORE_BLOCKED.contains(uuid);
+    }
+
+    public static void blockAutoRestoreAfterRemoval(UUID uuid) {
+        if (blockAutoRestoreAfterRemoval(uuid, REQUESTED)) {
+            SablePanel.LOGGER.error("sablepanel: body {} was permanently removed; automatic force-load restore is blocked until an explicit operation", uuid);
+        }
+    }
+
+    static boolean blockAutoRestoreAfterRemoval(UUID uuid, Set<UUID> requested) {
+        return uuid != null && requested.contains(uuid) && AUTO_RESTORE_BLOCKED.add(uuid);
+    }
+
+    static Set<UUID> takeAutoRestoreBlocks(Collection<UUID> uuids) {
+        Set<UUID> removed = new LinkedHashSet<>();
+        for (UUID uuid : uuids) if (AUTO_RESTORE_BLOCKED.remove(uuid)) removed.add(uuid);
+        return Set.copyOf(removed);
+    }
+
+    static void restoreAutoRestoreBlocks(Collection<UUID> uuids) {
+        AUTO_RESTORE_BLOCKED.addAll(uuids);
     }
 
     /**
@@ -98,6 +124,7 @@ public final class ForceLoadService {
     public static void reset() {
         REQUESTED.clear();
         ACTIVE.clear();
+        AUTO_RESTORE_BLOCKED.clear();
     }
 
     public static void captureNativeIntentsOnMain(MinecraftServer server) {
@@ -269,6 +296,7 @@ public final class ForceLoadService {
         }
         REQUESTED.remove(uuid);
         ACTIVE.remove(uuid);
+        AUTO_RESTORE_BLOCKED.remove(uuid);
         return Set.copyOf(changedDimensions);
     }
 
@@ -299,6 +327,7 @@ public final class ForceLoadService {
         if (isForcedOnMain(server, uuid)) throw new IllegalStateException("常驻票删除后仍残留: " + uuid);
         REQUESTED.remove(uuid);
         ACTIVE.remove(uuid);
+        AUTO_RESTORE_BLOCKED.remove(uuid);
         return Set.copyOf(changedDimensions);
     }
 
@@ -334,6 +363,7 @@ public final class ForceLoadService {
         if (!isForcedOnMain(server, uuid)) {
             REQUESTED.remove(uuid);
             ACTIVE.remove(uuid);
+            AUTO_RESTORE_BLOCKED.remove(uuid);
         }
     }
 
@@ -409,6 +439,10 @@ public final class ForceLoadService {
                     }
                     if (!panelTicket) continue;
                     UUID uuid = en.getKey();
+                    if (!autoRestoreAllowed(uuid)) {
+                        recover.add(uuid);
+                        continue;
+                    }
                     forced.add(uuid);
                     if (OpKit.loadedBody(c, uuid) != null) {
                         continue;

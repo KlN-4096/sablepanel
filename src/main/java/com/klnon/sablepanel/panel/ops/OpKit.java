@@ -78,11 +78,12 @@ public final class OpKit {
     }
 
     DependencySelection forcedDisableGroups(Collection<UUID> requested,
-                                             Collection<UUID> activeForced) throws Exception {
+                                             Collection<UUID> activeForced,
+                                             List<String> failures) throws Exception {
         List<UUID> selected = List.copyOf(new LinkedHashSet<>(requested));
         LinkedHashSet<UUID> roots = new LinkedHashSet<>(selected);
         roots.addAll(activeForced);
-        DependencySelection all = dependencyGroups(roots, true);
+        DependencySelection all = dependencyGroups(roots, true, failures);
         List<Set<UUID>> components = intersectingComponents(all.components(), selected);
         LinkedHashSet<UUID> members = new LinkedHashSet<>();
         components.forEach(members::addAll);
@@ -159,6 +160,11 @@ public final class OpKit {
     }
 
     private DependencySelection dependencyGroups(Collection<UUID> roots, boolean mergeOverlaps) throws Exception {
+        return dependencyGroups(roots, mergeOverlaps, null);
+    }
+
+    private DependencySelection dependencyGroups(Collection<UUID> roots, boolean mergeOverlaps,
+                                                 List<String> failures) throws Exception {
         List<UUID> requested = List.copyOf(new LinkedHashSet<>(roots));
         Map<UUID, Set<UUID>> runtime = runtimeDependencyGroups(requested);
         Set<UUID> coldRoots = new LinkedHashSet<>();
@@ -167,7 +173,10 @@ public final class OpKit {
         if (!coldRoots.isEmpty()) disk = strictScan(new ArrayList<>()).meta();
         Set<UUID> unknown = new LinkedHashSet<>();
         for (UUID root : coldRoots) if (!disk.containsKey(root)) unknown.add(root);
-        if (!unknown.isEmpty()) throw new IllegalStateException("物理组根成员不存在: " + unknown);
+        if (!unknown.isEmpty()) {
+            if (failures == null) throw new IllegalStateException("物理组根成员不存在: " + unknown);
+            requested = knownForceLoadRoots(requested, runtime, disk, failures);
+        }
         List<Set<UUID>> components = mergeOverlaps
                 ? selectForceLoadGroupSets(requested, disk, runtime)
                 : selectDependencyGroupSets(requested, disk, runtime);

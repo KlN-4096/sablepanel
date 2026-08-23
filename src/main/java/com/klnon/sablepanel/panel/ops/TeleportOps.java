@@ -35,6 +35,7 @@ import java.util.concurrent.Callable;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /** 运行态操作:传送/暂停/常驻加载/在线玩家交互。sable 交互全部主线程执行。 */
@@ -167,7 +168,7 @@ public final class TeleportOps {
      * 逐成员磁盘写+复核在主线程对大组是吊死风险。
      */
     public JsonObject clearVelocity(List<UUID> requested) throws Exception {
-        JsonObject out = this.kit.onMain(() -> {
+        JsonObject out = this.kit.onMainUntilComplete(() -> {
             Set<UUID> missing = new LinkedHashSet<>();
             Set<UUID> members = new LinkedHashSet<>();
             for (UUID root : new LinkedHashSet<>(requested)) {
@@ -237,7 +238,7 @@ public final class TeleportOps {
     public JsonObject setForced(List<UUID> requested, boolean forced) throws Exception {
         synchronized (this.kit.lock) {
             try {
-                return setForcedExclusive(requested, forced);
+                return setForcedExclusive(requested, forced, true);
             } finally {
                 ForceLoadService.persist();
             }
@@ -247,8 +248,15 @@ public final class TeleportOps {
     public void restoreForcedIntents(List<UUID> candidates) throws Exception {
         restoreForcedIntentGroups(this.kit.lock, this.kit.forceLoadIntentGroups(candidates),
                 ForceLoadService::requestedSnapshot,
-                current -> requireForcedGroupsSucceeded(setForcedExclusive(current, true)),
+                current -> {
+                    if (!autoRestoreGroupAllowed(current, ForceLoadService::autoRestoreAllowed)) return;
+                    requireForcedGroupsSucceeded(setForcedExclusive(current, true, false));
+                },
                 ForceLoadService::persist);
+    }
+
+    static boolean autoRestoreGroupAllowed(Collection<UUID> group, Predicate<UUID> allowed) {
+        return group.stream().allMatch(allowed);
     }
 
     static void restoreForcedIntents(Object lock, Collection<UUID> candidates,
@@ -293,7 +301,7 @@ public final class TeleportOps {
         void run(List<UUID> requested) throws Exception;
     }
 
-    private JsonObject setForcedExclusive(List<UUID> requested, boolean forced) throws Exception {
+    private JsonObject setForcedExclusive(List<UUID> requested, boolean forced, boolean explicit) throws Exception {
         // 常驻加载必须整组。只钉一部分是无效操作:PhysicsChunkTicketManager 按整条依赖链判定卸载,
         // 2026-08-08 实测给 192 体组里的一个成员挂票,体加载出来 827 毫秒后照样 remove UNLOADED,
         // 而作业还报 ok。挂票和摘票必须保持相同的整组语义。
@@ -307,7 +315,7 @@ public final class TeleportOps {
         List<String> failures = new ArrayList<>();
         OpKit.DependencySelection selection = forced
                 ? this.kit.forceLoadCandidates(requested, failures)
-                : this.kit.forcedDisableGroups(requested, forcedSnapshot);
+                : this.kit.forcedDisableGroups(requested, forcedSnapshot, failures);
         // 决议阶段有降级失败时那一单实质是多部分操作,不再走单组原样重抛
         int preflightFailures = failures.size();
         Exception firstFailure = null;
@@ -316,6 +324,7 @@ public final class TeleportOps {
         Set<UUID> universe = Set.copyOf(selection.members());
         for (Set<UUID> component : selection.components()) {
             OpKit.DependencySelection group = componentSelection(selection, component);
+            Set<UUID> blocked = explicit ? ForceLoadService.takeAutoRestoreBlocks(group.members()) : Set.of();
             try {
                 List<UUID> members;
                 if (forced) {
@@ -332,6 +341,7 @@ public final class TeleportOps {
                     this.kit.audit(forced ? "force_load" : "force_unload", uuid, null, null);
                 }
             } catch (Exception failure) {
+                ForceLoadService.restoreAutoRestoreBlocks(blocked);
                 if (firstFailure == null) firstFailure = failure;
                 failures.add("组[" + OpKit.shortUuids(component) + "]: "
                         + String.valueOf(failure.getMessage()));
@@ -1224,7 +1234,7 @@ public final class TeleportOps {
      */
     public JsonObject teleportPlayer(UUID uuid, UUID playerUuid) throws Exception {
         Map<UUID, OpKit.MemberPlan> chain = this.kit.prepareChain(uuid);
-        return this.kit.onMain(() -> {
+        return this.kit.onMainUntilComplete(() -> {
             var player = this.kit.server.getPlayerList().getPlayer(playerUuid);
             if (player == null) throw new IllegalStateException("玩家不在线");
             ServerSubLevel sl = this.kit.ensureLoaded(uuid, chain);

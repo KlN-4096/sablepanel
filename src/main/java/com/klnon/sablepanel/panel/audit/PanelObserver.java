@@ -1,6 +1,7 @@
 package com.klnon.sablepanel.panel.audit;
 
 import com.klnon.sablepanel.panel.ops.PauseService;
+import com.klnon.sablepanel.panel.ops.ForceLoadService;
 import com.google.gson.JsonObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelObserver;
 import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
@@ -96,6 +97,13 @@ public final class PanelObserver implements SubLevelObserver {
             PauseService.onBodyUnloaded(subLevel.getUniqueId());
         } catch (Throwable t) {
             SablePanel.LOGGER.warn("sablepanel: clearing body constraint handle failed", t);
+        }
+        if (reason == SubLevelRemovalReason.REMOVED) {
+            try {
+                ForceLoadService.blockAutoRestoreAfterRemoval(subLevel.getUniqueId());
+            } catch (Throwable t) {
+                SablePanel.LOGGER.warn("sablepanel: blocking automatic restore after permanent removal failed", t);
+            }
         }
         if (!ENABLED) return;
         try {

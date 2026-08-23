@@ -33,7 +33,7 @@ public final class AdoptOps {
             SablePanel.LOGGER.warn("sablepanel: adopt {} dependency closure hit the {} member cap, adopting partially",
                     uuid, OpKit.MAX_CHAIN);
         }
-        JsonObject result = this.kit.onMain(() -> {
+        JsonObject result = this.kit.onMainUntilComplete(() -> {
             JsonObject per = new JsonObject();
             for (Map.Entry<UUID, OpKit.MemberPlan> en : chain.entrySet()) {
                 UUID u = en.getKey();
