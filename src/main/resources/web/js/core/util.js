@@ -4,13 +4,13 @@
    R6:日间/夜间分组各记一个默认(spThemeDay/spThemeNight,由该组内最近一次手选决定);
    spTheme=当前手动选择,清掉即"跟随系统"——系统切明暗时落到对应组的默认上,而不是写死的图纸对 */
 const THEMES = [
-  {id:'light',          label:'图纸 · 米纸',     mode:'day',   swatch:['#e9e2cf','#f4eee0','#8a6420']},
-  {id:'aero-day',       label:'航空学 · 晴空',   mode:'day',   swatch:['#5297d2','#f2f7fd','#2c5fa8']},
-  {id:'dark',           label:'图纸 · 夜炭',     mode:'night', swatch:['#131313','#1c1c1d','#d0a354']},
-  {id:'aero-ink',       label:'航空学 · 墨夜',   mode:'night', swatch:['#0e0f14','#17181f','#acb9ec']},
-  {id:'aero-star',      label:'航空学 · 星夜',   mode:'night', swatch:['#121627','#1b2036','#9aa4ec']},
-  {id:'aero-dusk',      label:'航空学 · 暮航',   mode:'night', swatch:['#141b34','#1e2138','#8f8ce8']},
-  {id:'aero-blueprint', label:'航空学 · 夜间蓝图', mode:'night', swatch:['#14294a','#1b3358','#7dd4f8']},
+  {id:'light',          mode:'day',   swatch:['#e9e2cf','#f4eee0','#8a6420']},
+  {id:'aero-day',       mode:'day',   swatch:['#5297d2','#f2f7fd','#2c5fa8']},
+  {id:'dark',           mode:'night', swatch:['#131313','#1c1c1d','#d0a354']},
+  {id:'aero-ink',       mode:'night', swatch:['#0e0f14','#17181f','#acb9ec']},
+  {id:'aero-star',      mode:'night', swatch:['#121627','#1b2036','#9aa4ec']},
+  {id:'aero-dusk',      mode:'night', swatch:['#141b34','#1e2138','#8f8ce8']},
+  {id:'aero-blueprint', mode:'night', swatch:['#14294a','#1b3358','#7dd4f8']},
 ];
 function themeById(id){ return THEMES.find(x => x.id === id); }
 /* 该模式的默认主题:存过且归属正确才认,否则回落图纸对 */
@@ -42,15 +42,15 @@ function renderThemePop(pop){
   const item = theme => `
     <button class="themeItem ${!auto && theme.id === current ? 'on' : ''}" onclick="setTheme('${theme.id}')">
       <span class="sw"><i style="background:${theme.swatch[0]}"></i><i style="background:${theme.swatch[1]}"></i><i style="background:${theme.swatch[2]}"></i></span>
-      ${theme.label}
-      <span class="tRight">${themeDefault(theme.mode) === theme.id ? '<span class="def">默认</span>' : ''}${!auto && theme.id === current ? '<span class="chk">✓</span>' : ''}</span>
+      ${T.themeName(theme.id)}
+      <span class="tRight">${themeDefault(theme.mode) === theme.id ? `<span class="def">${T.themeDefault}</span>` : ''}${!auto && theme.id === current ? '<span class="chk">✓</span>' : ''}</span>
     </button>`;
   pop.innerHTML = `
     <button class="themeItem ${auto ? 'on' : ''}" onclick="setTheme('')">
-      <span class="swAuto">◐</span>跟随系统<span class="tRight">${auto ? '<span class="chk">✓</span>' : ''}</span>
+      <span class="swAuto">◐</span>${T.themeAuto}<span class="tRight">${auto ? '<span class="chk">✓</span>' : ''}</span>
     </button>
-    <div class="themeSec">日间</div>` + THEMES.filter(x => x.mode === 'day').map(item).join('') +
-    `<div class="themeSec">夜间</div>` + THEMES.filter(x => x.mode === 'night').map(item).join('');
+    <div class="themeSec">${T.themeDay}</div>` + THEMES.filter(x => x.mode === 'day').map(item).join('') +
+    `<div class="themeSec">${T.themeNight}</div>` + THEMES.filter(x => x.mode === 'night').map(item).join('');
 }
 function toggleThemePop(){
   const pop = document.getElementById('themePop');

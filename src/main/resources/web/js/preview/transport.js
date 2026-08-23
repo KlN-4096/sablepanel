@@ -33,7 +33,7 @@
       throw new Error(String(error));
     }
     if (type !== 'application/vnd.sablepanel.mesh-v2')
-      throw new Error('预览协议不匹配');
+      throw new Error('preview_protocol_mismatch');
     const mesh = SablePreviewSpm2.parse(await response.arrayBuffer());
     if (mesh.metadata && mesh.metadata.resources && mesh.metadata.resources.status === 'busy') {
       return {status:'accepted', retryAfter:1};

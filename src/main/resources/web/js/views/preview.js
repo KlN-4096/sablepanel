@@ -57,11 +57,11 @@ function updatePreviewStatus(status, detail) {
   if (status === 'empty') info.textContent = T.pvNone;
   else if (status === 'fallback') info.textContent = MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : T.pvLoad;
   else if (status === 'resource_progress') {
-    const value = detail || {}, source = value.source ? value.source + ' · ' : '';
+    const value = detail || {}, source = value.source ? T.pvProgressSource(value.source) + ' · ' : '';
     const known = Number.isFinite(value.downloaded) && value.downloaded >= 0
       && Number.isFinite(value.total) && value.total > 0;
     info.textContent = source + (known ? `${fmtBytes(value.downloaded)} / ${fmtBytes(value.total)}`
-      : (value.detail || '准备预览资源'));
+      : (value.detail ? T.pvProgressDetail(value.detail) : T.pvPrepare));
     const bar = progress && progress.querySelector('i');
     if (bar) {
       if (known) {
@@ -75,26 +75,14 @@ function updatePreviewStatus(status, detail) {
   else if (status === 'high') {
     const stats = detail || {};
     info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '')
-      + ` · 高保真 ${stats.highStates || 0} / 简化 ${stats.simplifiedStates || 0}`;
+      + ` · ${T.pvHigh(stats.highStates || 0, stats.simplifiedStates || 0)}`;
   }
-  else if (status === 'lod') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ` · ${(detail && detail.count) || 0} 个模型组已简化`;
-  else if (status === 'resource_failed') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ' · 资源简化';
-  else if (status === 'resource_unavailable') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ' · 当前浏览器仅支持基础预览';
-  else if (status === 'unsupported') info.textContent = (detail || '需要 WebGL2') + ',已保留结构信息';
-  else if (status === 'too_large') info.textContent = '结构过大,保留统计信息';
-  else if (status === 'failed') info.textContent = T.pvFail + previewErrorLabel(detail);
-}
-
-/* 后端错误码直接糊到界面上等于什么都没说。preview_version_ambiguous 尤其要讲清楚:
-   它不是故障,是面板拒绝在多份磁盘副本之间瞎猜当前版本(判据只有运行证据)。 */
-function previewErrorLabel(code) {
-  return ({
-    preview_version_ambiguous:'该物理体在磁盘上有多份副本,无法判断哪份是当前版本',
-    preview_busy:'预览队列已满,请稍后重试',
-    preview_failed:'结构提取失败',
-    preview_resource_failed:'预览资源准备失败',
-    preview_too_large:'结构过大'
-  })[code] || code || '';
+  else if (status === 'lod') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ` · ${T.pvLod((detail && detail.count) || 0)}`;
+  else if (status === 'resource_failed') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ` · ${T.pvResourceFallback}`;
+  else if (status === 'resource_unavailable') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ` · ${T.pvBasicOnly}`;
+  else if (status === 'unsupported') info.textContent = T.pvUnsupported(detail === '需要 WebGL2' ? T.pvNeedWebgl2 : detail);
+  else if (status === 'too_large') info.textContent = T.pvTooLargeStats;
+  else if (status === 'failed') info.textContent = T.pvFail + T.pvError(detail);
 }
 
 function showPreviewHover(index, pointer, reason) {
@@ -107,7 +95,7 @@ function showPreviewHover(index, pointer, reason) {
   const py = (origin.origin_y || 0) + y;
   const pz = (origin.plot_z || 0) + (origin.origin_z || 0) + z;
   const state = palette.state || palette.id || '?';
-  const simplified = reason ? ` · 简化: ${simplificationLabel(reason)}` : '';
+  const simplified = reason ? T.pvSimplified(reason) : '';
   tip.innerHTML = `<b>${esc((LANG === 'zh' && palette.zh) || palette.id || '?')}</b><div class="bid">${esc(state)} · (${x}, ${y}, ${z}) · plot (${px}, ${py}, ${pz})${simplified}</div>`;
   tip.style.display = 'block';
   placeTip(tip, pointer && pointer.cx || 0, pointer && pointer.cy || 0);
@@ -115,16 +103,6 @@ function showPreviewHover(index, pointer, reason) {
     const hover = document.getElementById('fsHover');
     if (hover) hover.innerHTML = `<b style="color:var(--fg)">${esc((LANG === 'zh' && palette.zh) || palette.id || '?')}</b> <span class="mono" style="font-size:10.5px">${esc(state)}</span> · (${x}, ${y}, ${z}) · plot (${px}, ${py}, ${pz})${simplified}`;
   }
-}
-
-function simplificationLabel(reason) {
-  return ({
-    performance_lod:'性能 LOD', context_lost:'图形上下文丢失', blockstate_missing:'缺少 blockstate',
-    model_missing:'缺少模型', model_invalid:'模型无效', unknown_loader:'未知加载器',
-    obj_invalid_or_limit:'OBJ 无效或超限', composite_invalid_or_limit:'Composite 无效或超限',
-    texture_missing:'纹理缺失或解码失败', atlas_budget:'图集预算', budget:'渲染预算',
-    partial_model:'部分子模型简化'
-  })[reason] || '模型限制';
 }
 
 function hideTip() { const tip = document.getElementById('hoverTip'); if (tip) tip.style.display = 'none'; }
@@ -193,7 +171,7 @@ async function loadMeshAt(endpoint, uuid, source, isCurrent) {
       if (result.status === 'too_large') { if (context.fresh() && seq === previewRequestSeq) updatePreviewStatus('too_large'); return; }
       await delay(Math.max(250, Math.min(5000, (result.retryAfter || 1) * 1000)), controller.signal);
     }
-    if (!result || result.status !== 'ready') throw new Error('结构提取超时');
+    if (!result || result.status !== 'ready') throw new Error('preview_timeout');
     if (!context.fresh() || seq !== previewRequestSeq || !isCurrent()) return;
     const parsed = result.mesh;
     MESH_DATA = legacyMeshData(parsed); MESH_UUID = uuid; MESH_SOURCE = source;

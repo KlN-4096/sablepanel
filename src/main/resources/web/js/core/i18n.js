@@ -35,6 +35,12 @@ DICT.zh = {
   bbox:'包围盒', blockCount:'方块数', copiesRow:'存档副本', copiesShow:'份(展示最优)', mass:'质量', vel:'速度', players:'追踪玩家',
   group:'所属组', groupVal:(n,b)=>`${n} 个物理体 / 共 ${fmt(b)} 块`, entry:'存档条目', deps:'依赖',
   pvLoad:'加载预览…', pvNone:'无方块数据', pvFail:'预览失败: ', pvStat:(s,t)=>`外壳 ${fmt(s)} / 总 ${fmt(t)} 体素`, pvTrunc:'(已截断)',
+  pvPrepare:'准备预览资源', pvHigh:(h,s)=>`高保真 ${h} / 简化 ${s}`, pvLod:(n)=>`${n} 个模型组已简化`,
+  pvResourceFallback:'资源简化', pvBasicOnly:'当前浏览器仅支持基础预览', pvNeedWebgl2:'需要 WebGL2',
+  pvProgressSource:(s)=>s, pvProgressDetail:(d)=>d,
+  pvUnsupported:(d)=>`${d || '需要 WebGL2'},已保留结构信息`, pvTooLargeStats:'结构过大,保留统计信息',
+  pvError:(c)=>({preview_version_ambiguous:'该物理体在磁盘上有多份副本,无法判断哪份是当前版本',preview_busy:'预览队列已满,请稍后重试',preview_failed:'结构提取失败',preview_resource_failed:'预览资源准备失败',preview_too_large:'结构过大',preview_protocol_mismatch:'预览协议不匹配',preview_timeout:'结构提取超时'})[c]||c||'',
+  pvSimplified:(r)=>` · 简化: ${{performance_lod:'性能 LOD',context_lost:'图形上下文丢失',blockstate_missing:'缺少 blockstate',model_missing:'缺少模型',model_invalid:'模型无效',unknown_loader:'未知加载器',obj_invalid_or_limit:'OBJ 无效或超限',composite_invalid_or_limit:'Composite 无效或超限',texture_missing:'纹理缺失或解码失败',atlas_budget:'图集预算',budget:'渲染预算',partial_model:'部分子模型简化'}[r]||'模型限制'}`,
   tpConfirmT:'传送物理体', tpConfirm:(n,x,y,z)=>`将「${n}」传送到 ${x}, ${y}, ${z}\n未加载的体会被强制加载(孤儿体自动收养)。`,
   tpNoPlayers:'没有在线玩家', tpPlayerT:'传送玩家',
   tpPlayerMsg:(p,n)=>`将玩家「${p}」传送到「${n}」上方。\n未加载的体会被强制加载(孤儿体自动收养)。`,
@@ -52,7 +58,7 @@ DICT.zh = {
   selForce:(n)=>`常驻加载所选 (${n})`, selUnforce:(n)=>`取消常驻所选 (${n})`,
   forceHint:'常驻加载 = 给完整物理组挂 sable 常驻票,让结构保持可见并自然运行。\n不会清速度、固定物理或暂停 tick。组里有断链残骸时仍会先询问是否清理。\n\n取消常驻只退出常驻:保存当前运行态并将整组卸载到磁盘;暂停物理/暂停 tick 的意图保留,下次加载时自动重新生效。重启后常驻票仍生效。',
   forceCopiesFirst:'组内存在多份磁盘副本:请先在「处理副本」中选定主版本,再常驻加载',
-  forcedLostBadge:'常驻掉线', forcedLostTag:'有常驻意图但票已不在:体掉线且自动恢复未成功,面板每 30 秒重试。\n可重新常驻加载;取消常驻则清除意图。',
+  forcedLostBadge:'常驻掉线', forcedLostTag:'有常驻意图但票已不在。若体被永久删除,面板会停止后台复活,避免反复处决。\n重新常驻加载会显式重试;取消常驻则清除意图。',
   forcedExternalBadge:'外部加载', forcedExternalTag:'在跑,但不是面板常驻在保持:区块加载器、其他模组/指令的票、玩家在附近都算。\n取消常驻对它无效 —— 绿点由外部来源决定。',
   clearVelTip:'清除整组线速度和角速度,整组原地停住。\n不暂停物理、不暂停 tick —— 之后仍受重力/碰撞自然运动。\n只作用于已加载成员。',
   clearVelNeedsLoad:'组内没有已加载成员:冷体的残留速度请用传送处理(会顺带清速度并落盘)',
@@ -220,6 +226,8 @@ DICT.zh = {
   /* ===================== 静态标签(index.html data-i18n,中文写在 HTML 里作兜底) ===================== */
   navDash:'总览', navBodies:'物理体', navRecycle:'回收站', navJobs:'日志',
   pillCost:'物理体开销 ms/tick', jobPillTitle:'查看日志', themeTitle:'切换主题', langTitle:'切换语言 / Language',
+  themeName:(id)=>({light:'图纸 · 米纸','aero-day':'航空学 · 晴空',dark:'图纸 · 夜炭','aero-ink':'航空学 · 墨夜','aero-star':'航空学 · 星夜','aero-dusk':'航空学 · 暮航','aero-blueprint':'航空学 · 夜间蓝图'})[id]||id,
+  themeDefault:'默认', themeAuto:'跟随系统', themeDay:'日间', themeNight:'夜间', pvProgressAria:'预览资源准备中',
   loginAddress:'服务器地址', loginToken:'访问口令', loginEnter:'进入',
   chartTitle:'Sable 物理求解历史',
   chartHint:'维度曲线为 Sable 物理求解耗时,不是维度总 MSPT;空维度仍有少量管线基础开销。粉色曲线为已加载物理体的 Java 逻辑合计。',
@@ -264,6 +272,13 @@ DICT.en = {
   bbox:'Bounding box', blockCount:'Blocks', copiesRow:'Disk copies', copiesShow:'shown (best)', mass:'Mass', vel:'Velocity', players:'Tracking players',
   group:'Group', groupVal:(n,b)=>`${n} bodies / ${fmt(b)} blocks`, entry:'Disk entry', deps:'Dependencies',
   pvLoad:'Loading preview…', pvNone:'No block data', pvFail:'Preview failed: ', pvStat:(s,t)=>`shell ${fmt(s)} / total ${fmt(t)} voxels`, pvTrunc:'(truncated)',
+  pvPrepare:'Preparing preview resources', pvHigh:(h,s)=>`high fidelity ${h} / simplified ${s}`, pvLod:(n)=>`${n} model groups simplified`,
+  pvResourceFallback:'Simplified resources', pvBasicOnly:'This browser supports basic preview only', pvNeedWebgl2:'WebGL 2 is required',
+  pvProgressSource:(s)=>({'本地精简缓存':'Local compact cache','管理员离线文件':'Admin offline file','模组资源':'Mod resources','预览资源':'Preview resources'}[s]||s),
+  pvProgressDetail:(d)=>({'检查缓存':'Checking cache','资源已就绪':'Resources ready','校验客户端 JAR':'Validating client JAR','提取方块资源':'Extracting block resources','构建当前结构资源闭包':'Building the resource bundle for this structure'}[d]||d),
+  pvUnsupported:(d)=>`${({'需要 WebGL2':'WebGL 2 is required','WebGL 初始化失败':'WebGL initialization failed'}[d]||d||'WebGL 2 is required')}; structure information is still available`, pvTooLargeStats:'Structure too large; statistics remain available',
+  pvError:(c)=>({preview_version_ambiguous:'This body has multiple disk copies; the current version cannot be determined',preview_busy:'The preview queue is full; try again later',preview_failed:'Structure extraction failed',preview_resource_failed:'Preview resource preparation failed',preview_too_large:'Structure too large',preview_protocol_mismatch:'Preview protocol mismatch',preview_timeout:'Structure extraction timed out'})[c]||c||'',
+  pvSimplified:(r)=>` · Simplified: ${{performance_lod:'performance LOD',context_lost:'graphics context lost',blockstate_missing:'missing blockstate',model_missing:'missing model',model_invalid:'invalid model',unknown_loader:'unknown loader',obj_invalid_or_limit:'invalid or oversized OBJ',composite_invalid_or_limit:'invalid or oversized Composite',texture_missing:'missing or undecodable texture',atlas_budget:'atlas budget',budget:'rendering budget',partial_model:'partial submodel fallback'}[r]||'model limitation'}`,
   tpConfirmT:'Teleport body', tpConfirm:(n,x,y,z)=>`Teleport "${n}" to ${x}, ${y}, ${z}\nUnloaded bodies are force-loaded first (orphans adopted automatically).`,
   tpNoPlayers:'No players online', tpPlayerT:'Teleport player',
   tpPlayerMsg:(p,n)=>`Teleport player "${p}" on top of "${n}".\nUnloaded bodies are force-loaded first (orphans adopted automatically).`,
@@ -281,7 +296,7 @@ DICT.en = {
   selForce:(n)=>`Force-load selected (${n})`, selUnforce:(n)=>`Cancel force-load (${n})`,
   forceHint:'Force-load = attach a sable force-load ticket to the whole physics group so it stays loaded and runs naturally.\nDoes not clear velocity, pin physics or pause ticking. If the group contains detached debris you are asked about cleanup first.\n\nCancelling only exits force-load: the running state is saved and the whole group unloads to disk; pause-physics / pause-ticking intents are kept and re-apply on next load. Tickets survive restarts.',
   forceCopiesFirst:'This group has multiple disk copies: pick the primary version in "Manage copies" first, then force-load',
-  forcedLostBadge:'Force-load lost', forcedLostTag:'Intent exists but the ticket is gone: the body dropped out and auto-recovery has not succeeded; the panel retries every 30 s.\nForce-load again, or cancel force-load to clear the intent.',
+  forcedLostBadge:'Force-load lost', forcedLostTag:'The intent exists but the ticket is gone. If the body was permanently removed, background revival stops to avoid another removal loop.\nForce-load again to retry explicitly, or cancel force-load to clear the intent.',
   forcedExternalBadge:'Externally loaded', forcedExternalTag:'Running, but not kept by a panel force-load: chunk loaders, tickets from other mods/commands, or a player nearby all count.\nCancelling force-load has no effect here — the green dot is controlled by the external source.',
   clearVelTip:'Clear all linear and angular velocity of the group; it stops right where it is.\nDoes not pause physics or ticking — gravity and collisions still act afterwards.\nOnly affects loaded members.',
   clearVelNeedsLoad:'No loaded members in this group: for cold bodies use Teleport instead (it clears velocity and saves to disk)',
@@ -445,7 +460,9 @@ DICT.en = {
   statBlocks:'Total blocks', statSizeL:'Size W×H×D', statMembers:'Members', statCostL:'Logic cost ms/tick',
   bodyGone:'This body no longer exists',
   navDash:'Overview', navBodies:'Bodies', navRecycle:'Recycle bin', navJobs:'Logs',
-  pillCost:'Body cost ms/tick', jobPillTitle:'View logs', themeTitle:'Switch theme', langTitle:'切换语言 / Language',
+  pillCost:'Body cost ms/tick', jobPillTitle:'View logs', themeTitle:'Switch theme', langTitle:'Switch language',
+  themeName:(id)=>({light:'Blueprint · Rice Paper','aero-day':'Aeronautics · Clear Sky',dark:'Blueprint · Night Charcoal','aero-ink':'Aeronautics · Ink Night','aero-star':'Aeronautics · Starry Night','aero-dusk':'Aeronautics · Dusk Flight','aero-blueprint':'Aeronautics · Night Blueprint'})[id]||id,
+  themeDefault:'Default', themeAuto:'Follow system', themeDay:'Day', themeNight:'Night', pvProgressAria:'Preparing preview resources',
   loginAddress:'Server address', loginToken:'Access token', loginEnter:'Enter',
   chartTitle:'Sable physics solver history',
   chartHint:'Dimension curves are sable physics solver time, not total dimension MSPT; empty dimensions still carry a small pipeline base cost. The pink curve is the combined Java logic of loaded bodies.',
@@ -538,6 +555,9 @@ function applyStaticI18n(){
   });
   document.querySelectorAll('[data-i18n-ph]').forEach(el => {
     const v = T[el.dataset.i18nPh]; if (typeof v === 'string') el.placeholder = v;
+  });
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => {
+    const v = T[el.dataset.i18nAria]; if (typeof v === 'string') el.setAttribute('aria-label', v);
   });
 }
 function toggleLang(){

@@ -34,6 +34,7 @@ function makeElement(id) {
     id, value: '', textContent: '', innerHTML: '', checked: false,
     style: {}, dataset: {}, classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
     appendChild(){}, insertBefore(){}, remove(){}, focus(){}, querySelector(){ return null; },
+    setAttribute(name, value){ this[name] = value; },
     querySelectorAll(){ return []; }, closest(){ return null; }, addEventListener(){},
     // 原生 <dialog> 三件套:弹层开合与断言都走 open
     open: false, showModal(){ this.open = true; }, close(){ this.open = false; },
@@ -44,7 +45,7 @@ const noop = function noop(){};
 /** 未知成员一律给空操作函数,免得为每个视图 API 手写桩 */
 const permissive = base => new Proxy(base, { get: (target, key) => (key in target ? target[key] : noop) });
 
-function makeSandbox(state) {
+function makeSandbox(state, lang = 'zh') {
   const elements = new Map();
   const document = {
     getElementById(id){
@@ -60,7 +61,7 @@ function makeSandbox(state) {
   };
   // spLang 钉死中文:navigator 经 Proxy 回落到宿主 Node 的 navigator(language='en-US'),
   // 不钉的话 en 词典一存在,全部中文断言就整批换语言
-  const store = new Map([['spLang', 'zh']]);
+  const store = new Map([['spLang', lang]]);
   // 只放浏览器特有的东西;标准内置(Boolean/Array/…)由 Proxy 回落到宿主 globalThis ——
   // 手写清单漏一个就会被兜成 noop,`parts.filter(Boolean)` 会静悄悄把整个数组过滤空
   const sandbox = {
@@ -83,8 +84,8 @@ function makeSandbox(state) {
 }
 
 /** 未定义的标识符一律解析成空操作函数:视图层的 render* 不是本文件要测的东西 */
-function makeContext(state) {
-  const sandbox = makeSandbox(state);
+function makeContext(state, lang = 'zh') {
+  const sandbox = makeSandbox(state, lang);
   const proxy = new Proxy(sandbox, {
     has: () => true,
     get: (target, key) => {
@@ -112,9 +113,9 @@ function makeContext(state) {
 }
 
 /** 每个用例一个全新环境;state.fetch 由用例自己接管 */
-function setup() {
+function setup(lang = 'zh') {
   const state = { fetch: async () => ({ ok: true, status: 200, json: async () => ({}) }) };
-  return { sandbox: makeContext(state), state };
+  return { sandbox: makeContext(state, lang), state };
 }
 
 function evalIn(context, expr) {
@@ -2552,6 +2553,37 @@ test('英文词典与中文完全奇偶:键集、类型、函数元数、MANUAL 
   assert.deepEqual(report.pages, [6, 6], 'MANUAL 双语页数一致');
   assert.equal(report.lang, 'zh', '沙箱必须钉死中文,否则全部中文断言换语言');
   assert.equal(report.sample, 'Force-load', '英文用 MC 原生 force-load 词汇');
+});
+
+test('英文预览状态与主题弹层不泄漏中文', () => {
+  const { sandbox } = setup('en');
+  evalIn(sandbox, `
+    document.documentElement = {dataset:{theme:'light'}};
+    const langButton = document.getElementById('langBtn'); langButton.dataset.i18nAria = 'langTitle';
+    const themeButton = document.getElementById('themeBtn'); themeButton.dataset.i18nAria = 'themeTitle';
+    const previewProgress = document.getElementById('pvProgress'); previewProgress.dataset.i18nAria = 'pvProgressAria';
+    document.querySelectorAll = selector => selector === '[data-i18n-aria]'
+      ? [langButton, themeButton, previewProgress] : [];
+    applyStaticI18n();
+    MESH_DATA = {shell:12,total:20};
+    updatePreviewStatus('unsupported', '需要 WebGL2');
+    __unsupported = document.getElementById('pvInfo').textContent;
+    updatePreviewStatus('lod', {count:3});
+    __lod = document.getElementById('pvInfo').textContent;
+    updatePreviewStatus('resource_progress', {source:'本地精简缓存',detail:'校验客户端 JAR'});
+    __progress = document.getElementById('pvInfo').textContent;
+    __error = T.pvError('preview_version_ambiguous') + ' ' + T.pvError('preview_protocol_mismatch');
+    renderThemePop(document.getElementById('themePop'));
+    __themes = document.getElementById('themePop').innerHTML;
+    __arias = [langButton, themeButton, previewProgress].map(element => element['aria-label']).join(' ');
+  `);
+  const visible = evalIn(sandbox, '[__unsupported,__lod,__progress,__error,__themes,__arias].join(" ")');
+  assert.ok(visible.includes('WebGL 2 is required'));
+  assert.ok(visible.includes('3 model groups simplified'));
+  assert.ok(visible.includes('Local compact cache') && visible.includes('Validating client JAR'));
+  assert.ok(visible.includes('Preview protocol mismatch'));
+  assert.ok(visible.includes('Follow system') && visible.includes('Default'));
+  assert.ok(!/[\u3400-\u9fff]/u.test(visible), '英文正常路径不能残留中文');
 });
 
 /* ---------- 运行 ---------- */
