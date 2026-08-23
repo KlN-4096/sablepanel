@@ -61,7 +61,6 @@
 
   async function renderOne(uuid, sig) {
     const gen = generation;
-    const t0 = Date.now();
     let result = null;
     try {
       for (let attempt = 0; attempt < MESH_POLL_LIMIT; attempt++) {
@@ -81,7 +80,6 @@
     }
     if (gen !== generation) return;
     if (!result || result.status !== 'ready') return giveUp(uuid, !!result && result.status === 'too_large');
-    const tMesh = Date.now();
     const meta = result.mesh.metadata && result.mesh.metadata.resources;
     // 半成品守则:资源没就绪不渲不传 —— 纯色版一旦入缓存就以该签名为键永久留存
     if (!meta || !meta.manifest || meta.status === 'unavailable' || meta.status === 'failed') {
@@ -103,19 +101,11 @@
       return giveUp(uuid, outcome.status === 'empty' || outcome.status === 'unsupported'
         || outcome.status === 'resource_unavailable');
     }
-    const tBake = Date.now();
     const blob = await snapshot(rt);
     rt.disposeObjects();
     if (gen !== generation || !blob) return;
     // 409 thumb_stale = 渲染期间体变了:丢弃即可,fetchThumb 下轮拿新签名再来
     const ok = await upload(uuid, sig, blob);
-    const now = Date.now();
-    const worker = (outcome.detail && outcome.detail.timings) || {};
-    console.info('sablepanel thumb ' + uuid.slice(0, 8) + ': 总 ' + (now - t0) + 'ms'
-      + ' = mesh ' + (tMesh - t0) + ' + 烘焙 ' + (tBake - tMesh)
-      + '(资源 ' + (worker.resources || 0) + '/几何 ' + (worker.geometry || 0)
-      + '/解码 ' + (worker.decode || 0) + '/图集 ' + (worker.atlas || 0) + ')'
-      + ' + 截帧上传 ' + (now - tBake));
     if (ok && gen === generation && api.onDone) api.onDone(uuid, URL.createObjectURL(blob));
   }
 
