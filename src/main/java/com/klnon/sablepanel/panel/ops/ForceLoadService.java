@@ -14,6 +14,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Unit;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -453,9 +454,31 @@ public final class ForceLoadService {
         ACTIVE.addAll(forced);
     }
 
+    /**
+     * 票类型访问器:sable 2.0.4 起 ticket 是 record({@code type()}),2.0.3 是普通类
+     * ({@code getType()})。生产服的 sable 要随客户端同步更新,面板必须两版都能跑,
+     * 所以类加载时解析一次、调用处走缓存反射;两个都不存在时启动期即失败。
+     */
+    private static final Method TICKET_TYPE = resolveTicketTypeAccessor();
+
+    static Method resolveTicketTypeAccessor() {
+        try {
+            return SubLevelLoadingTicket.class.getMethod("type");
+        } catch (NoSuchMethodException e) {
+            try {
+                return SubLevelLoadingTicket.class.getMethod("getType");
+            } catch (NoSuchMethodException fatal) {
+                throw new IllegalStateException("sable SubLevelLoadingTicket 缺少 type()/getType() 访问器", fatal);
+            }
+        }
+    }
+
     private static boolean isPanelTicket(SubLevelLoadingTicket<?> ticket) {
-        // sable 2.0.4 起 ticket 是 record,访问器从 getType() 变为 type()
-        return PANEL_FORCED.equals(ticket.type());
+        try {
+            return PANEL_FORCED.equals(TICKET_TYPE.invoke(ticket));
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("读取常驻票类型失败", e);
+        }
     }
 
     private static ServerSubLevelContainer container(ServerLevel level) {
