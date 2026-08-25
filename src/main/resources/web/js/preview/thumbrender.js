@@ -88,7 +88,8 @@
     const rt = ensureRuntime();
     if (!rt) return;
     const settled = waitSettled(SETTLE_TIMEOUT_MS);
-    rt.load(result.mesh, {manifestUrl: meta.manifest, token: currentToken(), server: currentServer()});
+    rt.load(result.mesh, {manifestUrl: meta.manifest, token: currentToken(), server: currentServer(),
+      fingerprint:meta.fingerprint || ''});
     const upNext = queue.keys().next().value;
     if (upNext) prewarm(upNext);
     const outcome = await settled;

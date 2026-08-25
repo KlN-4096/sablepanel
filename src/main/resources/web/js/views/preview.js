@@ -178,7 +178,7 @@ async function loadMeshAt(endpoint, uuid, source, isCurrent) {
     const resourceMeta = parsed.metadata && parsed.metadata.resources;
     const resourceRequest = resourceMeta && resourceMeta.status !== 'unavailable' && resourceMeta.status !== 'failed'
       ? {manifestUrl: resourceMeta.manifest, token: typeof token !== 'undefined' ? token : '',
-          server: typeof CURSRV !== 'undefined' ? CURSRV : ''} : null;
+          server: typeof CURSRV !== 'undefined' ? CURSRV : '', fingerprint:resourceMeta.fingerprint || ''} : null;
     if (previewRuntime) previewRuntime.load(parsed, resourceRequest);
     if (resourceMeta && resourceMeta.status === 'failed') updatePreviewStatus('resource_failed', '资源准备失败');
     if (typeof renderComposition === 'function') renderComposition();

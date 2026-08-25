@@ -15,6 +15,19 @@ const MAX_SOURCE_TEXTURE_EDGE = 4096;
 const MAX_OBJ_FACES = 50_000;
 const MAX_OBJ_MATERIALS = 128;
 const MAX_OBJ_LINE = 64 * 1024;
+const RESOURCE_PROTOCOL_VERSION = 2;
+const MAX_ASSEMBLY_ELEMENTS = 256;
+const MAX_ASSEMBLY_MODELS = 64;
+const MAX_ASSEMBLY_COMPONENT_ELEMENTS = 64;
+const MAX_ASSEMBLY_TRANSLATION_PAIRS = 65_536;
+const MAX_ASSEMBLY_TRANSLATIONS = 64;
+const MAX_ASSEMBLY_CACHE_ENTRIES = 1024;
+const MIN_ASSEMBLY_MATCHES = 4;
+const MIN_ASSEMBLY_RATIO = .8;
+const MIN_COMPONENT_ALIGNMENT_MATCHES = 3;
+const MIN_COMPONENT_ALIGNMENT_RATIO = .6;
+const ASSEMBLY_COORDINATE_LIMIT = 64;
+const ASSEMBLY_QUANTIZE = 20;
 const MAX_ATLAS_PAGES = 8;
 const ATLAS_SIZE = 2048;
 const ATLAS_PADDING = 4;
@@ -98,11 +111,24 @@ async function fetchShard(entry, baseUrl, token, server) {
   return fetchResource({url, token, server, label:'资源分片', progress:false, arrayBuffer:true});
 }
 
-async function loadResources(manifestUrl, token, server, maxBytes = Infinity) {
-  const manifest = await fetchJson(manifestUrl, token, server);
+async function sha256Hex(bytes) {
+  const subtle = self.crypto && self.crypto.subtle;
+  if (!subtle) throw new Error('浏览器不支持资源哈希校验');
+  const digest = new Uint8Array(await subtle.digest('SHA-256', bytes));
+  return [...digest].map(value => value.toString(16).padStart(2, '0')).join('');
+}
+
+async function loadResources(manifestUrl, token, server, maxBytes = Infinity, suppliedManifest = null,
+                             expectedFingerprint = '') {
+  const manifest = suppliedManifest || await fetchJson(manifestUrl, token, server);
   if (!manifest || !Array.isArray(manifest.entries)) throw new Error('资源清单无效');
+  if (Number(manifest.version) !== RESOURCE_PROTOCOL_VERSION) throw new Error('资源协议版本不兼容');
+  if (!/^[0-9a-f]{64}$/.test(String(manifest.fingerprint || ''))) throw new Error('资源指纹无效');
+  if (expectedFingerprint && manifest.fingerprint !== expectedFingerprint) throw new Error('资源指纹不一致');
   const groups = new Map();
   for (const entry of manifest.entries) {
+    if (!/^[0-9a-f]{64}$/.test(String(entry.shard || ''))) throw new Error('资源分片哈希无效');
+    if (!/^[0-9a-f]{64}$/.test(String(entry.sha256 || ''))) throw new Error('资源文件哈希无效');
     let group = groups.get(entry.shard);
     if (!group) { group = []; groups.set(entry.shard, group); }
     group.push(entry);
@@ -121,33 +147,44 @@ async function loadResources(manifestUrl, token, server, maxBytes = Infinity) {
     const current = grouped.slice(i, i + 2);
     const parts = await Promise.all(current.map(([, entries]) => fetchShard(entries[0], manifestUrl, token, server)));
     for (let groupIndex = 0; groupIndex < current.length; groupIndex++) {
-      const entries = current[groupIndex][1], shard = new Uint8Array(parts[groupIndex]);
+      const [shardHash, entries] = current[groupIndex], shard = new Uint8Array(parts[groupIndex]);
+      if (await sha256Hex(shard) !== shardHash) throw new Error('资源分片哈希不一致');
       if (byteLength + shard.byteLength > maxBytes) throw new Error('资源闭包超过浏览器内存预算');
       byteLength += shard.byteLength;
       for (const entry of entries) {
         if (entry.offset < 0 || entry.length < 0
             || entry.offset + entry.length > shard.byteLength) throw new Error('资源清单偏移无效');
-        files.set(entry.path, shard.subarray(entry.offset, entry.offset + entry.length));
+        const bytes = shard.subarray(entry.offset, entry.offset + entry.length);
+        if (await sha256Hex(bytes) !== entry.sha256) throw new Error('资源文件哈希不一致');
+        files.set(entry.path, bytes);
       }
     }
   }
   return {manifest, files, byteLength};
 }
 
-/* 跨 bake 共享缓存,worker 常驻时生效(缩略图队列 keepWorker 复用同一 worker 实例;
-   详情页每次 new Worker,模块级状态天然全新,行为不变)。
-   两层生命周期(2026-08-15 实测教训):资源闭包按体定制 —— manifestUrl 的指纹是
-   「该体用到的方块集合」的哈希,杂类体连续渲染时每体换一个闭包。按闭包整包换代
-   会把跨闭包恒定的东西(blockstate/模型/纹理文件内容全来自同一资源栈)一起清掉,
-   资源段每体倒退回 2 秒。所以:
-   - assets:按 path/modelId 全局累积,worker 活多久留多久(切服会杀 worker,天然清);
-   - shared:只有分片文件表按 manifestUrl 换 —— 分片打包布局每闭包确实不同。 */
+/* 跨 bake 共享缓存,worker 常驻时生效。JSON/模型/位图可在同一资源指纹的闭包间复用；
+   分片文件表和静态组装推导按 server + manifestUrl + fingerprint + protocol 隔离。
+   资源栈变化时清空全部派生缓存，避免同路径资源更新后继续使用旧模型。 */
 const BITMAP_CACHE_BYTES = 64 * 1024 * 1024;
-const assets = {jsons:new Map(), models:new Map(), bitmaps:new Map(), bitmapBytes:0};
+const assets = {fingerprint:'', jsons:new Map(), models:new Map(), assemblies:new Map(),
+  bitmaps:new Map(), bitmapBytes:0};
 let shared = null;
 
-function sharedFor(manifestUrl) {
-  if (!shared || shared.key !== manifestUrl) shared = {key:manifestUrl, loaded:null};
+function clearAssetCaches() {
+  for (const value of assets.bitmaps.values()) if (value.bitmap && value.bitmap.close) value.bitmap.close();
+  assets.jsons.clear(); assets.models.clear(); assets.assemblies.clear(); assets.bitmaps.clear();
+  assets.bitmapBytes = 0;
+}
+
+function sharedFor(manifestUrl, server = '', fingerprint = '', version = RESOURCE_PROTOCOL_VERSION) {
+  if (fingerprint && assets.fingerprint && assets.fingerprint !== fingerprint) clearAssetCaches();
+  if (fingerprint) assets.fingerprint = fingerprint;
+  const key = [server || '', manifestUrl || '', fingerprint || 'uncached', version].join('|');
+  if (!shared || shared.key !== key) {
+    assets.assemblies.clear();
+    shared = {key, fingerprint, loaded:null};
+  }
   return shared;
 }
 
@@ -163,7 +200,7 @@ function jsonFile(files, path) {
     try { result = JSON.parse(new TextDecoder('utf-8', {fatal:true}).decode(bytes)); }
     catch (_) { result = null; }
   }
-  if (cache) cache.set(path, result);
+  if (cache && bytes) cache.set(path, result);
   return result;
 }
 
@@ -237,6 +274,188 @@ function blockstateModels(files, id, state, seed) {
   return result;
 }
 
+function blockstateModelIds(files, id) {
+  const colon = id.indexOf(':'), namespace = colon >= 0 ? id.slice(0, colon) : 'minecraft';
+  const name = colon >= 0 ? id.slice(colon + 1) : id;
+  const definition = jsonFile(files, 'assets/' + namespace + '/blockstates/' + name + '.json');
+  if (!definition) return [];
+  const result = new Set();
+  const collect = value => {
+    if (Array.isArray(value)) { for (const item of value) collect(item); return; }
+    if (value && typeof value === 'object' && typeof value.model === 'string') result.add(value.model);
+  };
+  for (const value of Object.values(definition.variants || {})) collect(value);
+  for (const part of definition.multipart || []) collect(part && part.apply);
+  return [...result].sort().slice(0, MAX_ASSEMBLY_MODELS);
+}
+
+function blockItemModelId(id) {
+  const colon = id.indexOf(':'), namespace = colon >= 0 ? id.slice(0, colon) : 'minecraft';
+  const name = colon >= 0 ? id.slice(colon + 1) : id;
+  return namespace + ':item/' + name;
+}
+
+function permutationParity(value) {
+  let inversions = 0;
+  for (let left = 0; left < value.length; left++) for (let right = left + 1; right < value.length; right++) {
+    if (value[left] > value[right]) inversions++;
+  }
+  return inversions % 2 ? -1 : 1;
+}
+
+const CUBE_ROTATIONS = (() => {
+  const permutations = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]], result = [];
+  for (const permutation of permutations) for (const sx of [-1,1]) for (const sy of [-1,1]) for (const sz of [-1,1]) {
+    const signs = [sx,sy,sz];
+    if (permutationParity(permutation) * sx * sy * sz === 1) result.push({permutation, signs});
+  }
+  result.sort((left, right) => {
+    const score = value => value.permutation.every((axis, index) => axis === index)
+      && value.signs.every(sign => sign === 1) ? 0 : 1;
+    return score(left) - score(right) || left.permutation.join('').localeCompare(right.permutation.join(''))
+      || left.signs.join('').localeCompare(right.signs.join(''));
+  });
+  return result;
+})();
+const IDENTITY_CUBE_ROTATION = CUBE_ROTATIONS[0];
+
+function rotateAssemblyPoint(point, rotation, centered) {
+  const source = centered ? point : point.map(value => value - 8);
+  const result = rotation.permutation.map((axis, index) => rotation.signs[index] * source[axis]);
+  return centered ? result : result.map(value => value + 8);
+}
+
+function assemblyElementPoints(element, rotation, translation = [0,0,0]) {
+  const from = element && element.from, to = element && element.to;
+  if (!Array.isArray(from) || from.length !== 3 || !Array.isArray(to) || to.length !== 3) return null;
+  const values = from.concat(to).map(Number);
+  if (!values.every(Number.isFinite) || values.some(value => Math.abs(value) > ASSEMBLY_COORDINATE_LIMIT)) return null;
+  if (!Array.isArray(translation) || translation.length !== 3 || !translation.every(Number.isFinite)
+      || translation.some(value => Math.abs(value) > ASSEMBLY_COORDINATE_LIMIT)) return null;
+  const points = [];
+  for (const x of [from[0], to[0]]) for (const y of [from[1], to[1]]) for (const z of [from[2], to[2]]) {
+    const point = rotateAssemblyPoint(rotateElement([x,y,z], element.rotation), rotation, false);
+    if (!point.every(Number.isFinite)) return null;
+    const translated = point.map((value, axis) => value + translation[axis]);
+    if (translated.some(value => Math.abs(value) > ASSEMBLY_COORDINATE_LIMIT)) return null;
+    points.push(translated);
+  }
+  return points;
+}
+
+function assemblyPointsKey(points) {
+  return points.map(point => point.map(value => Math.round(value * ASSEMBLY_QUANTIZE)).join(','))
+    .sort().join(';');
+}
+
+function assemblyElementKey(element, rotation, translation) {
+  const points = assemblyElementPoints(element, rotation, translation);
+  return points && assemblyPointsKey(points);
+}
+
+function assemblyShapeKey(element, rotation) {
+  const points = assemblyElementPoints(element, rotation);
+  if (!points) return null;
+  const center = [0,1,2].map(axis => points.reduce((sum, point) => sum + point[axis], 0) / points.length);
+  return assemblyPointsKey(points.map(point => point.map((value, axis) => value - center[axis])));
+}
+
+function assemblyElementCenter(element, rotation) {
+  const points = assemblyElementPoints(element, rotation);
+  return points && [0,1,2].map(axis => points.reduce((sum, point) => sum + point[axis], 0) / points.length);
+}
+
+function assemblyElementVisualKey(element) {
+  const faces = Object.entries(element && element.faces || {}).sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, face]) => [name, face && face.texture || '',
+      Array.isArray(face && face.uv) ? face.uv.map(Number).join(',') : '',
+      Number(face && face.rotation) || 0, Number.isInteger(face && face.tintindex) ? face.tintindex : -1,
+      face && face.shade === false ? 'unshaded' : 'shaded'].join('|'));
+  return (element && element.shade === false ? 'unshaded' : 'shaded') + '||' + faces.join('||');
+}
+
+function matchAssemblyElements(source, target, rotation, translation = [0,0,0]) {
+  const buckets = new Map();
+  for (let index = 0; index < source.length; index++) {
+    const key = assemblyElementKey(source[index], rotation, translation);
+    if (!key) return null;
+    let values = buckets.get(key); if (!values) { values = []; buckets.set(key, values); }
+    values.push(index);
+  }
+  const sourceIndices = new Set(), targetIndices = new Set(), pairs = [];
+  for (let targetIndex = 0; targetIndex < target.length; targetIndex++) {
+    const element = target[targetIndex];
+    const key = assemblyElementKey(element, IDENTITY_CUBE_ROTATION);
+    const values = key && buckets.get(key);
+    if (!values || !values.length) continue;
+    let candidates = values;
+    if (values.length > 1) {
+      const visual = assemblyElementVisualKey(element);
+      const matching = values.filter(index => assemblyElementVisualKey(source[index]) === visual);
+      if (matching.length) candidates = matching;
+      else if (new Set(values.map(index => assemblyElementVisualKey(source[index]))).size > 1) return null;
+    }
+    const sourceIndex = candidates[candidates.length - 1];
+    values.splice(values.indexOf(sourceIndex), 1);
+    sourceIndices.add(sourceIndex); targetIndices.add(targetIndex);
+    pairs.push([sourceIndex, targetIndex]);
+  }
+  return {count:sourceIndices.size, sourceIndices, targetIndices, pairs, rotation, translation};
+}
+
+function bestAssemblyAlignment(source, target, minimum = MIN_ASSEMBLY_MATCHES, ratio = MIN_ASSEMBLY_RATIO) {
+  if (!Array.isArray(source) || !Array.isArray(target) || target.length < minimum
+      || source.length > MAX_ASSEMBLY_ELEMENTS || target.length > MAX_ASSEMBLY_ELEMENTS) return null;
+  let best = [];
+  for (const rotation of CUBE_ROTATIONS) {
+    const candidate = matchAssemblyElements(source, target, rotation);
+    if (!candidate) continue;
+    if (!best.length || candidate.count > best[0].count) best = [candidate];
+    else if (candidate.count === best[0].count) best.push(candidate);
+  }
+  if (!best.length || best[0].count < minimum || best[0].count / target.length < ratio) return null;
+  return {...best[0], alternatives:best};
+}
+
+function bestTranslatedAssemblyAlignment(source, target, minimum = MIN_ASSEMBLY_MATCHES) {
+  if (!Array.isArray(source) || !Array.isArray(target) || source.length < minimum
+      || source.length > MAX_ASSEMBLY_COMPONENT_ELEMENTS || target.length > MAX_ASSEMBLY_ELEMENTS) return null;
+  const targetShapes = new Map();
+  for (const element of target) {
+    const shape = assemblyShapeKey(element, IDENTITY_CUBE_ROTATION);
+    const center = assemblyElementCenter(element, IDENTITY_CUBE_ROTATION);
+    if (!shape || !center) continue;
+    let centers = targetShapes.get(shape); if (!centers) { centers = []; targetShapes.set(shape, centers); }
+    centers.push(center);
+  }
+  let best = [], translationPairs = 0;
+  for (const rotation of CUBE_ROTATIONS) {
+    const translations = new Map();
+    for (const element of source) {
+      const shape = assemblyShapeKey(element, rotation), center = assemblyElementCenter(element, rotation);
+      if (!shape || !center) continue;
+      for (const targetCenter of targetShapes.get(shape) || []) {
+        if (++translationPairs > MAX_ASSEMBLY_TRANSLATION_PAIRS) return null;
+        const value = center.map((coordinate, axis) =>
+          Math.round((targetCenter[axis] - coordinate) * ASSEMBLY_QUANTIZE) / ASSEMBLY_QUANTIZE);
+        const key = value.join(','), current = translations.get(key);
+        if (current) current.votes++;
+        else translations.set(key, {value, votes:1});
+      }
+    }
+    const candidates = [...translations.values()].sort((left, right) =>
+      right.votes - left.votes || left.value.join(',').localeCompare(right.value.join(',')))
+      .slice(0, MAX_ASSEMBLY_TRANSLATIONS);
+    for (const {value:translation} of candidates) {
+      const candidate = matchAssemblyElements(source, target, rotation, translation);
+      if (!candidate) continue;
+      if (!best.length || candidate.count > best[0].count) best = [candidate];
+      else if (candidate.count === best[0].count) best.push(candidate);
+    }
+  }
+  return best.length && best[0].count === source.length ? {...best[0], alternatives:best} : null;
+}
+
 function mergeModel(files, modelId, depth, seen) {
   if (depth > MAX_MODEL_DEPTH || seen.has(modelId)) return null;
   const colon = modelId.indexOf(':'), namespace = colon >= 0 ? modelId.slice(0, colon) : 'minecraft';
@@ -288,9 +507,12 @@ function faceGeometry(element, faceName, face) {
     for (let turn = ((Number(face.rotation) || 0) % 360 + 360) % 360; turn > 0; turn -= 90) [tu, tv] = [tv, 1 - tu];
     corners.push({position:[rotated[0] / 16 - .5, rotated[1] / 16 - .5, rotated[2] / 16 - .5], uv:[tu, 1 - tv]});
   }
+  // FaceBakery 按最终角点绕序重算烘焙方向；模型可故意用 from > to 生成内向配对面。
+  // 若强制翻回 faceName，内壁会被改成与外壁同向，换角度观察时就会漏空。
+  const normal = faceNormal(corners);
   return {texture:face.texture, direction:faceName,
     tintIndex:Number.isInteger(face.tintindex) ? face.tintindex : -1,
-    shade:face.shade !== false, normal:rotateNormal(axis.slice(0,3), {...(element.rotation || {}), rescale:false}), corners};
+    shade:face.shade !== false, normal, corners};
 }
 
 function defaultFaceUv(from, to, face) {
@@ -316,11 +538,6 @@ function rotateElement(point, rotation) {
     if (rotation.axis !== 'z') p[2] *= scale;
   }
   return [p[0]+origin[0],p[1]+origin[1],p[2]+origin[2]];
-}
-
-function rotateNormal(normal, rotation) {
-  if (!rotation || !rotation.angle) return normal;
-  return rotateElement(normal.map(value => value + 8), {...rotation, origin:[8,8,8]}).map(value => value - 8);
 }
 
 function identityMatrix() {
@@ -451,8 +668,12 @@ function bakeModel(files, modelId) {
 }
 
 function facesFromModel(model) {
+  return facesFromElements(model, model.elements || []);
+}
+
+function facesFromElements(model, elements) {
   const faces = [];
-  for (const element of model.elements || []) {
+  for (const element of elements) {
     for (const name of Object.keys(FACE_AXES)) {
       const face = faceGeometry(element, name, element.faces && element.faces[name]);
       if (face) faces.push({...face, texturePath:resolveTexture(model, face.texture), renderType:model.renderType || null,
@@ -461,6 +682,472 @@ function facesFromModel(model) {
     }
   }
   return faces.length ? transformFaces(faces, model.transform) : null;
+}
+
+function directionFromNormal(normal) {
+  let best = null, score = 0;
+  for (const [name, axis] of Object.entries(FACE_AXES)) {
+    const dot = normal[0] * axis[0] + normal[1] * axis[1] + normal[2] * axis[2];
+    if (dot > score) { score = dot; best = name; }
+  }
+  return score > .999 ? best : null;
+}
+
+function rotateAssemblyFaces(faces, rotation, translation = [0,0,0]) {
+  if (!faces) return null;
+  return faces.map(face => {
+    const corners = face.corners.map(corner => ({...corner,
+      position:rotateAssemblyPoint(corner.position, rotation, true)
+        .map((value, axis) => value + translation[axis] / 16)}));
+    const normal = rotateAssemblyPoint(face.normal || faceNormal(corners), rotation, true);
+    return {...face, corners, normal, direction:directionFromNormal(normal)};
+  });
+}
+
+function assemblyFaceSignature(face) {
+  const corners = face.corners.map(corner => {
+    const position = corner.position.map(value => Math.round(value * ASSEMBLY_QUANTIZE)).join(',');
+    const uv = (corner.uv || []).map(value => Math.round(value * ASSEMBLY_QUANTIZE)).join(',');
+    return position + '@' + uv;
+  }).sort().join(';');
+  const normal = (face.normal || []).map(value => Math.round(value * ASSEMBLY_QUANTIZE)).join(',');
+  const color = (face.color || []).map(value => Math.round(value * 255)).join(',');
+  return [face.texturePath || '', face.renderType || '', face.direction || '', normal, corners, color,
+    Number.isInteger(face.tintIndex) ? face.tintIndex : -1, face.emissive ? 'emissive' : '',
+    face.shade === false ? 'unshaded' : 'shaded',
+    face.ambientOcclusion === false ? 'no_ao' : 'ao'].join('|');
+}
+
+function assemblyFacesSignature(faces) {
+  return (faces || []).map(assemblyFaceSignature).sort().join('||');
+}
+
+function assemblyFacePhaseSignature(face) {
+  const corners = face.corners.map(corner => corner.position
+    .map(value => Math.round(value * ASSEMBLY_QUANTIZE)).join(',')).sort().join(';');
+  const normal = (face.normal || []).map(value => Math.round(value * ASSEMBLY_QUANTIZE)).join(',');
+  return [face.texturePath || '', face.renderType || '', face.direction || '', normal, corners,
+    Number.isInteger(face.tintIndex) ? face.tintIndex : -1, face.emissive ? 'emissive' : '',
+    face.shade === false ? 'unshaded' : 'shaded',
+    face.ambientOcclusion === false ? 'no_ao' : 'ao'].join('|');
+}
+
+function assemblyFacesPhaseSignature(faces) {
+  return (faces || []).map(assemblyFacePhaseSignature).sort().join('||');
+}
+
+function unambiguousRotatedFaces(faces, alignment, options = {}) {
+  const variants = (alignment.alternatives || [alignment])
+    .map(candidate => rotateAssemblyFaces(faces, candidate.rotation, candidate.translation));
+  if (new Set(variants.map(assemblyFacesSignature)).size === 1) return variants[0];
+  if (options.allowUvPhase && new Set(variants.map(assemblyFacesPhaseSignature)).size === 1) {
+    variants[0].partial = true;
+    return variants[0];
+  }
+  return null;
+}
+
+function assemblyFaceMatchCount(sourceFaces, targetFaces) {
+  const counts = new Map();
+  for (const face of sourceFaces || []) {
+    const key = assemblyFaceSignature(face); counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  let score = 0;
+  for (const face of targetFaces || []) {
+    const key = assemblyFaceSignature(face), count = counts.get(key) || 0;
+    if (!count) continue;
+    score++; counts.set(key, count - 1);
+  }
+  return score;
+}
+
+function preferVisualAssemblyAlignment(sourceModel, targetModel, sourceElements, targetElements, alignment) {
+  if (!alignment) return null;
+  const scored = (alignment.alternatives || [alignment]).map(candidate => {
+    let score = 0;
+    for (const [sourceIndex, targetIndex] of candidate.pairs || []) {
+      const sourceFaces = rotateAssemblyFaces(facesFromElements(sourceModel, [sourceElements[sourceIndex]]),
+        candidate.rotation, candidate.translation);
+      const targetFaces = facesFromElements(targetModel, [targetElements[targetIndex]]);
+      score += assemblyFaceMatchCount(sourceFaces, targetFaces);
+    }
+    return {candidate, score};
+  });
+  const best = Math.max(...scored.map(value => value.score));
+  if ((alignment.alternatives || []).length < 2 || best <= 0) return {...alignment, visualMatches:best};
+  const candidates = scored.filter(value => value.score === best).map(value => value.candidate);
+  return {...candidates[0], alternatives:candidates, visualMatches:best};
+}
+
+function modelIdFromPath(path) {
+  if (!path.startsWith('assets/') || !path.endsWith('.json')) return null;
+  const marker = path.indexOf('/models/');
+  if (marker < 0) return null;
+  const namespace = path.slice('assets/'.length, marker);
+  const name = path.slice(marker + '/models/'.length, -'.json'.length);
+  return namespace && name ? namespace + ':' + name : null;
+}
+
+function assemblySiblingModelIds(files, itemJson) {
+  const parentPath = itemJson && typeof itemJson.parent === 'string'
+    ? resourcePath(itemJson.parent, 'models', '.json') : null;
+  if (!parentPath || !parentPath.endsWith('/item.json') || !parentPath.includes('/models/block/')) return [];
+  const directory = parentPath.slice(0, parentPath.lastIndexOf('/') + 1), result = [];
+  for (const path of [...files.keys()].sort()) {
+    if (!path.startsWith(directory) || path === parentPath || !path.endsWith('.json')) continue;
+    if (path.slice(directory.length).includes('/')) continue;
+    const id = modelIdFromPath(path);
+    if (id) result.push(id);
+    if (result.length >= MAX_ASSEMBLY_MODELS) break;
+  }
+  return result;
+}
+
+function assemblyTextureSet(model) {
+  const result = new Set();
+  for (const element of model.elements || []) for (const face of Object.values(element.faces || {})) {
+    const path = face && face.texture ? resolveTexture(model, face.texture) : null;
+    if (path) result.add(path);
+  }
+  return result;
+}
+
+function assemblyElementTextures(model, element) {
+  const result = new Set();
+  for (const face of Object.values(element.faces || {})) {
+    const path = face && face.texture ? resolveTexture(model, face.texture) : null;
+    if (path) result.add(path);
+  }
+  return result;
+}
+
+function assemblyBounds(elements) {
+  const points = [];
+  for (const element of elements || []) {
+    const value = assemblyElementPoints(element, IDENTITY_CUBE_ROTATION);
+    if (!value) return null;
+    points.push(...value);
+  }
+  if (!points.length) return null;
+  return [0,1,2].map(axis => [Math.min(...points.map(point => point[axis])),
+    Math.max(...points.map(point => point[axis]))]);
+}
+
+function boundsCoverage(container, content) {
+  if (!container || !content) return 0;
+  let intersection = 1, volume = 1;
+  for (let axis = 0; axis < 3; axis++) {
+    intersection *= Math.max(0, Math.min(container[axis][1], content[axis][1])
+      - Math.max(container[axis][0], content[axis][0]));
+    volume *= Math.max(0, content[axis][1] - content[axis][0]);
+  }
+  return volume ? intersection / volume : 0;
+}
+
+function assemblyElementInvariant(model, element) {
+  const points = assemblyElementPoints(element, IDENTITY_CUBE_ROTATION);
+  if (!points) return null;
+  const distances = [];
+  for (let left = 0; left < points.length; left++) for (let right = left + 1; right < points.length; right++) {
+    const distance = points[left].reduce((sum, value, axis) =>
+      sum + (value - points[right][axis]) ** 2, 0);
+    distances.push(Math.round(distance * ASSEMBLY_QUANTIZE * ASSEMBLY_QUANTIZE));
+  }
+  const textures = [...assemblyElementTextures(model, element)].sort().join(',');
+  return distances.sort((left, right) => left - right).join(',') + '|' + textures + '|'
+    + Object.keys(element.faces || {}).length + '|' + (element.shade === false ? 'unshaded' : 'shaded');
+}
+
+function compatibleAssemblyVariant(base, variant) {
+  if (!base || !variant || base.transform != null || variant.transform != null
+      || base.elements.length !== variant.elements.length) return false;
+  const signature = model => {
+    const values = model.elements.map(element => assemblyElementInvariant(model, element));
+    return values.every(Boolean) ? values.sort().join('||') : null;
+  };
+  const baseSignature = signature(base), variantSignature = signature(variant);
+  return !!baseSignature && baseSignature === variantSignature;
+}
+
+function inferAssemblyComponents(options) {
+  const {files, itemJson, item, targetElements, excluded, minimum, allowFull} = options;
+  const groups = new Map(), itemTextures = assemblyTextureSet(item);
+  for (const modelId of assemblySiblingModelIds(files, itemJson)) {
+    if (excluded.has(modelId)) continue;
+    const json = modelJson(files, modelId);
+    if (!json || loaderId(json.loader)) continue;
+    const model = mergeModel(files, modelId, 0, new Set());
+    if (!model || model.transform != null || !Array.isArray(model.elements)
+        || model.elements.length < minimum
+        || model.elements.length > MAX_ASSEMBLY_COMPONENT_ELEMENTS) continue;
+    if ([...assemblyTextureSet(model)].some(texture => !itemTextures.has(texture))) continue;
+    let alignment = bestTranslatedAssemblyAlignment(model.elements, targetElements, minimum);
+    alignment = preferVisualAssemblyAlignment(model, item, model.elements, targetElements, alignment);
+    if (!alignment || alignment.visualMatches <= 0
+        || (!allowFull && alignment.count === targetElements.length)) continue;
+    const selected = alignment;
+    const targetKey = [...selected.targetIndices].sort((left, right) => left - right).join(',');
+    const alignedFaces = unambiguousRotatedFaces(facesFromElements(model, model.elements), selected);
+    if (!alignedFaces) continue;
+    const signature = assemblyFacesSignature(alignedFaces);
+    const current = groups.get(targetKey);
+    if (current && current.signature !== signature) {
+      groups.set(targetKey, {ambiguous:true});
+    } else if (!current || (!current.ambiguous && modelId.localeCompare(current.modelId) < 0)) {
+      groups.set(targetKey, {modelId, model, alignment:selected, signature});
+    }
+  }
+  const result = [], used = new Set();
+  for (const component of [...groups.values()].filter(value => !value.ambiguous).sort((left, right) =>
+    right.alignment.count - left.alignment.count || left.modelId.localeCompare(right.modelId))) {
+    if ([...component.alignment.targetIndices].some(index => used.has(index))) continue;
+    component.alignment.targetIndices.forEach(index => used.add(index));
+    result.push(component);
+  }
+  return result;
+}
+
+function selectedAssemblyComponent(files, component, state) {
+  if (!component) return null;
+  const properties = parseProperties(state || ''), variants = new Map();
+  for (const [name, value] of Object.entries(properties).sort()) {
+    const suffix = value === 'true' ? name : value === 'false' ? null : value;
+    if (!suffix || !/^[a-z0-9_.-]+$/.test(suffix)) continue;
+    const modelId = component.modelId + '_' + suffix, json = modelJson(files, modelId);
+    if (!json || loaderId(json.loader)) continue;
+    const model = mergeModel(files, modelId, 0, new Set());
+    if (compatibleAssemblyVariant(component.model, model)) variants.set(modelId, {modelId, model});
+  }
+  if (!variants.size) return {modelId:component.modelId, model:component.model};
+  const choices = [...variants.values()].sort((left, right) => left.modelId.localeCompare(right.modelId));
+  const signatures = new Set(choices.map(choice =>
+    assemblyFacesSignature(facesFromElements(choice.model, choice.model.elements))));
+  return signatures.size === 1 ? choices[0] : null;
+}
+
+function modelRole(modelId) {
+  const slash = String(modelId || '').lastIndexOf('/');
+  return slash >= 0 ? modelId.slice(slash + 1) : String(modelId || '').split(':').pop();
+}
+
+function roleAssemblyFaces(files, reference, modelId, selected) {
+  const components = reference.components || [], claimed = new Set();
+  for (const component of components) component.alignment.targetIndices.forEach(index => claimed.add(index));
+  if (!components.length || selected.some(value => !value) || claimed.size !== reference.extras.length) return null;
+  const from = modelRole(reference.modelId), to = modelRole(modelId);
+  if (!from || !to || from === to || !/^[a-z0-9_.-]+$/.test(from + to)) return null;
+  const pattern = new RegExp('(^|[_/])' + from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([_/]|$)');
+  const faces = [];
+  for (let index = 0; index < components.length; index++) {
+    const source = selected[index];
+    const candidateId = source.modelId.replace(pattern, '$1' + to + '$2');
+    if (candidateId === source.modelId) return null;
+    const json = modelJson(files, candidateId), model = json && !loaderId(json.loader)
+      ? mergeModel(files, candidateId, 0, new Set()) : null;
+    if (!compatibleAssemblyVariant(source.model, model)) return null;
+    const value = facesFromElements(model, model.elements);
+    if (!value) return null;
+    faces.push(...value);
+  }
+  return faces.length ? faces : null;
+}
+
+function containsAssemblyFaces(current, expected) {
+  const counts = new Map();
+  for (const face of current || []) {
+    const key = assemblyFaceSignature(face);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  for (const face of expected || []) {
+    const key = assemblyFaceSignature(face), count = counts.get(key) || 0;
+    if (!count) return false;
+    counts.set(key, count - 1);
+  }
+  return true;
+}
+
+function modelContainsAssemblyFaces(model, faces) {
+  const current = facesFromElements(model, model.elements);
+  if (!current || !faces?.length) return false;
+  return CUBE_ROTATIONS.some(rotation => containsAssemblyFaces(current, rotateAssemblyFaces(faces, rotation)));
+}
+
+function inferComponentOnlyReference(files, id, itemJson, item, modelIds) {
+  if (modelIds.length !== 1) return null;
+  const modelId = modelIds[0], json = modelJson(files, modelId);
+  const model = json && !loaderId(json.loader) ? mergeModel(files, modelId, 0, new Set()) : null;
+  if (!model || model.transform != null || !Array.isArray(model.elements)) return null;
+  const components = inferAssemblyComponents({files, itemJson, item, targetElements:item.elements,
+    excluded:new Set(modelIds), minimum:1, allowFull:false});
+  if (!components.length) return null;
+  const sourceIndices = new Set();
+  for (const component of components) component.alignment.targetIndices.forEach(index => sourceIndices.add(index));
+  const extras = item.elements.filter((_, index) => sourceIndices.has(index));
+  remapAssemblyComponents(components, sourceIndices);
+  const faces = facesFromElements(item, extras);
+  return faces && faces.length ? {modelId, model, item, extras,
+    itemRotation:IDENTITY_CUBE_ROTATION, faces, components} : null;
+}
+
+function remapAssemblyComponents(components, sourceIndices) {
+  const remap = new Map(), ordered = [...sourceIndices].sort((left, right) => left - right);
+  ordered.forEach((source, index) => remap.set(source, index));
+  for (const component of components) component.alignment = {...component.alignment,
+    targetIndices:new Set([...component.alignment.targetIndices].map(index => remap.get(index)))};
+}
+
+function inferAlignedComponentReference(files, itemJson, item, modelIds) {
+  const components = inferAssemblyComponents({files, itemJson, item, targetElements:item.elements,
+    excluded:new Set(modelIds), minimum:1, allowFull:false});
+  if (!components.length) return null;
+  const sourceIndices = new Set();
+  for (const component of components) component.alignment.targetIndices.forEach(index => sourceIndices.add(index));
+  const componentFaces = facesFromElements(item, item.elements.filter((_, index) => sourceIndices.has(index)));
+  let best = null;
+  for (const modelId of modelIds) {
+    const json = modelJson(files, modelId), model = json && !loaderId(json.loader)
+      ? mergeModel(files, modelId, 0, new Set()) : null;
+    if (!model || model.transform != null || !Array.isArray(model.elements)) continue;
+    let alignment = bestAssemblyAlignment(item.elements, model.elements,
+      MIN_COMPONENT_ALIGNMENT_MATCHES, MIN_COMPONENT_ALIGNMENT_RATIO);
+    alignment = preferVisualAssemblyAlignment(item, model, item.elements, model.elements, alignment);
+    if (!alignment || alignment.visualMatches <= 0
+        || [...sourceIndices].some(index => alignment.sourceIndices.has(index))) continue;
+    const variants = alignment.alternatives.map(candidate =>
+      rotateAssemblyFaces(componentFaces, candidate.rotation));
+    if (new Set(variants.map(assemblyFacesSignature)).size !== 1) continue;
+    if (!best || alignment.count > best.alignment.count) best = {modelId, model, alignment, faces:variants[0]};
+  }
+  if (!best) return null;
+  const extras = item.elements.filter((_, index) => sourceIndices.has(index));
+  remapAssemblyComponents(components, sourceIndices);
+  return {modelId:best.modelId, model:best.model, item, extras, itemRotation:best.alignment.rotation,
+    faces:best.faces, components, alignmentMinimum:MIN_COMPONENT_ALIGNMENT_MATCHES,
+    alignmentRatio:MIN_COMPONENT_ALIGNMENT_RATIO};
+}
+
+function inferNovelTextureReference(files, item, modelIds) {
+  if (modelIds.length !== 1) return null;
+  const modelId = modelIds[0], json = modelJson(files, modelId);
+  const model = json && !loaderId(json.loader) ? mergeModel(files, modelId, 0, new Set()) : null;
+  if (!model || model.transform != null || !Array.isArray(model.elements)
+      || item.elements.length <= model.elements.length) return null;
+  const baseTextures = assemblyTextureSet(model), itemTextures = assemblyTextureSet(item);
+  if (![...baseTextures].some(texture => itemTextures.has(texture))) return null;
+  const extras = item.elements.filter(element =>
+    [...assemblyElementTextures(item, element)].some(texture => !baseTextures.has(texture)));
+  if (!extras.length || extras.length > item.elements.length - model.elements.length + 2) return null;
+  const baseBounds = assemblyBounds(model.elements), itemBounds = assemblyBounds(item.elements);
+  if (boundsCoverage(itemBounds, baseBounds) < MIN_ASSEMBLY_RATIO) return null;
+  const faces = facesFromElements(item, extras);
+  return faces && faces.length ? {modelId, model, item, extras,
+    itemRotation:IDENTITY_CUBE_ROTATION, faces, components:[]} : null;
+}
+
+function assemblyReferenceCoversModels(files, reference, modelIds) {
+  for (const modelId of modelIds) {
+    if (modelId === reference.modelId) continue;
+    const json = modelJson(files, modelId), model = json && !loaderId(json.loader)
+      ? mergeModel(files, modelId, 0, new Set()) : null;
+    let alignment = model && model.transform == null
+      ? bestAssemblyAlignment(reference.model.elements, model.elements) : null;
+    alignment = preferVisualAssemblyAlignment(reference.model, model,
+      reference.model.elements, model && model.elements || [], alignment);
+    if (!alignment || !unambiguousRotatedFaces(reference.faces, alignment, {allowUvPhase:true})) return false;
+  }
+  return true;
+}
+
+function inferAssemblyReference(files, id) {
+  const itemId = blockItemModelId(id), itemJson = modelJson(files, itemId);
+  if (!itemJson || loaderId(itemJson.loader)) return null;
+  const item = mergeModel(files, itemId, 0, new Set());
+  if (!item || item.transform != null || !Array.isArray(item.elements)
+      || !item.elements.length || item.elements.length > MAX_ASSEMBLY_ELEMENTS) return null;
+  const modelIds = blockstateModelIds(files, id);
+  let best = null;
+  for (const modelId of modelIds) {
+    const json = modelJson(files, modelId);
+    if (!json || loaderId(json.loader)) continue;
+    const model = mergeModel(files, modelId, 0, new Set());
+    if (!model || model.transform != null || !Array.isArray(model.elements)) continue;
+    let alignment = bestAssemblyAlignment(item.elements, model.elements);
+    alignment = preferVisualAssemblyAlignment(item, model, item.elements, model.elements, alignment);
+    if (!alignment || alignment.visualMatches <= 0 || alignment.count >= item.elements.length) continue;
+    if (!best || alignment.count > best.alignment.count
+        || (alignment.count === best.alignment.count && model.elements.length > best.model.elements.length)) {
+      best = {modelId, model, alignment};
+    }
+  }
+  if (!best) return inferComponentOnlyReference(files, id, itemJson, item, modelIds)
+    || inferAlignedComponentReference(files, itemJson, item, modelIds)
+    || inferNovelTextureReference(files, item, modelIds);
+  const aligned = best.alignment.alternatives.map(alignment => {
+    const extras = item.elements.filter((_, index) => !alignment.sourceIndices.has(index));
+    const faces = rotateAssemblyFaces(facesFromElements(item, extras), alignment.rotation);
+    return {alignment, extras, faces};
+  });
+  if (!aligned.length || new Set(aligned.map(value => assemblyFacesSignature(value.faces))).size !== 1) return null;
+  const {alignment, extras, faces} = aligned[0];
+  if (!extras.length || extras.length > MAX_ASSEMBLY_ELEMENTS - MIN_ASSEMBLY_MATCHES) return null;
+  const components = inferAssemblyComponents({files, itemJson, item, targetElements:extras,
+    excluded:new Set(modelIds), minimum:MIN_ASSEMBLY_MATCHES, allowFull:true});
+  const reference = faces && faces.length ? {modelId:best.modelId, model:best.model, item, extras,
+    itemRotation:alignment.rotation, faces, components} : null;
+  return reference && assemblyReferenceCoversModels(files, reference, modelIds) ? reference : null;
+}
+
+function referenceAssemblyFaces(files, reference, selected) {
+  const components = reference.components || [];
+  if (selected.some(value => !value)) return null;
+  const claimed = new Set();
+  for (const component of components) component.alignment.targetIndices.forEach(index => claimed.add(index));
+  let faces = facesFromElements(reference.item, reference.extras.filter((_, index) => !claimed.has(index))) || [];
+  for (let index = 0; index < components.length; index++) {
+    const component = components[index], choice = selected[index];
+    const componentFaces = unambiguousRotatedFaces(
+      facesFromElements(choice.model, choice.model.elements), component.alignment);
+    if (!componentFaces) return null;
+    faces = faces.concat(componentFaces);
+  }
+  return rotateAssemblyFaces(faces, reference.itemRotation);
+}
+
+function assemblyFaces(files, id, modelId, state) {
+  const cache = shared && shared.loaded && shared.loaded.files === files ? assets.assemblies : null;
+  const referenceKey = id + '|reference';
+  if (cache && !cache.has(referenceKey)) cacheAssembly(referenceKey, inferAssemblyReference(files, id));
+  const reference = cache ? cache.get(referenceKey) : inferAssemblyReference(files, id);
+  if (!reference) return null;
+  const selected = (reference.components || []).map(component => selectedAssemblyComponent(files, component, state));
+  if (selected.some(value => !value)) return null;
+  const key = id + '|' + modelId + '|' + (selected.map(value => value.modelId).join(',') || 'item');
+  if (cache && cache.has(key)) return cache.get(key);
+  const referenceFaces = referenceAssemblyFaces(files, reference, selected);
+  let result = null;
+  if (modelId === reference.modelId) result = referenceFaces;
+  else {
+    const json = modelJson(files, modelId), model = json && !loaderId(json.loader)
+      ? mergeModel(files, modelId, 0, new Set()) : null;
+    let alignment = model && model.transform == null
+      ? bestAssemblyAlignment(reference.model.elements, model.elements,
+        reference.alignmentMinimum || MIN_ASSEMBLY_MATCHES, reference.alignmentRatio || MIN_ASSEMBLY_RATIO) : null;
+    alignment = preferVisualAssemblyAlignment(reference.model, model,
+      reference.model.elements, model && model.elements || [], alignment);
+    if (model && modelContainsAssemblyFaces(model, referenceFaces)) result = [];
+    else if (alignment) result = unambiguousRotatedFaces(referenceFaces, alignment, {allowUvPhase:true});
+    else result = roleAssemblyFaces(files, reference, modelId, selected);
+  }
+  if (cache) cacheAssembly(key, result);
+  return result;
+}
+
+function cacheAssembly(key, value) {
+  if (assets.assemblies.has(key)) assets.assemblies.delete(key);
+  assets.assemblies.set(key, value);
+  while (assets.assemblies.size > MAX_ASSEMBLY_CACHE_ENTRIES) {
+    assets.assemblies.delete(assets.assemblies.keys().next().value);
+  }
 }
 
 function bakeComposite(files, json, options) {
@@ -930,15 +1617,18 @@ async function packAtlases(textures, batches, fallback, budget, retained) {
     const source = sources.get(batch.texture); if (!source) continue;
     const alpha = normalizeRenderType(batch.renderType) || source.alpha;
     batch.atlasKey = batch.texture + '|' + alpha;
-    requested.set(batch.atlasKey, {...source, path:batch.atlasKey, alpha});
+    const previous = requested.get(batch.atlasKey);
+    requested.set(batch.atlasKey, {...source, path:batch.atlasKey, alpha,
+      optional:previous ? previous.optional && !!batch.assembly : !!batch.assembly});
   }
   for (const item of fallback) {
     const source = sources.get(item.texture); if (!source) continue;
     const alpha = normalizeRenderType(item.renderType) || source.alpha;
     item.atlasKey = item.texture + '|' + alpha;
-    requested.set(item.atlasKey, {...source, path:item.atlasKey, alpha});
+    requested.set(item.atlasKey, {...source, path:item.atlasKey, alpha, optional:false});
   }
-  const ordered = [...requested.values()].sort((a, b) => a.alpha.localeCompare(b.alpha)
+  const ordered = [...requested.values()].sort((a, b) => Number(a.optional) - Number(b.optional)
+    || a.alpha.localeCompare(b.alpha)
     || b.bitmap.height - a.bitmap.height || b.bitmap.width - a.bitmap.width || a.path.localeCompare(b.path));
   for (const item of ordered) {
     let placement = null;
@@ -1003,10 +1693,27 @@ function batchGpuBytes(batch) {
   return (geometryValues + instanceMatrices) * 4;
 }
 
+function withoutAssembly(result) {
+  if (!result || !result.batches || ![...result.batches.values()].some(batch => batch.assembly)) return result;
+  const batches = new Map([...result.batches].filter(([, batch]) => !batch.assembly));
+  const triangles = [...batches.values()].reduce((sum, batch) => sum + batchTriangleCost(batch), 0);
+  return {...result, batches, triangles, partial:true};
+}
+
+function removeCommittedAssembly(batches, partialStates) {
+  let removed = false;
+  for (const [key, batch] of batches) {
+    if (!batch.assembly) continue;
+    partialStates.add(batch.stateIndex);
+    batches.delete(key); removed = true;
+  }
+  return removed;
+}
+
 function createBatch(key, texture, renderType) {
   return {key, texture, renderType:normalizeRenderType(renderType), emissive:false, shade:true,
     positions:[], normals:[], uvs:[], colors:[], indices:[], instances:[], faceKeys:new Set(),
-    stateIndex:-1, group:-1};
+    stateIndex:-1, group:-1, assembly:false};
 }
 
 function normalizeRenderType(value) {
@@ -1061,6 +1768,44 @@ function modelTint(state, tintIndex, biome) {
   return null;
 }
 
+function appendModelFaces(options) {
+  const {local, faces, kind, modelKey, choice, value, state, stateIndex, biome, texturePaths} = options;
+  const rotationX = Number(choice.x) || 0, rotationY = Number(choice.y) || 0;
+  const transform = matrix(0, 0, 0, rotationX, rotationY), touched = new Set();
+  let triangles = 0;
+  for (let faceIndex = 0; faceIndex < faces.length; faceIndex++) {
+    const face = faces[faceIndex];
+    if (!face.texturePath || !face.corners || face.corners.length < 3) continue;
+    const tintValue = modelTint(state, face.tintIndex, biome);
+    const renderType = normalizeRenderType(face.renderType) || vanillaRenderType(state.id);
+    const key = stateIndex + '|g' + value.g + '|' + kind + '|' + modelKey + '|' + face.texturePath + '|'
+      + rotationX + '|' + rotationY + '|' + (tintValue == null ? '' : tintValue)
+      + '|' + renderType + '|' + (face.emissive ? 'e' : '')
+      + '|' + (face.shade === false ? 'unshaded' : 'shaded')
+      + '|' + (choice.uvlock === true ? 'lock' : '');
+    let batch = local.get(key);
+    if (!batch) {
+      batch = createBatch(key, face.texturePath, renderType);
+      batch.stateIndex = stateIndex; batch.group = value.g; batch.emissive = !!face.emissive;
+      batch.shade = face.shade !== false; batch.assembly = kind === 'assembly'; local.set(key, batch);
+    }
+    if (!batch.faceKeys.has(faceIndex)) {
+      const lock = choice.uvlock === true ? uvLockTurn(face.direction, rotationX, rotationY) : 0;
+      addFace(batch, lock ? rotateFaceUv(face, lock / 90) : face,
+        transform, tintColor(tintValue, face.color));
+      batch.faceKeys.add(faceIndex);
+    }
+    triangles += face.corners.length - 2;
+    touched.add(batch); texturePaths.add(face.texturePath);
+  }
+  for (const batch of touched) batch.instances.push(value.x, value.y, value.z);
+  return {triangles, ready:touched.size > 0};
+}
+
+function batchTriangleCost(batch) {
+  return batch.indices.length / 3 * (batch.instances.length / 3);
+}
+
 /* Build one state in a private map.  A state is committed only when every one of
    its instances fits the budget; otherwise its complete low-fidelity group stays
    visible.  This prevents a shared state group from losing unprocessed blocks. */
@@ -1069,7 +1814,7 @@ function bakeState(values, stateIndex, palette, loaded, cachedModel, fluidCache,
   const state = palette[stateIndex];
   if (!state || !state.id) return null;
   const local = new Map(), texturePaths = new Set();
-  let cost = 0, partial = false, fullCube = true;
+  let cost = 0, partial = false, fullCube = true, assemblyBudgetExceeded = false;
   for (const value of values) {
     const choices = blockstateModels(loaded.files, state.id, state.state || state.id,
       minecraftModelSeed(value.x + originX, value.y + originY, value.z + originZ));
@@ -1079,44 +1824,24 @@ function bakeState(values, stateIndex, palette, loaded, cachedModel, fluidCache,
       if (!fluidCache.has(fluidDefinition.signature)) fluidCache.set(fluidDefinition.signature, fluidDefinition.faces);
       fluid = fluidCache.get(fluidDefinition.signature);
     }
-    let voxelCost = 0, voxelReady = false, voxelFullCube = false;
+    let voxelReady = false, voxelFullCube = false;
     for (const choice of choices) {
       const faces = cachedModel(choice.model);
       if (!faces || faces.length > MAX_MODEL_FACES) continue;
       if (faces.partial) partial = true;
       if (isFullCubeFaces(faces)) voxelFullCube = true;
-      const rotationX = Number(choice.x) || 0, rotationY = Number(choice.y) || 0;
-      const transform = matrix(0, 0, 0, rotationX, rotationY);
-      const touched = new Set();
-      for (let faceIndex = 0; faceIndex < faces.length; faceIndex++) {
-        const face = faces[faceIndex];
-        if (!face.texturePath || !face.corners || face.corners.length < 3) continue;
-        const tintValue = modelTint(state, face.tintIndex, biome);
-        const renderType = normalizeRenderType(face.renderType) || vanillaRenderType(state.id);
-        /* 旋转组进批次键:同一组的实例共用一个绕轴矩阵,运行时按批施加即可,
-           不必给每个实例多存一个组号(那会把 instances 的步长从 3 撑到 4)。 */
-        const key = stateIndex + '|g' + value.g + '|model|' + choice.model + '|' + face.texturePath + '|'
-          + rotationX + '|' + rotationY + '|' + (tintValue == null ? '' : tintValue)
-          + '|' + renderType + '|' + (face.emissive ? 'e' : '')
-          + '|' + (face.shade === false ? 'unshaded' : 'shaded')
-          + '|' + (choice.uvlock === true ? 'lock' : '');
-        let batch = local.get(key);
-        if (!batch) {
-          batch = createBatch(key, face.texturePath, renderType);
-          batch.stateIndex = stateIndex; batch.group = value.g; batch.emissive = !!face.emissive;
-          batch.shade = face.shade !== false; local.set(key, batch);
-        }
-        if (!batch.faceKeys.has(faceIndex)) {
-          const lock = choice.uvlock === true ? uvLockTurn(face.direction, rotationX, rotationY) : 0;
-          addFace(batch, lock ? rotateFaceUv(face, lock / 90) : face,
-            transform, tintColor(tintValue, face.color));
-          batch.faceKeys.add(faceIndex);
-        }
-        voxelCost += face.corners.length - 2;
-        touched.add(batch); texturePaths.add(face.texturePath);
+      const appended = appendModelFaces({local, faces, kind:'model', modelKey:choice.model, choice, value,
+        state, stateIndex, biome, texturePaths});
+      if (appended.ready) voxelReady = true;
+    }
+    if (voxelReady && choices.length === 1 && !assemblyBudgetExceeded) {
+      const choice = choices[0], assembled = assemblyFaces(loaded.files, state.id, choice.model,
+        state.state || state.id);
+      if (assembled && assembled.length <= MAX_MODEL_FACES) {
+        if (assembled.partial) partial = true;
+        appendModelFaces({local, faces:assembled, kind:'assembly', modelKey:state.id,
+          choice, value, state, stateIndex, biome, texturePaths});
       }
-      for (const batch of touched) batch.instances.push(value.x, value.y, value.z);
-      if (touched.size) voxelReady = true;
     }
     if (fluid && fluid.length) {
       voxelFullCube = false;
@@ -1138,16 +1863,22 @@ function bakeState(values, stateIndex, palette, loaded, cachedModel, fluidCache,
           addFace(batch, face, transform, tintColor(tintValue));
           batch.faceKeys.add(faceIndex);
         }
-        voxelCost += face.corners.length - 2;
         touched.add(batch); texturePaths.add(face.texturePath);
       }
       for (const batch of touched) batch.instances.push(value.x, value.y, value.z);
       if (touched.size) voxelReady = true;
     }
     if (!voxelReady) return null;
-    if (currentTriangles + cost + voxelCost > maxTriangles) return {failure:'budget'};
+    let nextCost = [...local.values()].reduce((sum, batch) => sum + batchTriangleCost(batch), 0);
+    if (currentTriangles + nextCost > maxTriangles
+        && [...local.values()].some(batch => batch.assembly)) {
+      partial = true; assemblyBudgetExceeded = true;
+      for (const [key, batch] of local) if (batch.assembly) local.delete(key);
+      nextCost = [...local.values()].reduce((sum, batch) => sum + batchTriangleCost(batch), 0);
+    }
+    if (currentTriangles + nextCost > maxTriangles) return {failure:'budget'};
     fullCube = fullCube && voxelFullCube;
-    cost += voxelCost;
+    cost = nextCost;
   }
   if (!local.size || !cost) return null;
   return {batches:local, triangles:cost, texturePaths, count:values.length, partial, fullCube};
@@ -1157,6 +1888,7 @@ function removeEnclosedInstances(output, groups, fullCubeStates, textures, bound
   const modes = new Map(textures.map(texture => [texture.path, texture.alpha]));
   const stateModes = new Map();
   for (const batch of output) {
+    if (batch.assembly) continue;
     let values = stateModes.get(batch.stateIndex); if (!values) { values = []; stateModes.set(batch.stateIndex, values); }
     values.push(normalizeRenderType(batch.renderType) || modes.get(batch.texture));
   }
@@ -1201,20 +1933,32 @@ async function bake(request) {
   const timings = {resources:0, geometry:0, decode:0, atlas:0};
   let mark = Date.now();
   const lap = key => { timings[key] += Date.now() - mark; mark = Date.now(); };
-  const cache = sharedFor(request.manifestUrl);
+  let manifest = null, resourceFingerprint = String(request.resourceFingerprint || '');
+  if (!resourceFingerprint) {
+    manifest = await fetchJson(request.manifestUrl, request.token, request.server);
+    resourceFingerprint = String(manifest && manifest.fingerprint || '');
+  }
+  const protocolVersion = manifest ? Number(manifest.version) : RESOURCE_PROTOCOL_VERSION;
+  const cache = sharedFor(request.manifestUrl, request.server, resourceFingerprint, protocolVersion);
   if (!cache.loaded) {
     cache.loaded = await loadResources(request.manifestUrl, request.token, request.server,
-      Math.max(0, maxWorkingBytes - recordBytes));
+      Math.max(0, maxWorkingBytes - recordBytes), manifest, resourceFingerprint);
   }
   const loaded = cache.loaded;
+  if (loaded.byteLength + recordBytes > maxWorkingBytes) {
+    cache.loaded = null;
+    throw new Error('资源闭包超过浏览器内存预算');
+  }
   lap('resources');
   const records = request.recordBytes === 8 ? new Uint16Array(request.records) : new Uint32Array(request.records);
   const palette = request.palette || (request.metadata && request.metadata.states) || [];
   const batches = new Map(), upgraded = new Set(), fallback = new Map(), reasons = new Map();
   const fluidCache = new Map();
   const cachedModel = id => {
-    if (!assets.models.has(id)) assets.models.set(id, bakeModel(loaded.files, id));
-    return assets.models.get(id);
+    if (assets.models.has(id)) return assets.models.get(id);
+    const value = bakeModel(loaded.files, id);
+    if (value) assets.models.set(id, value);
+    return value;
   };
   const biome = (request.metadata && request.metadata.biome_colors) || {};
   const maxTriangles = Math.max(1, Math.min(MAX_HIGH_TRIANGLES,
@@ -1224,7 +1968,8 @@ async function bake(request) {
   const maxTextureEdge = Math.max(16, Math.min(1024,
     Number(requestedBudget.textureEdge) || 1024));
   const maxGpuBytes = Math.max(16 * 1024 * 1024, Number(requestedBudget.gpuBytes) || 256 * 1024 * 1024);
-  let triangles = 0, upgradedVoxels = 0, workingBytes = loaded.byteLength + records.byteLength;
+  const baseWorkingBytes = loaded.byteLength + records.byteLength;
+  let triangles = 0, upgradedVoxels = 0, workingBytes = baseWorkingBytes;
   const partialStates = new Set(), fullCubeStates = new Set();
   const originX = (Number(request.metadata && request.metadata.origin_x) || 0)
     + (Number(request.metadata && request.metadata.plot_x) || 0);
@@ -1247,17 +1992,36 @@ async function bake(request) {
     if (fluid) fluidGrid.set(records[o] + ',' + records[o + 1] + ',' + records[o + 2], fluid);
   }
   for (const [stateIndex, values] of groups) {
-    const result = bakeState(values, stateIndex, palette, loaded, cachedModel, fluidCache, fluidGrid, biome,
+    let result = bakeState(values, stateIndex, palette, loaded, cachedModel, fluidCache, fluidGrid, biome,
       originX, originY, originZ, triangles, maxTriangles);
-    const resultBytes = result && result.batches
-      ? [...result.batches.values()].reduce((sum, batch) => sum + batchWorkingBytes(batch), 0) : 0;
-    if (result && result.batches && batches.size + result.batches.size <= maxDrawCalls
-        && workingBytes + resultBytes <= maxWorkingBytes) {
-      for (const [key, batch] of result.batches) batches.set(key, batch);
-      triangles += result.triangles; workingBytes += resultBytes;
+    const fits = candidate => {
+      if (!candidate || !candidate.batches) return false;
+      const bytes = [...candidate.batches.values()].reduce((sum, batch) => sum + batchWorkingBytes(batch), 0);
+      return batches.size + candidate.batches.size <= maxDrawCalls && workingBytes + bytes <= maxWorkingBytes
+        ? bytes : false;
+    };
+    let selected = result, resultBytes = fits(selected);
+    if (resultBytes === false) { selected = withoutAssembly(result); resultBytes = fits(selected); }
+    if (result && (resultBytes === false || result.failure === 'budget')
+        && removeCommittedAssembly(batches, partialStates)) {
+      triangles = [...batches.values()].reduce((sum, batch) => sum + batchTriangleCost(batch), 0);
+      workingBytes = baseWorkingBytes
+        + [...batches.values()].reduce((sum, batch) => sum + batchWorkingBytes(batch), 0);
+      if (result && result.failure === 'budget') {
+        result = bakeState(values, stateIndex, palette, loaded, cachedModel, fluidCache, fluidGrid, biome,
+          originX, originY, originZ, triangles, maxTriangles);
+        selected = result; resultBytes = fits(selected);
+        if (resultBytes === false) { selected = withoutAssembly(result); resultBytes = fits(selected); }
+      } else {
+        resultBytes = fits(selected);
+      }
+    }
+    if (resultBytes !== false) {
+      for (const [key, batch] of selected.batches) batches.set(key, batch);
+      triangles += selected.triangles; workingBytes += resultBytes;
       upgraded.add(stateIndex); upgradedVoxels += result.count;
-      if (result.partial) partialStates.add(stateIndex);
-      if (result.fullCube) fullCubeStates.add(stateIndex);
+      if (selected.partial) partialStates.add(stateIndex);
+      if (selected.fullCube) fullCubeStates.add(stateIndex);
       continue;
     }
     const state = palette[stateIndex];
@@ -1278,7 +2042,7 @@ async function bake(request) {
   for (const batch of batches.values()) {
     const value = {
       key:batch.key, texture:batch.texture, stateIndex:batch.stateIndex, group:batch.group,
-      renderType:batch.renderType, emissive:batch.emissive, shade:batch.shade,
+      renderType:batch.renderType, emissive:batch.emissive, shade:batch.shade, assembly:batch.assembly,
       positions:new Float32Array(batch.positions), normals:new Float32Array(batch.normals),
       uvs:new Float32Array(batch.uvs), colors:new Float32Array(batch.colors), indices:new Uint32Array(batch.indices),
       instances:new Float32Array(batch.instances)
@@ -1289,7 +2053,14 @@ async function bake(request) {
   }
   batches.clear(); fluidCache.clear();
   lap('geometry');
-  const texturePaths = [...new Set(output.map(batch => batch.texture).concat([...fallback.values()]).filter(Boolean))];
+  const baseTexturePaths = new Set(), assemblyTexturePaths = new Set();
+  for (const batch of output) {
+    if (!batch.texture) continue;
+    (batch.assembly ? assemblyTexturePaths : baseTexturePaths).add(batch.texture);
+  }
+  for (const texture of fallback.values()) if (texture) baseTexturePaths.add(texture);
+  const texturePaths = [...baseTexturePaths,
+    ...[...assemblyTexturePaths].filter(path => !baseTexturePaths.has(path))];
   const textures = [];
   const retained = new Set();   // 进了共享缓存的位图,packAtlases 之后不 close,下一 bake 还要用
   let decodedBytes = 0;
@@ -1363,30 +2134,47 @@ async function bake(request) {
   lap('decode');
   const available = new Set(textures.map(texture => texture.path));
   removeEnclosedInstances(output, groups, fullCubeStates, textures, request.metadata);
-  const requiredByState = new Map(), decodedByState = new Map();
+  const requiredBaseByState = new Map(), decodedBaseByState = new Map();
   for (const batch of output) {
-    requiredByState.set(batch.stateIndex, (requiredByState.get(batch.stateIndex) || 0) + 1);
-    if (available.has(batch.texture)) decodedByState.set(batch.stateIndex, (decodedByState.get(batch.stateIndex) || 0) + 1);
+    if (batch.assembly) continue;
+    requiredBaseByState.set(batch.stateIndex, (requiredBaseByState.get(batch.stateIndex) || 0) + 1);
+    if (available.has(batch.texture)) decodedBaseByState.set(batch.stateIndex,
+      (decodedBaseByState.get(batch.stateIndex) || 0) + 1);
   }
   const finalUpgraded = new Set([...upgraded].filter(stateIndex =>
-    requiredByState.get(stateIndex) > 0 && requiredByState.get(stateIndex) === decodedByState.get(stateIndex)));
+    requiredBaseByState.get(stateIndex) > 0
+      && requiredBaseByState.get(stateIndex) === decodedBaseByState.get(stateIndex)));
   for (const stateIndex of upgraded) if (!finalUpgraded.has(stateIndex)) reasons.set(stateIndex, 'texture_missing');
-  const usable = output.filter(batch => finalUpgraded.has(batch.stateIndex));
+  let usable = output.filter(batch => {
+    if (!finalUpgraded.has(batch.stateIndex)) return false;
+    if (available.has(batch.texture)) return true;
+    if (batch.assembly) partialStates.add(batch.stateIndex);
+    return false;
+  });
   const fallbackOutput = [...fallback]
     .filter(([, texture]) => available.has(texture))
     .map(([stateIndex, texture]) => ({stateIndex, texture,
       renderType:vanillaRenderType((palette[stateIndex] || {}).id)}));
-  const geometryBytes = usable.reduce((sum, batch) => sum + batchGpuBytes(batch), 0);
   const fallbackReserve = records.length / 4 * 80;
+  let geometryBytes = usable.reduce((sum, batch) => sum + batchGpuBytes(batch), 0);
+  if (geometryBytes + fallbackReserve > maxGpuBytes) {
+    for (const batch of usable) if (batch.assembly) partialStates.add(batch.stateIndex);
+    usable = usable.filter(batch => !batch.assembly);
+    geometryBytes = usable.reduce((sum, batch) => sum + batchGpuBytes(batch), 0);
+  }
   const packed = await packAtlases(textures, usable, fallbackOutput, {
     atlasSize:Number(requestedBudget.atlasSize) || ATLAS_SIZE,
     textureBytes:Math.max(0, maxGpuBytes - geometryBytes - fallbackReserve)
   }, retained);
-  const packedCounts = new Map();
-  for (const batch of packed.batches) packedCounts.set(batch.stateIndex,
-    (packedCounts.get(batch.stateIndex) || 0) + 1);
+  const packedBaseCounts = new Map(), packedKeys = new Set();
+  for (const batch of packed.batches) {
+    packedKeys.add(batch.key);
+    if (!batch.assembly) packedBaseCounts.set(batch.stateIndex,
+      (packedBaseCounts.get(batch.stateIndex) || 0) + 1);
+  }
+  for (const batch of usable) if (batch.assembly && !packedKeys.has(batch.key)) partialStates.add(batch.stateIndex);
   const packedUpgraded = new Set([...finalUpgraded].filter(stateIndex =>
-    packedCounts.get(stateIndex) === requiredByState.get(stateIndex)));
+    packedBaseCounts.get(stateIndex) === requiredBaseByState.get(stateIndex)));
   for (const stateIndex of finalUpgraded) if (!packedUpgraded.has(stateIndex)) reasons.set(stateIndex, 'atlas_budget');
   packed.batches = packed.batches.filter(batch => packedUpgraded.has(batch.stateIndex));
   upgradedVoxels = [...packedUpgraded].reduce((sum, stateIndex) =>

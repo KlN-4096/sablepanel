@@ -244,6 +244,7 @@
       const copy = records.buffer.slice(records.byteOffset, records.byteOffset + records.byteLength);
       try {
         worker.postMessage({type:'bake', manifestUrl:resource.manifestUrl, token:resource.token || '', server:resource.server || '',
+          resourceFingerprint:resource.fingerprint || '',
           recordBytes:structure.recordBytes, records:copy, palette:structure.metadata.states || [], metadata:structure.metadata,
           budget:this.budget}, [copy]);
         if (copy.byteLength !== 0) throw new Error('浏览器不支持 Transferable ArrayBuffer');

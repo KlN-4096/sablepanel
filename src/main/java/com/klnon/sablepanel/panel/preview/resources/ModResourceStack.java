@@ -36,7 +36,7 @@ import java.util.zip.ZipFile;
  * The class owns no Minecraft world state and can therefore run on the preview executor.
  */
 public final class ModResourceStack implements AutoCloseable {
-    public static final int RESOURCE_PROTOCOL_VERSION = 1;
+    public static final int RESOURCE_PROTOCOL_VERSION = 2;
     public static final long MAX_CLOSURE_BYTES = 256L * 1024 * 1024;
     public static final long MAX_JSON_BYTES = 4L * 1024 * 1024;
     public static final long MAX_OBJ_BYTES = 2L * 1024 * 1024;
@@ -50,6 +50,8 @@ public final class ModResourceStack implements AutoCloseable {
     private static final int MAX_OBJ_FACES = 50_000;
     private static final int MAX_OBJ_MATERIALS = 128;
     private static final int MAX_OBJ_LINE = 64 * 1024;
+    private static final int MAX_ASSEMBLY_SIBLINGS = 32;
+    private static final long MAX_ASSEMBLY_SIBLING_BYTES = 2L * 1024 * 1024;
 
     public record Layer(String id, Path archive) {
         public Layer {
@@ -116,26 +118,34 @@ public final class ModResourceStack implements AutoCloseable {
     private record ResourceRef(Layer layer, String path, long size, boolean directory) {
     }
 
-    private record Pending(String path, int modelDepth, int compositeDepth, int compositeNodes) {
+    private record Pending(String path, int modelDepth, int compositeDepth, int compositeNodes, boolean optional) {
     }
 
     private record JsonNode(JsonElement value, int depth) {
     }
 
     private final List<Layer> layers;
+    private final long maxClosureBytes;
     private final Map<String, ResourceRef> resources = new LinkedHashMap<>();
+    private final Map<String, List<String>> modelDirectories = new java.util.HashMap<>();
     private final Object lock = new Object();
     private volatile boolean indexed;
     private volatile boolean closed;
     private String fingerprint = "";
 
     public ModResourceStack(Path vanillaArchive, List<Path> modJars) {
-        this(buildLayers(vanillaArchive, modJars));
+        this(buildLayers(vanillaArchive, modJars), MAX_CLOSURE_BYTES);
     }
 
     public ModResourceStack(List<Layer> layers) {
+        this(layers, MAX_CLOSURE_BYTES);
+    }
+
+    ModResourceStack(List<Layer> layers, long maxClosureBytes) {
         if (layers == null || layers.isEmpty()) throw new IllegalArgumentException("resource layers are empty");
+        if (maxClosureBytes <= 0) throw new IllegalArgumentException("closure byte limit must be positive");
         this.layers = List.copyOf(layers);
+        this.maxClosureBytes = maxClosureBytes;
     }
 
     /**
@@ -168,17 +178,20 @@ public final class ModResourceStack implements AutoCloseable {
     /** Resolve only the closure reachable from the supplied blockstate/model roots. */
     public Bundle closure(Set<String> roots) throws IOException {
         ensureIndexed();
-        if (roots == null || roots.isEmpty()) return bundleOf(Set.of(), List.of(), List.of());
-        Set<String> wanted = new LinkedHashSet<>();
+        if (roots == null || roots.isEmpty()) return bundleOf(Set.of(), Set.of(), List.of(), List.of());
+        Set<String> required = new LinkedHashSet<>();
+        Set<String> optional = new LinkedHashSet<>();
         Set<String> visited = new LinkedHashSet<>();
         List<String> missing = new ArrayList<>();
         List<String> failures = new ArrayList<>();
-        Queue<Pending> queue = new ArrayDeque<>();
-        roots.stream().sorted().map(ModResourceStack::normalizePath).forEach(path -> queue.add(new Pending(path, 0, 0, 0)));
+        Queue<Pending> requiredQueue = new ArrayDeque<>(), optionalQueue = new ArrayDeque<>();
+        roots.stream().sorted().map(ModResourceStack::normalizePath)
+                .forEach(path -> requiredQueue.add(new Pending(path, 0, 0, 0, false)));
         long total = 0;
-        while (!queue.isEmpty()) {
-            Pending pending = queue.remove();
+        while (!requiredQueue.isEmpty() || !optionalQueue.isEmpty()) {
+            Pending pending = (requiredQueue.isEmpty() ? optionalQueue : requiredQueue).remove();
             if (!visited.add(pending.path())) continue;
+            Set<String> wanted = pending.optional() ? optional : required;
             wanted.add(pending.path());
             ResourceRef ref = this.resources.get(pending.path());
             if (ref == null) {
@@ -191,11 +204,18 @@ public final class ModResourceStack implements AutoCloseable {
                 wanted.remove(pending.path());
                 continue;
             }
+            long declaredSize = Math.max(0, ref.size());
+            if (pending.optional() && Math.addExact(total, declaredSize) > this.maxClosureBytes) {
+                failures.add(pending.path() + ":closure_limit");
+                wanted.remove(pending.path());
+                continue;
+            }
             try {
                 if (pending.path().endsWith(".obj") || pending.path().endsWith(".mtl")) {
                     byte[] bytes = read(ref, limit);
                     validateObjResource(pending.path(), bytes);
-                    collectObjReferences(pending.path(), bytes, pending, queue);
+                    collectObjReferences(pending.path(), bytes, pending,
+                            pending.optional() ? optionalQueue : requiredQueue);
                 } else if (pending.path().endsWith(".png")) {
                     validatePng(readPrefix(ref, 24));
                 } else if (pending.path().endsWith(".json") || pending.path().endsWith(".mcmeta")) {
@@ -210,21 +230,24 @@ public final class ModResourceStack implements AutoCloseable {
                     }
                     byte[] bytes = read(ref, limit);
                     JsonElement json = JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8));
-                    collectReferences(json, pending, queue);
+                    collectReferences(json, pending, pending.optional() ? optionalQueue : requiredQueue);
+                    collectOptionalAssemblyReferences(pending, optionalQueue);
                 }
             } catch (Exception error) {
                 wanted.remove(pending.path());
                 failures.add(pending.path() + ":invalid");
                 continue;
             }
-            total = Math.addExact(total, Math.max(0, ref.size()));
-            if (total > MAX_CLOSURE_BYTES) {
+            long nextTotal = Math.addExact(total, declaredSize);
+            if (nextTotal > this.maxClosureBytes) {
                 wanted.remove(pending.path());
                 failures.add(pending.path() + ":closure_limit");
+                if (pending.optional()) continue;
                 break;
             }
+            total = nextTotal;
         }
-        return bundleOf(wanted, missing, failures);
+        return bundleOf(required, optional, missing, failures);
     }
 
     /** 按路径读单个已索引资源。仅测试使用(分层合并语义的读取缝);shard 端点走 ResourceBundleCache。 */
@@ -244,9 +267,11 @@ public final class ModResourceStack implements AutoCloseable {
         }
     }
 
-    private Bundle bundleOf(Set<String> wanted, List<String> missing, List<String> failures) throws IOException {
+    private Bundle bundleOf(Set<String> required, Set<String> optional,
+                            List<String> missing, List<String> failures) throws IOException {
         record Packed(String path, String sha256, int length, int shardIndex, int offset, String layer) {}
-        List<String> ordered = wanted.stream().sorted().toList();
+        List<String> ordered = java.util.stream.Stream.concat(required.stream().sorted(),
+                optional.stream().filter(path -> !required.contains(path)).sorted()).toList();
         List<Packed> packed = new ArrayList<>();
         List<Shard> shards = new ArrayList<>();
         ByteArrayOutputStream current = new ByteArrayOutputStream(MAX_SHARD_BYTES);
@@ -266,11 +291,13 @@ public final class ModResourceStack implements AutoCloseable {
                 failures.add(path + ":shard_limit");
                 continue;
             }
-            total = Math.addExact(total, bytes.length);
-            if (total > MAX_CLOSURE_BYTES) {
+            long nextTotal = Math.addExact(total, bytes.length);
+            if (nextTotal > this.maxClosureBytes) {
                 failures.add(path + ":closure_limit");
+                if (!required.contains(path)) continue;
                 break;
             }
+            total = nextTotal;
             if (current.size() > 0 && current.size() + bytes.length > MAX_SHARD_BYTES) {
                 appendShard(shards, current);
                 current = new ByteArrayOutputStream(MAX_SHARD_BYTES);
@@ -322,6 +349,7 @@ public final class ModResourceStack implements AutoCloseable {
                             layer.id(), layer.archive(), unreadable.toString());
                 }
             }
+            indexModelDirectories();
             this.fingerprint = HexFormat.of().formatHex(digest.digest());
             this.indexed = true;
         }
@@ -360,6 +388,18 @@ public final class ModResourceStack implements AutoCloseable {
                 if (!validPath(name)) continue;
                 long size = Files.size(file);
                 digestEntry(digest, layer, name, size);
+                if ("jar".equalsIgnoreCase(file.getFileSystem().provider().getScheme())) {
+                    digest.update(String.valueOf(Files.getAttribute(file, "zip:crc"))
+                            .getBytes(StandardCharsets.US_ASCII));
+                } else {
+                    try (InputStream input = Files.newInputStream(file)) {
+                        byte[] buffer = new byte[8192];
+                        for (int read; (read = input.read(buffer)) >= 0; ) {
+                            if (read > 0) digest.update(buffer, 0, read);
+                        }
+                    }
+                }
+                digest.update((byte) 0);
                 this.resources.put(name, new ResourceRef(layer, name, size, true));
             }
         }
@@ -382,6 +422,47 @@ public final class ModResourceStack implements AutoCloseable {
             for (Path mod : mods) if (mod != null) result.add(new Layer("mod-" + i++, mod));
         }
         return result;
+    }
+
+    private void indexModelDirectories() {
+        for (String path : this.resources.keySet()) {
+            if (!path.endsWith(".json") || !path.contains("/models/block/")) continue;
+            int slash = path.lastIndexOf('/');
+            if (slash < 0) continue;
+            this.modelDirectories.computeIfAbsent(path.substring(0, slash + 1), ignored -> new ArrayList<>())
+                    .add(path);
+        }
+        this.modelDirectories.values().forEach(values -> values.sort(String::compareTo));
+    }
+
+    private void collectOptionalAssemblyReferences(Pending pending, Queue<Pending> queue) {
+        String itemModel = itemModelForBlockstate(pending.path());
+        if (itemModel != null && this.resources.containsKey(itemModel)) {
+            queue.add(new Pending(itemModel, 0, 0, 0, true));
+            return;
+        }
+        if (!pending.path().endsWith("/item.json") || !pending.path().contains("/models/block/")) return;
+        String directory = pending.path().substring(0, pending.path().lastIndexOf('/') + 1);
+        long bytes = 0;
+        int count = 0;
+        for (String sibling : this.modelDirectories.getOrDefault(directory, List.of())) {
+            if (count >= MAX_ASSEMBLY_SIBLINGS) break;
+            if (sibling.equals(pending.path())) continue;
+            ResourceRef ref = this.resources.get(sibling);
+            long size = ref == null ? 0 : Math.max(0, ref.size());
+            if (bytes + size > MAX_ASSEMBLY_SIBLING_BYTES) continue;
+            queue.add(new Pending(sibling, 0, 0, 0, true));
+            bytes += size;
+            count++;
+        }
+    }
+
+    private static String itemModelForBlockstate(String path) {
+        int marker = path.indexOf("/blockstates/");
+        if (!path.startsWith("assets/") || marker < 0 || !path.endsWith(".json")) return null;
+        String namespace = path.substring("assets/".length(), marker);
+        String name = path.substring(marker + "/blockstates/".length(), path.length() - ".json".length());
+        return "assets/" + namespace + "/models/item/" + name + ".json";
     }
 
     private void collectReferences(JsonElement element, Pending parent, Queue<Pending> queue) {
@@ -426,12 +507,13 @@ public final class ModResourceStack implements AutoCloseable {
         if (value.endsWith(".obj") || value.endsWith(".mtl")) {
             String path = assetPath(value);
             if (path != null) queue.add(new Pending(path, parent.modelDepth() + 1,
-                    parent.compositeDepth() + 1, parent.compositeNodes() + 1));
+                    parent.compositeDepth() + 1, parent.compositeNodes() + 1, parent.optional()));
             return;
         }
         if (key.equals("parent") || key.equals("model") || key.equals("child")) {
             String path = resourcePath(value, "models", ".json");
-            if (path != null) queue.add(new Pending(path, parent.modelDepth() + 1, parent.compositeDepth(), parent.compositeNodes()));
+            if (path != null) queue.add(new Pending(path, parent.modelDepth() + 1,
+                    parent.compositeDepth(), parent.compositeNodes(), parent.optional()));
         } else if (key.equals("texture") || key.equals("particle") || key.startsWith("texture")) {
             addTexture(value, parent, queue);
         }
@@ -441,8 +523,10 @@ public final class ModResourceStack implements AutoCloseable {
         if (value == null || value.isBlank() || value.startsWith("#")) return;
         String path = resourcePath(value, "textures", ".png");
         if (path == null) return;
-        queue.add(new Pending(path, parent.modelDepth(), parent.compositeDepth(), parent.compositeNodes()));
-        queue.add(new Pending(path + ".mcmeta", parent.modelDepth(), parent.compositeDepth(), parent.compositeNodes()));
+        queue.add(new Pending(path, parent.modelDepth(), parent.compositeDepth(),
+                parent.compositeNodes(), parent.optional()));
+        queue.add(new Pending(path + ".mcmeta", parent.modelDepth(), parent.compositeDepth(),
+                parent.compositeNodes(), parent.optional()));
     }
 
     private static void collectObjReferences(String basePath, byte[] bytes, Pending parent,
@@ -455,15 +539,17 @@ public final class ModResourceStack implements AutoCloseable {
                 String name = value.substring(7).trim();
                 String path = relativeAsset(directory, name);
                 if (path != null) queue.add(new Pending(path, parent.modelDepth() + 1,
-                        parent.compositeDepth() + 1, parent.compositeNodes() + 1));
+                        parent.compositeDepth() + 1, parent.compositeNodes() + 1, parent.optional()));
             } else if (basePath.endsWith(".mtl") && value.startsWith("map_Kd ")) {
                 String[] parts = value.substring(7).trim().split("\\s+");
                 String name = parts.length == 0 ? "" : parts[parts.length - 1];
                 String path = name.indexOf(':') >= 0
                         ? resourcePath(name, "textures", ".png") : relativeAsset(directory, name);
                 if (path != null) {
-                    queue.add(new Pending(path, parent.modelDepth(), parent.compositeDepth(), parent.compositeNodes()));
-                    queue.add(new Pending(path + ".mcmeta", parent.modelDepth(), parent.compositeDepth(), parent.compositeNodes()));
+                    queue.add(new Pending(path, parent.modelDepth(), parent.compositeDepth(),
+                            parent.compositeNodes(), parent.optional()));
+                    queue.add(new Pending(path + ".mcmeta", parent.modelDepth(), parent.compositeDepth(),
+                            parent.compositeNodes(), parent.optional()));
                 }
             }
         }
