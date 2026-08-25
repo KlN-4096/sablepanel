@@ -19,7 +19,7 @@ for (const [path, value] of files) {
     shard:crypto.createHash('sha256').update(shard).digest('hex'), offset, length:bytes.length, layer:'minecraft'});
   offset += bytes.length;
 }
-const manifest = {version:1, fingerprint:'a'.repeat(64), entries};
+const manifest = {version:2, fingerprint:'a'.repeat(64), entries};
 const responses = {
   manifest: {ok:true,status:200,json:async()=>manifest},
   shard: {ok:true,status:200,arrayBuffer:async()=>shard.buffer.slice(shard.byteOffset, shard.byteOffset + shard.byteLength)}
@@ -44,7 +44,7 @@ class FakeOffscreenCanvas {
 }
 let fetchCount = 0, decodeCount = 0;
 const sandbox = {
-  self: {crypto:null, postMessage:value=>posted.push(value)},
+  self: {crypto:crypto.webcrypto, postMessage:value=>posted.push(value)},
   fetch: async url => { fetchCount++; return String(url).includes('/shard/') ? responses.shard : responses.manifest; },
   TextDecoder, TextEncoder, Uint8Array, Uint8ClampedArray, Uint16Array, Uint32Array, Float32Array, DataView,
   ArrayBuffer, Blob, Promise, Map, Set, Math, BigInt, Number, JSON, Object, String, Error,
@@ -55,8 +55,27 @@ const sandbox = {
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, {filename:'model-worker.js'});
+const identityAssemblyRotation = vm.runInContext('IDENTITY_CUBE_ROTATION', sandbox);
 const loaded = await sandbox.loadResources('/api/preview/resources/' + 'b'.repeat(64) + '/manifest', '', '');
 assert.equal(loaded.byteLength, shard.length);
+const corruptedShard = Buffer.from(shard);
+corruptedShard[0] ^= 1;
+responses.shard.arrayBuffer = async() => corruptedShard.buffer.slice(
+  corruptedShard.byteOffset, corruptedShard.byteOffset + corruptedShard.byteLength);
+await assert.rejects(
+  () => sandbox.loadResources('/api/preview/resources/' + 'b'.repeat(64) + '/manifest', '', ''),
+  /分片哈希/, 'Worker 必须拒绝与内容地址不一致的资源分片');
+responses.shard.arrayBuffer = async() => shard.buffer.slice(shard.byteOffset, shard.byteOffset + shard.byteLength);
+const badEntryManifest = {...manifest, entries:manifest.entries.map((entry, index) =>
+  index ? entry : {...entry, sha256:'0'.repeat(64)})};
+await assert.rejects(
+  () => sandbox.loadResources('/api/preview/resources/' + 'b'.repeat(64) + '/manifest', '', '',
+    Infinity, badEntryManifest),
+  /文件哈希/, 'Worker 必须拒绝清单中文件摘要与切片内容不一致的资源');
+await assert.rejects(() => sandbox.loadResources('/manifest', '', '', Infinity,
+  {...manifest, version:1}), /协议版本/, 'Worker 必须拒绝不兼容的资源协议');
+await assert.rejects(() => sandbox.loadResources('/manifest', '', '', Infinity,
+  manifest, 'b'.repeat(64)), /指纹不一致/, '请求声明与清单资源指纹不一致时不得复用缓存');
 assert.equal(loaded.files.get('assets/minecraft/blockstates/stone.json').buffer,
   loaded.files.get('assets/minecraft/models/block/stone.json').buffer,
   '同一分片中的文件必须共享已校验分片，不能再复制一整套字节');
@@ -76,12 +95,21 @@ const layered = await sandbox.packAtlases(
   {atlasSize:512,textureBytes:8*1024*1024});
 assert.equal(layered.textures.length, 2, '同一纹理的不同渲染层必须放进不同图集页');
 assert.notEqual(layered.batches[0].texture, layered.batches[1].texture);
+const prioritized = await sandbox.packAtlases([
+  {path:'a-optional',alpha:'solid',bitmap:{width:500,height:500}},
+  {path:'z-base',alpha:'solid',bitmap:{width:500,height:500}}
+], [
+  {key:'optional',texture:'a-optional',renderType:'solid',uvs:new Float32Array([0,0]),stateIndex:0,assembly:true},
+  {key:'base',texture:'z-base',renderType:'solid',uvs:new Float32Array([0,0]),stateIndex:0,assembly:false}
+], [], {atlasSize:512,textureBytes:2*1024*1024});
+assert.equal(prioritized.batches.map(batch => batch.key).join(','), 'base',
+  '图集预算只能容纳一张纹理时必须先保留静态外壳，不能让可选组装纹理抢占页面');
 assert.ok(canvasTransforms.some(value => value[0] === 'translate' && value[2] === 512)
   && canvasTransforms.some(value => value[0] === 'scale' && value[1] === 1 && value[2] === -1),
   'ImageBitmap 图集必须在 Canvas 中预先纵向翻转');
 const records = new Uint16Array([0,0,0,0,1,0,0,0]);
 sandbox.self.onmessage({data:{type:'bake', manifestUrl:'/api/preview/resources/' + 'b'.repeat(64) + '/manifest',
-  token:'', server:'', recordBytes:8, records:records.buffer,
+  token:'', server:'', resourceFingerprint:manifest.fingerprint, recordBytes:8, records:records.buffer,
   palette:[{id:'minecraft:stone',state:'minecraft:stone'}],
   metadata:{states:[{id:'minecraft:stone',state:'minecraft:stone'}],origin_x:0,origin_y:0,origin_z:0,plot_x:0,plot_z:0,
     width:2,height:1,depth:1,biome_colors:{}}}});
@@ -103,7 +131,7 @@ const enclosedRecords = new Uint16Array([
   1,1,1,0, 0,1,1,0, 2,1,1,0, 1,0,1,0, 1,2,1,0, 1,1,0,0, 1,1,2,0
 ]);
 const enclosed = await sandbox.bake({manifestUrl:'/api/preview/resources/' + 'b'.repeat(64) + '/manifest',
-  token:'',server:'',recordBytes:8,records:enclosedRecords.buffer,
+  token:'',server:'',resourceFingerprint:manifest.fingerprint,recordBytes:8,records:enclosedRecords.buffer,
   palette:[{id:'minecraft:stone',state:'minecraft:stone'}],
   metadata:{states:[{id:'minecraft:stone',state:'minecraft:stone'}],width:3,height:3,depth:3,biome_colors:{}},
   budget:{gpuBytes:256*1024*1024,mainMemoryBytes:512*1024*1024,atlasSize:2048}});
@@ -111,6 +139,16 @@ assert.equal(enclosed.batches[0].instances.length, 6 * 3,
   '只有被六个已确认不透明完整立方体包围的实例可从场景中剔除');
 assert.equal(fetchCount, fetchesAfterFirstBake, '同一资源指纹的第二次 bake 不得重新下载分片');
 assert.equal(decodeCount, decodesAfterFirstBake, '同一资源指纹的第二次 bake 不得重新解码纹理');
+const lowBudgetUrl = '/api/preview/resources/' + 'd'.repeat(64) + '/manifest';
+const lowBudgetCache = sandbox.sharedFor(lowBudgetUrl, '', manifest.fingerprint, 2);
+lowBudgetCache.loaded = {files, byteLength:49 * 1024 * 1024, manifest};
+await assert.rejects(() => sandbox.bake({manifestUrl:lowBudgetUrl, token:'', server:'',
+  resourceFingerprint:manifest.fingerprint,recordBytes:8,records:new Uint16Array([0,0,0,0]).buffer,
+  palette:[{id:'minecraft:stone',state:'minecraft:stone'}],
+  metadata:{states:[{id:'minecraft:stone',state:'minecraft:stone'}],width:1,height:1,depth:1,biome_colors:{}},
+  budget:{mainMemoryBytes:64*1024*1024,gpuBytes:256*1024*1024,atlasSize:2048}}),
+/内存预算/, '复用大闭包时仍必须服从当前 bake 的较低工作内存预算');
+assert.equal(lowBudgetCache.loaded, null, '拒绝低预算 bake 时必须释放复用闭包，不能继续常驻超额字节');
 /* 结构边界上的方块不能因为"邻居越界"被当成被包围。整数序号必须对越界返回哨兵值:
    (y*depth+z)*width+x 在 x=width 时正好等于下一行的 x=0,不判界就会绕回去。
    下面是一块 2x3x2 的实心石头 —— 宽只有 2,每个方块的 ±x 邻居必有一侧在界外,
@@ -121,7 +159,7 @@ const solidRecords = new Uint16Array([
   0,2,0,0, 1,2,0,0, 0,2,1,0, 1,2,1,0
 ]);
 const solid = await sandbox.bake({manifestUrl:'/api/preview/resources/' + 'b'.repeat(64) + '/manifest',
-  token:'',server:'',recordBytes:8,records:solidRecords.buffer,
+  token:'',server:'',resourceFingerprint:manifest.fingerprint,recordBytes:8,records:solidRecords.buffer,
   palette:[{id:'minecraft:stone',state:'minecraft:stone'}],
   metadata:{states:[{id:'minecraft:stone',state:'minecraft:stone'}],width:2,height:3,depth:2,biome_colors:{}},
   budget:{gpuBytes:256*1024*1024,mainMemoryBytes:512*1024*1024,atlasSize:2048}});
@@ -132,7 +170,7 @@ assert.equal(solid.batches[0].instances.length, 12 * 3,
    它自己得单独成批(整批共用一个绕轴矩阵),而且不能再充当遮挡体 —— 它转开之后
    中心那块就露出来了,拿装配姿态去剔除会在螺旋桨底下留一个洞。 */
 const spun = await sandbox.bake({manifestUrl:'/api/preview/resources/' + 'b'.repeat(64) + '/manifest',
-  token:'',server:'',recordBytes:8,records:enclosedRecords.slice().buffer,
+  token:'',server:'',resourceFingerprint:manifest.fingerprint,recordBytes:8,records:enclosedRecords.slice().buffer,
   palette:[{id:'minecraft:stone',state:'minecraft:stone'}],
   metadata:{states:[{id:'minecraft:stone',state:'minecraft:stone'}],width:3,height:3,depth:3,biome_colors:{},
     groups:[{first:6, count:1, pivot:[1,1,1], axis:'y', angle:90}]},
@@ -151,7 +189,8 @@ assert.equal(spunStatic[0].instances.length, 6 * 3,
 {
   const decodesBefore = decodeCount;
   const other = await sandbox.bake({manifestUrl:'/api/preview/resources/' + 'c'.repeat(64) + '/manifest',
-    token:'',server:'',recordBytes:8,records:new Uint16Array([0,0,0,0]).buffer,
+    token:'',server:'',resourceFingerprint:manifest.fingerprint,recordBytes:8,
+    records:new Uint16Array([0,0,0,0]).buffer,
     palette:[{id:'minecraft:stone',state:'minecraft:stone'}],
     metadata:{states:[{id:'minecraft:stone',state:'minecraft:stone'}],width:1,height:1,depth:1,biome_colors:{}},
     budget:{gpuBytes:256*1024*1024,mainMemoryBytes:512*1024*1024,atlasSize:2048}});
@@ -240,6 +279,391 @@ assert.equal(compositeFaces.partial, true, '单个 Composite 子项失败时保�
 assert.equal(sandbox.modelFailureReason(new Map([
   ['assets/test/models/block/unknown.json', encoder.encode('{"loader":"test:private"}')]
 ]), [{model:'test:block/unknown'}], false), 'unknown_loader');
+
+/* 动态 partial 不在 blockstate 的资源图里，但完整物品模型常把静态外壳与这些部件组装在一起。
+   当前状态故意选择与物品基准不同的 end 外壳：补全逻辑必须从全部 blockstate 模型里找到
+   可证明的 single 基准，只叠加物品模型多出的越界横杆，不能把 single 外壳替换回来。 */
+const assemblyElement = (from, to) => ({from,to,faces:{east:{texture:'#all'},west:{texture:'#all'}}});
+const assemblyShell = [
+  assemblyElement([0,0,0],[2,16,16]), assemblyElement([14,0,0],[16,16,16]),
+  assemblyElement([2,0,0],[14,2,16]), assemblyElement([2,14,0],[14,16,16]),
+  assemblyElement([0,2,0],[3,6,5])
+];
+const normalRotor = [
+  assemblyElement([16,3,3],[24,5,5]), assemblyElement([16,6,6],[24,8,8]),
+  assemblyElement([16,9,9],[22,11,12]), assemblyElement([16,12,12],[21,16,14])
+];
+const reversedRotor = [
+  assemblyElement([-8,3,3],[0,5,5]), assemblyElement([-8,6,6],[0,8,8]),
+  assemblyElement([-6,9,9],[0,11,12]), assemblyElement([-5,12,12],[0,16,14])
+];
+const activeRotor = [
+  assemblyElement([3,3,16],[5,5,24]), assemblyElement([6,6,16],[8,8,24]),
+  assemblyElement([9,9,16],[12,11,22]), assemblyElement([12,12,16],[14,16,21])
+];
+const rotorFaces = names => Object.fromEntries(names.map(name => [name, {texture:'#all'}]));
+const proxyRotor = elements => elements.map(element => ({...element,
+  faces:rotorFaces(['down','up','north','south','west','east'])}));
+const exactRotor = elements => elements.map(element => ({...element,
+  faces:rotorFaces(['down','up','north','south','east'])}));
+const assembledFiles = new Map([
+  ['assets/test/blockstates/assembled.json', encoder.encode(JSON.stringify({variants:{
+    'part=single':{model:'test:block/assembled/single'}, 'part=end':{model:'test:block/assembled/end'}
+  }}))],
+  ['assets/test/models/block/assembled/single.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'}, elements:assemblyShell.concat([assemblyElement([2,2,0],[14,14,16])])
+  }))],
+  ['assets/test/models/block/assembled/end.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'}, elements:assemblyShell.concat([assemblyElement([2,2,0],[14,12,16])])
+  }))],
+  ['assets/test/models/item/assembled.json', encoder.encode('{"parent":"test:block/assembled/item"}')],
+  ['assets/test/models/block/assembled/item.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'}, elements:assemblyShell
+      .concat([assemblyElement([2,2,0],[14,14,16])], proxyRotor(normalRotor))
+  }))],
+  ['assets/test/models/block/assembled/rotor.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'}, elements:exactRotor(normalRotor)
+  }))],
+  ['assets/test/models/block/assembled/rotor_reversed.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'}, elements:exactRotor(reversedRotor)
+  }))],
+  ['assets/test/models/block/assembled/rotor_active.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'}, elements:exactRotor(activeRotor)
+  }))]
+]);
+const assembledState = sandbox.bakeState([{x:0,y:0,z:0,g:-1}], 0,
+  [{id:'test:assembled',state:'test:assembled[part=end]'}], {files:assembledFiles},
+  id => sandbox.bakeModel(assembledFiles, id), new Map(), new Map(), {}, 0, 0, 0, 0, 10_000);
+const assembledMaxX = Math.max(...[...assembledState.batches.values()].flatMap(batch => batch.positions));
+assert.ok(assembledMaxX > .5,
+  '可证明为物品模型补充几何的越界部件必须叠加到当前 blockstate 外壳，而不是静默丢失');
+assert.equal(sandbox.assemblyFaces(assembledFiles, 'test:assembled',
+  'test:block/assembled/end', 'test:assembled[part=end]')?.length, 20,
+  '默认状态也必须采用 sibling 的精确面，不能继续复用物品代理里多出来的内部面');
+const reversedAssembly = sandbox.bakeState([{x:0,y:0,z:0,g:-1}], 0,
+  [{id:'test:assembled',state:'test:assembled[part=end,reversed=true]'}], {files:assembledFiles},
+  id => sandbox.bakeModel(assembledFiles, id), new Map(), new Map(), {}, 0, 0, 0, 0, 10_000);
+const reversedMinX = Math.min(...[...reversedAssembly.batches.values()].flatMap(batch => batch.positions));
+assert.ok(reversedMinX < -.5,
+  '同拓扑 sibling 模型名与布尔状态属性一致时，必须选择反向静态部件而非普通 item 代理');
+assert.equal(sandbox.assemblyFaces(assembledFiles, 'test:assembled', 'test:block/assembled/end',
+  'test:assembled[active=true,part=end,reversed=true]'), null,
+  '多个状态属性同时命中不同静态部件时必须拒绝歧义，不能按属性名顺序猜一个');
+const uncertainFiles = new Map([
+  ['assets/test/blockstates/uncertain.json', encoder.encode('{"variants":{"":{"model":"test:block/uncertain/block"}}}')],
+  ['assets/test/models/block/uncertain/block.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'},elements:[assemblyElement([0,0,0],[16,16,16])]}))],
+  ['assets/test/models/item/uncertain.json', encoder.encode('{"parent":"test:block/uncertain/item"}')],
+  ['assets/test/models/block/uncertain/item.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'},elements:normalRotor}))]
+]);
+assert.equal(sandbox.assemblyFaces(uncertainFiles, 'test:uncertain', 'test:block/uncertain/block',
+  'test:uncertain'), null, '物品模型无法高置信包含 blockstate 外壳时不得猜测补充几何');
+const unrelatedTextureBase = [
+  {...assemblyElement([0,0,0],[2,3,4]),faces:{up:{texture:'#base'}}},
+  {...assemblyElement([3,0,0],[6,5,7]),faces:{up:{texture:'#base'}}},
+  {...assemblyElement([0,6,1],[4,9,8]),faces:{up:{texture:'#base'}}},
+  {...assemblyElement([8,2,3],[15,6,10]),faces:{up:{texture:'#base'}}}
+];
+const unrelatedTextureFiles = new Map([
+  ['assets/test/blockstates/unrelated_texture.json', encoder.encode(
+    '{"variants":{"":{"model":"test:block/unrelated_texture/block"}}}')],
+  ['assets/test/models/block/unrelated_texture/block.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/block_base'},elements:unrelatedTextureBase
+  }))],
+  ['assets/test/models/item/unrelated_texture.json', encoder.encode(
+    '{"parent":"test:block/unrelated_texture/item"}')],
+  ['assets/test/models/block/unrelated_texture/item.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/item_base',detail:'test:block/detail'},
+    elements:unrelatedTextureBase.map(element => ({...element,faces:{up:{texture:'#base'}}}))
+      .concat([{...assemblyElement([6,6,-4],[10,10,20]),faces:{east:{texture:'#detail'}}}])
+  }))]
+]);
+assert.equal(sandbox.assemblyFaces(unrelatedTextureFiles, 'test:unrelated_texture',
+  'test:block/unrelated_texture/block', 'test:unrelated_texture'), null,
+  '外壳只有几何相同但材质/面语义完全不相干时不得把物品独有元素叠到方块上');
+const vanillaAssemblyFiles = new Map([
+  ['assets/minecraft/blockstates/preview_machine.json', encoder.encode(JSON.stringify({variants:{
+    '':{model:'minecraft:block/preview_machine/base'}
+  }}))],
+  ['assets/minecraft/models/block/preview_machine/base.json', encoder.encode(JSON.stringify({
+    textures:{all:'minecraft:block/stone'},elements:assemblyShell.slice(0,4)
+  }))],
+  ['assets/minecraft/models/item/preview_machine.json', encoder.encode(
+    '{"parent":"minecraft:block/preview_machine/item"}')],
+  ['assets/minecraft/models/block/preview_machine/item.json', encoder.encode(JSON.stringify({
+    textures:{all:'minecraft:block/stone'},elements:assemblyShell.slice(0,4)
+      .concat([assemblyElement([6,6,-4],[10,10,20])])
+  }))]
+]);
+assert.ok(sandbox.assemblyFaces(vanillaAssemblyFiles, 'minecraft:preview_machine',
+  'minecraft:block/preview_machine/base', 'minecraft:preview_machine')?.length,
+  '通用静态组装推导不能按 minecraft namespace 整体跳过');
+const duplicateBase = {...assemblyElement([0,0,0],[4,4,4]),faces:{up:{texture:'#base'}}};
+const duplicateOptional = {...assemblyElement([0,0,0],[4,4,4]),faces:{up:{texture:'#optional'}}};
+const duplicateMatch = sandbox.matchAssemblyElements([duplicateBase, duplicateOptional], [duplicateBase],
+  identityAssemblyRotation);
+assert.deepEqual([...duplicateMatch.sourceIndices], [0],
+  '重复几何必须按面语义匹配，不能任意把基础元素留成补充层');
+assert.equal(sandbox.matchAssemblyElements([duplicateBase, duplicateOptional], [
+  {...assemblyElement([0,0,0],[4,4,4]),faces:{up:{texture:'#third'}}}
+], identityAssemblyRotation), null,
+'重复几何的面语义互相冲突且目标无唯一匹配时必须拒绝');
+const adversarialSource = Array.from({length:64}, () => assemblyElement([0,0,0],[1,1,1]));
+const adversarialTarget = Array.from({length:256}, () => assemblyElement([0,0,0],[1,1,1]));
+const alignmentStarted = Date.now();
+assert.equal(sandbox.bestTranslatedAssemblyAlignment(adversarialSource, adversarialTarget, 1), null,
+  '候选平移工作量超过固定上限时必须保守拒绝');
+assert.ok(Date.now() - alignmentStarted < 2000, '恶意重复元素不能把一次组装匹配拖到秒级以上');
+const componentFiles = new Map([
+  ['assets/test/blockstates/component_machine.json', encoder.encode(
+    '{"variants":{"":{"model":"test:block/component_machine/block"}}}')],
+  ['assets/test/models/block/component_machine/block.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/base'},elements:[assemblyElement([0,0,0],[16,4,16])]}))],
+  ['assets/test/models/item/component_machine.json', encoder.encode(
+    '{"parent":"test:block/component_machine/item"}')],
+  ['assets/test/models/block/component_machine/item.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/base',part:'test:block/part'},elements:[
+      {...assemblyElement([0,0,0],[16,5,16]),faces:{up:{texture:'#base'}}},
+      {...assemblyElement([0,5,0],[2,16,16]),faces:{up:{texture:'#base'}}},
+      {...assemblyElement([14,5,0],[16,16,16]),faces:{up:{texture:'#base'}}},
+      {...assemblyElement([2,14,0],[14,16,16]),faces:{up:{texture:'#base'}}},
+      {...assemblyElement([4,4,4],[11,20,12]),faces:{up:{texture:'#part'}}}
+    ]}))],
+  ['assets/test/models/block/component_machine/arm.json', encoder.encode(JSON.stringify({
+    textures:{part:'test:block/part'},elements:[{...assemblyElement([4,4,4],[11,20,12]),faces:{up:{texture:'#part'}}}]
+  }))]
+]);
+const componentReference = sandbox.inferAssemblyReference(componentFiles, 'test:component_machine');
+assert.deepEqual([...componentReference.components].map(value => value.modelId),
+  ['test:block/component_machine/arm'], '外壳几何不相同时仍可由物品模型内的精确 sibling 子模型补全');
+componentFiles.set('assets/test/models/block/component_machine/complete.json', encoder.encode(JSON.stringify({
+  textures:{base:'test:block/base',part:'test:block/part'},elements:[
+    {...assemblyElement([0,0,0],[1,1,1]),faces:{up:{texture:'#base'}}},
+    {...assemblyElement([4,4,4],[11,20,12]),faces:{up:{texture:'#part'}}}
+  ]
+})));
+assert.equal(sandbox.assemblyFaces(componentFiles, 'test:component_machine',
+  'test:block/component_machine/complete', 'test:component_machine')?.length, 0,
+  '当前静态模型已经包含可证明部件时必须视为已处理，不能重复叠加同一组件');
+const rolePartHorizontal = {...assemblyElement([16,4,4],[24,12,12]),faces:{up:{texture:'#part'}}};
+const rolePartVertical = {...assemblyElement([4,16,4],[12,24,12]),faces:{up:{texture:'#part'}}};
+const roleFiles = new Map([
+  ['assets/test/blockstates/role_machine.json', encoder.encode(
+    '{"variants":{"":{"model":"test:block/role_machine/horizontal"}}}')],
+  ['assets/test/models/block/role_machine/horizontal.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/base'},elements:[
+      {...assemblyElement([0,0,0],[16,3,16]),faces:{up:{texture:'#base'}}}
+    ]
+  }))],
+  ['assets/test/models/block/role_machine/vertical.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/base'},elements:[
+      {...assemblyElement([0,0,0],[3,16,7]),faces:{up:{texture:'#base'}}}
+    ]
+  }))],
+  ['assets/test/models/item/role_machine.json', encoder.encode(
+    '{"parent":"test:block/role_machine/item"}')],
+  ['assets/test/models/block/role_machine/item.json', encoder.encode(JSON.stringify({
+    textures:{part:'test:block/part'},elements:[rolePartHorizontal,
+      {...assemblyElement([2,2,2],[5,7,9]),faces:{up:{texture:'#part'}}}]
+  }))],
+  ['assets/test/models/block/role_machine/shaft_horizontal.json', encoder.encode(JSON.stringify({
+    textures:{part:'test:block/part'},elements:[rolePartHorizontal]
+  }))],
+  ['assets/test/models/block/role_machine/shaft_vertical.json', encoder.encode(JSON.stringify({
+    textures:{part:'test:block/part'},elements:[rolePartVertical]
+  }))]
+]);
+const roleFaces = sandbox.assemblyFaces(roleFiles, 'test:role_machine',
+  'test:block/role_machine/vertical', 'test:role_machine');
+assert.ok(roleFaces?.length && Math.max(...roleFaces.flatMap(face =>
+  face.corners.flatMap(corner => corner.position[1]))) > .5,
+  '模型角色由 horizontal 切换为 vertical 时必须选择拓扑兼容的同名静态部件');
+const conflictTarget = {...assemblyElement([2,3,4],[9,14,12]),faces:{
+  up:{texture:'#a'},down:{texture:'#b'}
+}};
+const conflictFiles = new Map([
+  ['assets/test/models/item/conflict.json', encoder.encode('{"parent":"test:block/conflict/item"}')],
+  ['assets/test/models/block/conflict/item.json', encoder.encode(JSON.stringify({
+    textures:{a:'test:block/a',b:'test:block/b'},elements:[conflictTarget]
+  }))],
+  ['assets/test/models/block/conflict/arm_a.json', encoder.encode(JSON.stringify({
+    textures:{a:'test:block/a'},elements:[
+      {...assemblyElement([2,3,4],[9,14,12]),faces:{up:{texture:'#a'}}}
+    ]
+  }))],
+  ['assets/test/models/block/conflict/arm_b.json', encoder.encode(JSON.stringify({
+    textures:{b:'test:block/b'},elements:[
+      {...assemblyElement([2,3,4],[9,14,12]),faces:{up:{texture:'#b'}}}
+    ]
+  }))]
+]);
+const conflictItemJson = sandbox.modelJson(conflictFiles, 'test:item/conflict');
+const conflictItem = sandbox.mergeModel(conflictFiles, 'test:item/conflict', 0, new Set());
+assert.equal(sandbox.inferAssemblyComponents({files:conflictFiles, itemJson:conflictItemJson,
+  item:conflictItem, targetElements:conflictItem.elements, excluded:new Set(), minimum:1,
+  allowFull:true}).length, 0,
+'同一目标几何的 sibling 候选输出不同材质时必须拒绝，不能按文件名选一个');
+const compatibleBase = {transform:null,textures:{part:'test:block/part'},elements:[
+  {...assemblyElement([0,0,0],[2,10,3]),faces:{up:{texture:'#part'}}}
+]};
+const incompatibleVariant = {transform:null,textures:{part:'test:block/part'},elements:[
+  {...assemblyElement([0,0,0],[6,6,6]),faces:{up:{texture:'#part'}}}
+]};
+assert.equal(sandbox.compatibleAssemblyVariant(compatibleBase, incompatibleVariant), false,
+  '状态后缀变体必须保留每个部件的形状拓扑，不能只比较元素/面/纹理数量');
+const uvFace = sandbox.facesFromModel({textures:{all:'test:block/a'},elements:[
+  {from:[0,0,0],to:[16,16,16],faces:{up:{texture:'#all',rotation:0}}}
+]})[0];
+const rotatedUvFace = sandbox.facesFromModel({textures:{all:'test:block/a'},elements:[
+  {from:[0,0,0],to:[16,16,16],faces:{up:{texture:'#all',rotation:180}}}
+]})[0];
+assert.notEqual(sandbox.assemblyFaceSignature(uvFace), sandbox.assemblyFaceSignature(rotatedUvFace),
+  '组装歧义签名必须包含角点 UV，不能把方向纹理的 0°/180° 当成同一结果');
+const novelFiles = new Map([
+  ['assets/test/blockstates/novel_machine.json', encoder.encode(
+    '{"variants":{"":{"model":"test:block/novel_machine/block"}}}')],
+  ['assets/test/models/block/novel_machine/block.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/base'},elements:[
+      {...assemblyElement([0,0,0],[16,8,16]),faces:{up:{texture:'#base'}}}]}))],
+  ['assets/test/models/item/novel_machine.json', encoder.encode('{"parent":"test:block/novel_machine/item"}')],
+  ['assets/test/models/block/novel_machine/item.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/base',detail:'test:block/detail'},elements:[
+      {...assemblyElement([0,0,0],[16,9,16]),faces:{up:{texture:'#base'}}},
+      {...assemblyElement([0,9,0],[2,16,16]),faces:{up:{texture:'#base'}}},
+      {...assemblyElement([14,9,0],[16,16,16]),faces:{up:{texture:'#base'}}},
+      {...assemblyElement([2,14,0],[14,16,16]),faces:{up:{texture:'#base'}}},
+      {...assemblyElement([6,8,6],[10,20,10]),faces:{up:{texture:'#detail'}}}
+    ]}))]
+]);
+const novelReference = sandbox.inferAssemblyReference(novelFiles, 'test:novel_machine');
+assert.ok(novelReference && !novelReference.components.length && novelReference.extras.length === 1,
+  '单一 blockstate 模型可用物品模型中的新增纹理元素补全，但不得替换原外壳');
+const relaxedBase = [
+  assemblyElement([0,0,0],[2,16,16]), assemblyElement([2,0,0],[14,2,16]),
+  assemblyElement([15,0,0],[16,16,16])
+];
+const relaxedFiles = new Map([
+  ['assets/test/blockstates/relaxed_machine.json', encoder.encode(JSON.stringify({variants:{
+    'mode=a':{model:'test:block/relaxed_machine/a'}, 'mode=b':{model:'test:block/relaxed_machine/b'}
+  }}))],
+  ['assets/test/models/block/relaxed_machine/a.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/base'},elements:relaxedBase.concat([assemblyElement([2,2,0],[14,14,8])])}))],
+  ['assets/test/models/block/relaxed_machine/b.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/base'},elements:relaxedBase.concat([assemblyElement([2,2,8],[14,14,16])])}))],
+  ['assets/test/models/item/relaxed_machine.json', encoder.encode('{"parent":"test:block/relaxed_machine/item"}')],
+  ['assets/test/models/block/relaxed_machine/item.json', encoder.encode(JSON.stringify({
+    textures:{base:'test:block/base',part:'test:block/part'},elements:relaxedBase
+      .concat([assemblyElement([3,3,0],[13,13,8]),
+        {...assemblyElement([6,6,-4],[10,10,20]),faces:{up:{texture:'#part'}}}])}))],
+  ['assets/test/models/block/relaxed_machine/shaft.json', encoder.encode(JSON.stringify({
+    textures:{part:'test:block/part'},elements:[
+      {...assemblyElement([6,6,-4],[10,10,20]),faces:{up:{texture:'#part'}}}]
+  }))]
+]);
+assert.ok(sandbox.assemblyFaces(relaxedFiles, 'test:relaxed_machine', 'test:block/relaxed_machine/b',
+  'test:relaxed_machine[mode=b]')?.length,
+  '精确 sibling 部件允许用较低但仍有界的外壳对齐覆盖多个 blockstate 模型');
+const assemblyLimited = sandbox.bakeState([{x:0,y:0,z:0,g:-1}], 0,
+  [{id:'test:assembled',state:'test:assembled[part=end]'}], {files:assembledFiles},
+  id => sandbox.bakeModel(assembledFiles, id), new Map(), new Map(), {}, 0, 0, 0, 0, 28);
+assert.ok(assemblyLimited && assemblyLimited.partial,
+  '补充几何超出三角预算时必须只舍弃补充层并保留静态外壳');
+assert.ok([...assemblyLimited.batches.values()].every(batch => !batch.assembly));
+const assemblyGroupLimited = sandbox.bakeState([{x:0,y:0,z:0,g:-1},{x:1,y:0,z:0,g:-1}], 0,
+  [{id:'test:assembled',state:'test:assembled[part=end]'}], {files:assembledFiles},
+  id => sandbox.bakeModel(assembledFiles, id), new Map(), new Map(), {}, 0, 0, 0, 0, 56);
+assert.ok(assemblyGroupLimited && assemblyGroupLimited.partial
+  && [...assemblyGroupLimited.batches.values()].every(batch => !batch.assembly),
+  '同状态多实例中途超预算时必须撤掉先前实例的补充层，不能让可选层挤掉后续静态外壳');
+assert.ok([...assemblyGroupLimited.batches.values()].every(batch => batch.instances.length === 6));
+const baseBatch = {indices:[0,1,2],instances:[0,0,0],assembly:false};
+const optionalBatch = {indices:[0,1,2],instances:[0,0,0],assembly:true};
+const baseOnly = sandbox.withoutAssembly({batches:new Map([['base',baseBatch],['assembly',optionalBatch]]),
+  triangles:2,partial:false});
+assert.deepEqual([...baseOnly.batches.keys()], ['base'],
+  'draw call/工作内存不足时必须可整层去掉可选组装几何');
+assert.equal(baseOnly.triangles, 1);
+assert.equal(baseOnly.partial, true);
+const waterloggedGrid = new Map([['0,0,0', {type:'water',height:8/9}]]);
+const waterloggedPalette = [{id:'test:assembled',
+  state:'test:assembled[part=end,waterlogged=true]'}];
+const waterloggedFull = sandbox.bakeState([{x:0,y:0,z:0,g:-1}], 0, waterloggedPalette,
+  {files:assembledFiles}, id => sandbox.bakeModel(assembledFiles, id), new Map(), waterloggedGrid,
+  {}, 0, 0, 0, 0, 10_000);
+const waterloggedBase = sandbox.withoutAssembly(waterloggedFull);
+const waterloggedLimited = sandbox.bakeState([{x:0,y:0,z:0,g:-1}], 0, waterloggedPalette,
+  {files:assembledFiles}, id => sandbox.bakeModel(assembledFiles, id), new Map(), waterloggedGrid,
+  {}, 0, 0, 0, 0, waterloggedBase.triangles);
+assert.ok(waterloggedLimited && !waterloggedLimited.failure && waterloggedLimited.partial
+  && [...waterloggedLimited.batches.values()].every(batch => !batch.assembly),
+'流体加入后超出预算时必须回滚可选组装层，保留静态模型与流体');
+
+const stoneTexture = 'assets/minecraft/textures/block/stone.png';
+const fakeBatch = (key, stateIndex, value, assembly) => ({
+  key,texture:stoneTexture,renderType:'solid',emissive:false,shade:true,
+  positions:[0,0,0,1,0,0,0,1,0],normals:[0,0,1,0,0,1,0,0,1],
+  uvs:[0,0,1,0,0,1],colors:[1,1,1,1,1,1,1,1,1],indices:[0,1,2],
+  instances:[value.x,value.y,value.z],faceKeys:new Set(),stateIndex,group:-1,assembly
+});
+const fakeResult = (values, stateIndex, includeAssembly) => {
+  const batches = new Map(), base = fakeBatch('base-' + stateIndex, stateIndex, values[0], false);
+  batches.set(base.key, base);
+  if (includeAssembly) {
+    const optional = fakeBatch('assembly-' + stateIndex, stateIndex, values[0], true);
+    batches.set(optional.key, optional);
+  }
+  return {batches,triangles:[...batches.values()].reduce((sum,batch) =>
+    sum + sandbox.batchTriangleCost(batch),0),texturePaths:new Set([stoneTexture]),
+  count:values.length,partial:false,fullCube:false};
+};
+const realBakeState = sandbox.bakeState;
+const budgetRecords = new Uint16Array([0,0,0,0,1,0,0,1]);
+const budgetPalette = [
+  {id:'minecraft:stone',state:'minecraft:stone'},
+  {id:'minecraft:stone',state:'minecraft:stone'}
+];
+try {
+  sandbox.__fakeBakeState = (...args) => {
+    const values = args[0], stateIndex = args[1], currentTriangles = args[11];
+    if (stateIndex === 0) return fakeResult(values, stateIndex, true);
+    return currentTriangles > 1 ? {failure:'budget'} : fakeResult(values, stateIndex, false);
+  };
+  vm.runInContext('bakeState = __fakeBakeState', sandbox);
+  const trianglePriority = await sandbox.bake({manifestUrl:'/api/preview/resources/' + 'c'.repeat(64) + '/manifest',
+    token:'',server:'',resourceFingerprint:manifest.fingerprint,recordBytes:8,records:budgetRecords.slice().buffer,
+    palette:budgetPalette,metadata:{states:budgetPalette,width:2,height:1,depth:1,biome_colors:{}},
+    budget:{triangles:2,drawCalls:8,gpuBytes:256*1024*1024,mainMemoryBytes:512*1024*1024,atlasSize:2048}});
+  assert.deepEqual([...trianglePriority.upgraded].sort(), [0,1]);
+  assert.ok(trianglePriority.batches.every(batch => !batch.assembly),
+    '后续基础状态触及三角预算时必须回收此前可选组装层');
+
+  sandbox.__fakeBakeState = (values, stateIndex) => fakeResult(values, stateIndex, stateIndex === 0);
+  vm.runInContext('bakeState = __fakeBakeState', sandbox);
+  const drawPriority = await sandbox.bake({manifestUrl:'/api/preview/resources/' + 'c'.repeat(64) + '/manifest',
+    token:'',server:'',resourceFingerprint:manifest.fingerprint,recordBytes:8,records:budgetRecords.slice().buffer,
+    palette:budgetPalette,metadata:{states:budgetPalette,width:2,height:1,depth:1,biome_colors:{}},
+    budget:{triangles:100,drawCalls:2,gpuBytes:256*1024*1024,mainMemoryBytes:512*1024*1024,atlasSize:2048}});
+  assert.deepEqual([...drawPriority.upgraded].sort(), [0,1]);
+  assert.ok(drawPriority.batches.every(batch => !batch.assembly),
+    '后续基础状态触及 draw-call 预算时必须回收此前可选组装层');
+} finally {
+  sandbox.__realBakeState = realBakeState;
+  vm.runInContext('bakeState = __realBakeState', sandbox);
+  delete sandbox.__fakeBakeState; delete sandbox.__realBakeState;
+}
+
+const incompleteAssemblyFiles = new Map([...assembledFiles].filter(([path]) =>
+  !path.includes('/models/item/') && !path.endsWith('/assembled/item.json') && !path.includes('/rotor')));
+const cacheA = sandbox.sharedFor('/cache-a', '', manifest.fingerprint, 2);
+cacheA.loaded = {files:incompleteAssemblyFiles,byteLength:0,manifest};
+assert.equal(sandbox.assemblyFaces(incompleteAssemblyFiles, 'test:assembled',
+  'test:block/assembled/end', 'test:assembled[part=end]'), null);
+const cacheB = sandbox.sharedFor('/cache-b', '', manifest.fingerprint, 2);
+cacheB.loaded = {files:assembledFiles,byteLength:0,manifest};
+assert.ok(sandbox.assemblyFaces(assembledFiles, 'test:assembled',
+  'test:block/assembled/end', 'test:assembled[part=end]')?.length,
+'换到包含完整 sibling 的闭包后不能继续命中上一闭包缓存的 null 组装结果');
 assert.equal(sandbox.modelTint({id:'minecraft:oak_leaves',state:'minecraft:oak_leaves'}, 0,
   {grass:0x112233,foliage:0x445566,water:0x778899}), 0x445566);
 assert.equal(sandbox.modelTint({id:'test:custom_leaves',state:'test:custom_leaves'}, 0,
@@ -270,8 +694,8 @@ const top = slopedFluid.faces.find(face => face.normal[1] > .5);
 assert.ok(top && new Set(top.corners.map(corner => corner.position[1].toFixed(4))).size > 1,
   '流体顶面必须按相邻高度生成非水平四角');
 /* 角点顺序就是交给 GPU 的三角绕序。THREE 的材质默认 side:FrontSide,
-   绕序与法线反向的面会被整片背面剔除 —— 真机上表现为方块能看穿、栅栏柱只剩两个面。
-   实测抓到过:west/east 两面和四个液体侧面都是反的。 */
+   法线必须跟实际绕序一致。Minecraft FaceBakery 也会从烘焙后的角点重算 Direction；
+   因而 from > to 的元素不是坏数据，而是可用于生成内向面的合法模型语义。 */
 function windingNormal(face) {
   const [a, b, c] = face.corners.map(corner => corner.position);
   const ab = [b[0]-a[0], b[1]-a[1], b[2]-a[2]], ac = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
@@ -284,6 +708,18 @@ function assertFacesFront(faces, label) {
     assert.ok(dot > 0, label + ' 的面绕序与法线 ' + JSON.stringify(face.normal) + ' 反向,会被背面剔除');
   }
 }
+const reversedExtentFaces = sandbox.facesFromModel({textures:{all:'minecraft:block/stone'},
+  elements:[{from:[0,0,10],to:[16,16,6],
+    faces:{east:{texture:'#all'},west:{texture:'#all'},up:{texture:'#all'},down:{texture:'#all'}}}]});
+assert.equal(reversedExtentFaces.length, 4);
+const declaredNormals = {east:[1,0,0],west:[-1,0,0],up:[0,1,0],down:[0,-1,0]};
+for (const face of reversedExtentFaces) {
+  const declared = declaredNormals[face.direction];
+  assert.ok(declared, 'direction 必须保留 JSON 声明面；FaceBakery 在重算法线前先用它处理 uvlock');
+  assert.ok(face.normal.reduce((sum, value, axis) => sum + value * declared[axis], 0) < 0,
+    '反向坐标元素必须像 Minecraft FaceBakery 一样保留内向面，不能强制翻回声明方向');
+}
+assertFacesFront(reversedExtentFaces, '反向坐标元素');
 /* 每个面的 u/v 轴方向必须与同文件 defaultFaceUv 声明的原版约定一致。
    基准锚点是真机实测出来的:把 torch 渲染出来逐像素量,火焰(纹理 y=5..8,即 PNG 顶部)
    出现在屏幕下半部 —— 即 uv.y=0 取到的是 PNG 底行,所以 PNG 顶行对应 uv.y=1。

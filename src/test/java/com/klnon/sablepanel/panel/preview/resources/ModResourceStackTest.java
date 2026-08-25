@@ -15,6 +15,7 @@ import java.util.zip.ZipOutputStream;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -151,6 +152,167 @@ class ModResourceStackTest {
                     "目录层的纹理必须进闭包");
             assertTrue(bundle.missing().isEmpty(),
                     "目录层的模型必须覆盖掉原版层那份,否则闭包会去找不存在的 vanilla_loses");
+        }
+    }
+
+    @Test
+    void itemAssemblyClosureIncludesSiblingStaticVariants() throws Exception {
+        Path archive = archive(Map.of(
+                "assets/test/blockstates/propeller.json",
+                "{\"variants\":{\"\":{\"model\":\"test:block/propeller/block\"}}}",
+                "assets/test/models/item/propeller.json",
+                "{\"parent\":\"test:block/propeller/item\"}",
+                "assets/test/models/block/propeller/item.json",
+                "{\"textures\":{\"all\":\"test:block/propeller\"},\"elements\":[]}",
+                "assets/test/models/block/propeller/block.json",
+                "{\"textures\":{\"all\":\"test:block/propeller\"},\"elements\":[]}",
+                "assets/test/models/block/propeller/rotor.json",
+                "{\"textures\":{\"all\":\"test:block/propeller\"},\"elements\":[]}",
+                "assets/test/models/block/propeller/rotor_reversed.json",
+                "{\"textures\":{\"all\":\"test:block/propeller\"},\"elements\":[]}",
+                "assets/test/models/block/propeller/nested/hidden.json", "{\"elements\":[]}",
+                "assets/test/textures/block/propeller.png", "texture"));
+
+        try (ModResourceStack stack = new ModResourceStack(archive, List.of())) {
+            ModResourceStack.Bundle bundle = stack.closure(Set.of(
+                    "assets/test/blockstates/propeller.json"));
+            Set<String> paths = bundle.entries().stream().map(ModResourceStack.Entry::path)
+                    .collect(java.util.stream.Collectors.toSet());
+
+            assertTrue(paths.contains("assets/test/models/block/propeller/rotor.json"),
+                    "完整物品模型所在目录的静态部件必须进入资源闭包");
+            assertTrue(paths.contains("assets/test/models/block/propeller/rotor_reversed.json"),
+                    "同拓扑状态变体必须与物品模型一起可供保守推导");
+            assertFalse(paths.contains("assets/test/models/block/propeller/nested/hidden.json"),
+                    "只允许同目录静态候选，不能递归吞入任意模型树");
+        }
+    }
+
+    @Test
+    void itemAssemblySiblingScanHasADeterministicCountLimit() throws Exception {
+        Map<String, String> entries = new java.util.LinkedHashMap<>();
+        entries.put("assets/test/blockstates/machine.json",
+                "{\"variants\":{\"\":{\"model\":\"test:block/machine/part39\"}}}");
+        entries.put("assets/test/models/item/machine.json",
+                "{\"parent\":\"test:block/machine/item\"}");
+        entries.put("assets/test/models/block/machine/item.json", "{\"elements\":[]}");
+        for (int index = 0; index < 40; index++) {
+            entries.put("assets/test/models/block/machine/part%02d.json".formatted(index),
+                    "{\"elements\":[]}");
+        }
+
+        try (ModResourceStack stack = new ModResourceStack(archive(entries), List.of())) {
+            Set<String> paths = stack.closure(Set.of("assets/test/blockstates/machine.json"))
+                    .entries().stream().map(ModResourceStack.Entry::path)
+                    .collect(java.util.stream.Collectors.toSet());
+
+            assertTrue(paths.contains("assets/test/models/block/machine/part31.json"));
+            assertFalse(paths.contains("assets/test/models/block/machine/part32.json"),
+                    "静态组装 sibling 扫描必须有固定上限");
+            assertTrue(paths.contains("assets/test/models/block/machine/part39.json"),
+                    "blockstate 正式引用不能被可选 sibling 上限截掉");
+        }
+    }
+
+    @Test
+    void itemAssemblySiblingScanHasADirectByteLimit() throws Exception {
+        String largeModel = "{\"elements\":[]}" + " ".repeat(1_100_000);
+        Map<String, String> entries = new java.util.LinkedHashMap<>();
+        entries.put("assets/test/blockstates/large_machine.json",
+                "{\"variants\":{\"\":{\"model\":\"test:block/large_machine/base\"}}}");
+        entries.put("assets/test/models/item/large_machine.json",
+                "{\"parent\":\"test:block/large_machine/item\"}");
+        entries.put("assets/test/models/block/large_machine/item.json", "{\"elements\":[]}");
+        entries.put("assets/test/models/block/large_machine/a.json", largeModel);
+        entries.put("assets/test/models/block/large_machine/b.json", largeModel);
+        entries.put("assets/test/models/block/large_machine/base.json", "{\"elements\":[]}");
+
+        try (ModResourceStack stack = new ModResourceStack(archive(entries), List.of())) {
+            Set<String> paths = stack.closure(Set.of("assets/test/blockstates/large_machine.json"))
+                    .entries().stream().map(ModResourceStack.Entry::path)
+                    .collect(java.util.stream.Collectors.toSet());
+
+            assertTrue(paths.contains("assets/test/models/block/large_machine/a.json"));
+            assertFalse(paths.contains("assets/test/models/block/large_machine/b.json"),
+                    "可选 sibling 的 JSON 总量必须受独立字节预算约束");
+            assertTrue(paths.contains("assets/test/models/block/large_machine/base.json"),
+                    "正式 blockstate 引用不受可选 sibling 字节预算影响");
+        }
+    }
+
+    @Test
+    void oversizedAssemblySiblingDoesNotHideLaterSmallCandidates() throws Exception {
+        String oversized = "{\"elements\":[]}" + " ".repeat(2_100_000);
+        Map<String, String> entries = new java.util.LinkedHashMap<>();
+        entries.put("assets/test/blockstates/machine.json",
+                "{\"variants\":{\"\":{\"model\":\"test:block/machine/base\"}}}");
+        entries.put("assets/test/models/item/machine.json",
+                "{\"parent\":\"test:block/machine/item\"}");
+        entries.put("assets/test/models/block/machine/item.json", "{\"elements\":[]}");
+        entries.put("assets/test/models/block/machine/a_oversized.json", oversized);
+        entries.put("assets/test/models/block/machine/b_small.json", "{\"elements\":[]}");
+        entries.put("assets/test/models/block/machine/base.json", "{\"elements\":[]}");
+
+        try (ModResourceStack stack = new ModResourceStack(archive(entries), List.of())) {
+            Set<String> paths = stack.closure(Set.of("assets/test/blockstates/machine.json"))
+                    .entries().stream().map(ModResourceStack.Entry::path)
+                    .collect(java.util.stream.Collectors.toSet());
+
+            assertFalse(paths.contains("assets/test/models/block/machine/a_oversized.json"));
+            assertTrue(paths.contains("assets/test/models/block/machine/b_small.json"),
+                    "单个过大的可选 sibling 只能跳过自身，不能截断后续合法候选");
+        }
+    }
+
+    @Test
+    void optionalAssemblyResourcesCannotCrowdRequiredClosure() throws Exception {
+        String blockstate = "{\"variants\":{\"\":{\"model\":\"test:block/machine\"}}}";
+        String model = "{\"textures\":{\"all\":\"test:block/machine\"},\"elements\":[]}";
+        Map<String, byte[]> entries = new java.util.LinkedHashMap<>();
+        entries.put("assets/test/blockstates/machine.json", blockstate.getBytes(StandardCharsets.UTF_8));
+        entries.put("assets/test/models/block/machine.json", model.getBytes(StandardCharsets.UTF_8));
+        entries.put("assets/test/textures/block/machine.png", PNG);
+        entries.put("assets/test/models/item/machine.json",
+                ("{\"parent\":\"test:block/machine/item\"}" + " ".repeat(256)).getBytes(StandardCharsets.UTF_8));
+        entries.put("assets/test/models/block/machine/item.json", "{\"elements\":[]}".getBytes(StandardCharsets.UTF_8));
+        Path archive = archiveBytes(entries);
+        long requiredBytes = blockstate.getBytes(StandardCharsets.UTF_8).length
+                + model.getBytes(StandardCharsets.UTF_8).length + PNG.length;
+
+        try (ModResourceStack stack = new ModResourceStack(
+                List.of(new ModResourceStack.Layer("test", archive)), requiredBytes)) {
+            Set<String> paths = stack.closure(Set.of("assets/test/blockstates/machine.json"))
+                    .entries().stream().map(ModResourceStack.Entry::path)
+                    .collect(java.util.stream.Collectors.toSet());
+
+            assertTrue(paths.contains("assets/test/blockstates/machine.json"));
+            assertTrue(paths.contains("assets/test/models/block/machine.json"));
+            assertTrue(paths.contains("assets/test/textures/block/machine.png"));
+            assertFalse(paths.contains("assets/test/models/item/machine.json"),
+                    "总预算不足时必须先舍弃可选组装资源，不能丢正式引用闭包");
+        }
+    }
+
+    @Test
+    void mountedDirectoryFingerprintChangesWhenSameSizeContentChangesWithSameTimestamp() throws Exception {
+        Path assets = Files.createTempDirectory("preview-fingerprint").resolve("assets");
+        Path model = assets.resolve("test/models/block/value.json");
+        long timestamp = 1_700_000_000_000L;
+        Files.createDirectories(model.getParent());
+        Files.writeString(model, "{\"value\":1}");
+        Files.setLastModifiedTime(model, java.nio.file.attribute.FileTime.fromMillis(timestamp));
+        String first;
+        try (ModResourceStack stack = new ModResourceStack(
+                List.of(new ModResourceStack.Layer("mounted", assets)))) {
+            first = stack.fingerprint();
+        }
+
+        Files.writeString(model, "{\"value\":2}");
+        Files.setLastModifiedTime(model, java.nio.file.attribute.FileTime.fromMillis(timestamp));
+        try (ModResourceStack stack = new ModResourceStack(
+                List.of(new ModResourceStack.Layer("mounted", assets)))) {
+            assertNotEquals(first, stack.fingerprint(),
+                    "目录层同路径、同大小、同时间戳的内容更新后不能继续复用旧资源闭包");
         }
     }
 
