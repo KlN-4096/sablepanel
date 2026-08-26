@@ -505,9 +505,7 @@ function faceGeometry(element, faceName, face, textureSize) {
        (既有校准不受影响);子矩形此前会被转到贴图另一块区域,甚至越出图集页采到邻居
        ——螺旋桨(几乎每面都是子矩形+rotation)的黑块/杂色即由此而来。 */
     for (let turn = ((Number(face.rotation) || 0) % 360 + 360) % 360; turn > 0; turn -= 90) [fu, fv] = [fv, 1 - fu];
-    let x = from[0] + (to[0] - from[0]) * (point[0] / 16);
-    let y = from[1] + (to[1] - from[1]) * (point[1] / 16);
-    let z = from[2] + (to[2] - from[2]) * (point[0] / 16);
+    let x, y, z;
     if (faceName === 'up' || faceName === 'down') { x = from[0] + (to[0] - from[0]) * (point[0] / 16); z = from[2] + (to[2] - from[2]) * (point[1] / 16); y = faceName === 'up' ? to[1] : from[1]; }
     else if (faceName === 'north' || faceName === 'south') { x = from[0] + (to[0] - from[0]) * (point[0] / 16); y = from[1] + (to[1] - from[1]) * (point[1] / 16); z = faceName === 'south' ? to[2] : from[2]; }
     else { x = faceName === 'east' ? to[0] : from[0]; y = from[1] + (to[1] - from[1]) * (point[1] / 16); z = from[2] + (to[2] - from[2]) * (point[0] / 16); }
@@ -949,33 +947,6 @@ function selectedAssemblyComponent(files, component, state) {
   return signatures.size === 1 ? choices[0] : null;
 }
 
-function modelRole(modelId) {
-  const slash = String(modelId || '').lastIndexOf('/');
-  return slash >= 0 ? modelId.slice(slash + 1) : String(modelId || '').split(':').pop();
-}
-
-function roleAssemblyFaces(files, reference, modelId, selected) {
-  const components = reference.components || [], claimed = new Set();
-  for (const component of components) component.alignment.targetIndices.forEach(index => claimed.add(index));
-  if (!components.length || selected.some(value => !value) || claimed.size !== reference.extras.length) return null;
-  const from = modelRole(reference.modelId), to = modelRole(modelId);
-  if (!from || !to || from === to || !/^[a-z0-9_.-]+$/.test(from + to)) return null;
-  const pattern = new RegExp('(^|[_/])' + from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([_/]|$)');
-  const faces = [];
-  for (let index = 0; index < components.length; index++) {
-    const source = selected[index];
-    const candidateId = source.modelId.replace(pattern, '$1' + to + '$2');
-    if (candidateId === source.modelId) return null;
-    const json = modelJson(files, candidateId), model = json && !loaderId(json.loader)
-      ? mergeModel(files, candidateId, 0, new Set()) : null;
-    if (!compatibleAssemblyVariant(source.model, model)) return null;
-    const value = facesFromElements(model, model.elements);
-    if (!value) return null;
-    faces.push(...value);
-  }
-  return faces.length ? faces : null;
-}
-
 function containsAssemblyFaces(current, expected) {
   const counts = new Map();
   for (const face of current || []) {
@@ -1153,7 +1124,6 @@ function assemblyFaces(files, id, modelId, state) {
       reference.model.elements, model && model.elements || [], alignment);
     if (model && modelContainsAssemblyFaces(model, referenceFaces)) result = [];
     else if (alignment) result = unambiguousRotatedFaces(referenceFaces, alignment, {allowUvPhase:true});
-    else result = roleAssemblyFaces(files, reference, modelId, selected);
   }
   if (cache) cacheAssembly(key, result);
   return result;

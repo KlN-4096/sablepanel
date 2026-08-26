@@ -490,39 +490,6 @@ componentFiles.set('assets/test/models/block/component_machine/complete.json', e
 assert.equal(sandbox.assemblyFaces(componentFiles, 'test:component_machine',
   'test:block/component_machine/complete', 'test:component_machine')?.length, 0,
   '当前静态模型已经包含可证明部件时必须视为已处理，不能重复叠加同一组件');
-const rolePartHorizontal = {...assemblyElement([16,4,4],[24,12,12]),faces:{up:{texture:'#part'}}};
-const rolePartVertical = {...assemblyElement([4,16,4],[12,24,12]),faces:{up:{texture:'#part'}}};
-const roleFiles = new Map([
-  ['assets/test/blockstates/role_machine.json', encoder.encode(
-    '{"variants":{"":{"model":"test:block/role_machine/horizontal"}}}')],
-  ['assets/test/models/block/role_machine/horizontal.json', encoder.encode(JSON.stringify({
-    textures:{base:'test:block/base'},elements:[
-      {...assemblyElement([0,0,0],[16,3,16]),faces:{up:{texture:'#base'}}}
-    ]
-  }))],
-  ['assets/test/models/block/role_machine/vertical.json', encoder.encode(JSON.stringify({
-    textures:{base:'test:block/base'},elements:[
-      {...assemblyElement([0,0,0],[3,16,7]),faces:{up:{texture:'#base'}}}
-    ]
-  }))],
-  ['assets/test/models/item/role_machine.json', encoder.encode(
-    '{"parent":"test:block/role_machine/item"}')],
-  ['assets/test/models/block/role_machine/item.json', encoder.encode(JSON.stringify({
-    textures:{part:'test:block/part'},elements:[rolePartHorizontal,
-      {...assemblyElement([2,2,2],[5,7,9]),faces:{up:{texture:'#part'}}}]
-  }))],
-  ['assets/test/models/block/role_machine/shaft_horizontal.json', encoder.encode(JSON.stringify({
-    textures:{part:'test:block/part'},elements:[rolePartHorizontal]
-  }))],
-  ['assets/test/models/block/role_machine/shaft_vertical.json', encoder.encode(JSON.stringify({
-    textures:{part:'test:block/part'},elements:[rolePartVertical]
-  }))]
-]);
-const roleFaces = sandbox.assemblyFaces(roleFiles, 'test:role_machine',
-  'test:block/role_machine/vertical', 'test:role_machine');
-assert.ok(roleFaces?.length && Math.max(...roleFaces.flatMap(face =>
-  face.corners.flatMap(corner => corner.position[1]))) > .5,
-  '模型角色由 horizontal 切换为 vertical 时必须选择拓扑兼容的同名静态部件');
 const conflictTarget = {...assemblyElement([2,3,4],[9,14,12]),faces:{
   up:{texture:'#a'},down:{texture:'#b'}
 }};
