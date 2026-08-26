@@ -105,8 +105,13 @@ function sortVal(g, k){
   }
 }
 function groupForced(g){ return g.bodies.some(b => FORCED.has(b.uuid)) ? 1 : 0; }
+/* 运行时新载入、还没落盘的组(后端 fresh 标志):没名字没方块数,默认排序必沉底,
+   再撞上渲染上限就整张不可见——用户刚造的结构"消失"的主因,故与常驻同权置顶。 */
+function groupFresh(g){ return g.bodies.some(b => b.fresh) ? 1 : 0; }
 function cmpGroups(a, b){
-  // 常驻加载的组恒置顶,不受用户排序配置影响
+  // 新载入的组与常驻加载的组恒置顶,不受用户排序配置影响
+  const na = groupFresh(a), nb = groupFresh(b);
+  if (na !== nb) return nb - na;
   const fa = groupForced(a), fb = groupForced(b);
   if (fa !== fb) return fb - fa;
   for (const s of sortCfg) {
@@ -154,9 +159,11 @@ function renderBodiesMeta(){
   const dims = new Set();
   DATA.groups.forEach(g => g.bodies.forEach(b => dims.add(b.dim)));
   const prevChecked = new Set([...document.querySelectorAll('.fDim:checked')].map(x=>x.value));
-  const hadAny = document.querySelectorAll('.fDim').length > 0;
+  // 此前从未出现过的维度默认勾选:该维度第一次有物理体时不能被静默过滤掉
+  const prevDims = new Set([...document.querySelectorAll('.fDim')].map(x=>x.value));
+  const hadAny = prevDims.size > 0;
   document.getElementById('fDims').innerHTML = [...dims].map(d =>
-    `<label class="fchip"><input type="checkbox" class="fDim" value="${esc(d)}" ${(!hadAny || prevChecked.has(d))?'checked':''} onchange="render()"><span>${esc(d.replace('minecraft:',''))}</span></label>`).join('');
+    `<label class="fchip"><input type="checkbox" class="fDim" value="${esc(d)}" ${(!hadAny || prevChecked.has(d) || !prevDims.has(d))?'checked':''} onchange="render()"><span>${esc(d.replace('minecraft:',''))}</span></label>`).join('');
   document.getElementById('scanMeta').innerHTML =
     `${fmt(DATA.total_bodies)} ${T.bodies} · ${fmt(DATA.total_entries)} ${T.entries}<br>${T.scanAt} ${fmtTime(DATA.scan_time)}`;
   refreshBlockList();
@@ -524,7 +531,7 @@ function buildCard(g, vis){
       <span class="thSize pix">${esc(size)}</span>
     </div>
     <div class="bmeta">
-      <div class="bname">${esc(g.name) || '<span class="muted">'+T.unnamed+'</span>'}</div>
+      <div class="bname">${esc(g.name) || '<span class="muted">'+(groupFresh(g) ? T.freshGroup : T.unnamed)+'</span>'}</div>
       <div class="bsub"><b>${fmt(g.blocks)}</b> ${T.blocksUnit} · ${esc(g.dims.replace(/minecraft:/g,''))}${g.members>1?` · ${g.members} ${T.bodies}`:''}</div>
       <div class="btags">${groupTags(g).join('')}</div>
     </div>`;
