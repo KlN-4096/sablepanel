@@ -881,4 +881,18 @@ assert.ok(sizedFaces && sizedFaces.length === 1, 'texture_size 模型必须正�
 assert.ok(sizedFaces[0].corners.every(corner => corner.uv[0] >= .25 - 1e-6 && corner.uv[0] <= .5 + 1e-6),
   'texture_size=32 时 uv[8..16] 应归一到 0.25..0.5,而非 /16 得到 0.5..1.0');
 
+/* loader 挂在 parent 上(辉光管:顶层模型只有 parent,composite 在 nixie_tube/block.json)。 */
+const parentLoaderFiles = new Map([
+  ['assets/ns/models/block/tube.json', encoder.encode(JSON.stringify({parent:'ns:block/tube/block'}))],
+  ['assets/ns/models/block/tube/block.json', encoder.encode(JSON.stringify({
+    loader:'neoforge:composite', textures:{0:'ns:block/tube'},
+    children:{body:{elements:[{from:[5,0,5], to:[11,12,11],
+      faces:{up:{texture:'#0'}, north:{texture:'#0'}}}]}}
+  }))]
+]);
+const tubed = sandbox.bakeModel(parentLoaderFiles, 'ns:block/tube');
+assert.ok(tubed && tubed.length === 2, 'composite loader 挂在 parent 上也必须烘出子元素');
+assert.equal(tubed[0].texturePath, 'assets/ns/textures/block/tube.png',
+  '父级 composite 的纹理表必须传导到子元素');
+
 console.log('model worker checks passed');

@@ -660,12 +660,28 @@ function transformFaces(faces, transform) {
   return result;
 }
 
+/* loader(obj/composite)可能挂在 parent 链上(如 create:block/nixie_tube 只有 parent 字段,
+   composite 在 nixie_tube/block.json):沿链下钻到第一个带 loader 或自带 elements 的层。
+   途中各层的纹理覆写按"子层优先"合并,注入 dispatch json。 */
+function resolveLoaderModel(files, modelId) {
+  let json = modelJson(files, modelId), dispatchId = modelId, overlay = null, depth = 0;
+  while (json && !loaderId(json.loader) && !Array.isArray(json.elements)
+      && typeof json.parent === 'string' && depth++ < MAX_MODEL_DEPTH) {
+    overlay = Object.assign({}, json.textures || {}, overlay || {});
+    dispatchId = json.parent; json = modelJson(files, dispatchId);
+  }
+  return {json, dispatchId, overlay};
+}
+
 function bakeModel(files, modelId) {
-  const json = modelJson(files, modelId);
+  const {json, dispatchId, overlay} = resolveLoaderModel(files, modelId);
   const loader = loaderId(json && json.loader);
-  if (loader.includes('obj')) return bakeObj(files, json, {modelId});
-  if (loader === 'neoforge:composite') return bakeComposite(files, json, {modelId});
-  if (loader && !(json.loader && typeof json.loader === 'object' && json.loader.optional)) return null;
+  if (loader) {
+    const dispatch = overlay ? {...json, textures:Object.assign({}, json.textures || {}, overlay)} : json;
+    if (loader.includes('obj')) return bakeObj(files, dispatch, {modelId:dispatchId});
+    if (loader === 'neoforge:composite') return bakeComposite(files, dispatch, {modelId:dispatchId});
+    if (!(json.loader && typeof json.loader === 'object' && json.loader.optional)) return null;
+  }
   const model = mergeModel(files, modelId, 0, new Set());
   if (!model) return null;
   return facesFromModel(model);
@@ -1384,10 +1400,10 @@ function loaderId(loader) {
 function modelFailureReason(files, choices, hasFluid) {
   if ((!choices || !choices.length) && !hasFluid) return 'blockstate_missing';
   for (const choice of choices || []) {
-    const json = modelJson(files, choice.model);
-    if (!json) return 'model_missing';
-    const loader = loaderId(json.loader);
-    if (!loader) continue;
+    if (!modelJson(files, choice.model)) return 'model_missing';
+    const {json} = resolveLoaderModel(files, choice.model);
+    const loader = loaderId(json && json.loader);
+    if (!json || !loader) continue;
     if (loader.includes('obj')) return 'obj_invalid_or_limit';
     if (loader === 'neoforge:composite') return 'composite_invalid_or_limit';
     if (loader && !(json.loader && typeof json.loader === 'object' && json.loader.optional)) return 'unknown_loader';
