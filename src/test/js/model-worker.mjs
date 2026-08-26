@@ -349,6 +349,37 @@ assert.ok(reversedMinX < -.5,
 assert.equal(sandbox.assemblyFaces(assembledFiles, 'test:assembled', 'test:block/assembled/end',
   'test:assembled[active=true,part=end,reversed=true]'), null,
   '多个状态属性同时命中不同静态部件时必须拒绝歧义，不能按属性名顺序猜一个');
+/* 拆除全覆盖前置闸的回归:blockstate 里存在一个对不上的小变体(alien)时,
+   参考推导不得被一票否决——对得上的变体照常组装,小变体自己返回 null 只渲染壳。
+   tiny 走"小于最小匹配数→全元素精确匹配"的放宽分支。 */
+const gateFiles = new Map([
+  ['assets/test/blockstates/gate.json', encoder.encode(JSON.stringify({variants:{
+    'part=full':{model:'test:block/gate/full'}, 'part=tiny':{model:'test:block/gate/tiny'},
+    'part=alien':{model:'test:block/gate/alien'}
+  }}))],
+  ['assets/test/models/block/gate/full.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'}, elements:assemblyShell
+  }))],
+  ['assets/test/models/block/gate/tiny.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'}, elements:[assemblyShell[0], assemblyShell[4]]
+  }))],
+  ['assets/test/models/block/gate/alien.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'}, elements:[assemblyElement([5,5,5],[9,9,9])]
+  }))],
+  ['assets/test/models/item/gate.json', encoder.encode('{"parent":"test:block/gate/item"}')],
+  ['assets/test/models/block/gate/item.json', encoder.encode(JSON.stringify({
+    textures:{all:'test:block/assembled'}, elements:assemblyShell.concat(proxyRotor(normalRotor))
+  }))]
+]);
+assert.ok(sandbox.inferAssemblyReference(gateFiles, 'test:gate'),
+  '存在对不上的小变体时参考推导不得被整体否决');
+assert.equal(sandbox.assemblyFaces(gateFiles, 'test:gate', 'test:block/gate/full',
+  'test:gate[part=full]')?.length, 24, '对得上的变体必须拿到物品模型补充的内部件');
+assert.equal(sandbox.assemblyFaces(gateFiles, 'test:gate', 'test:block/gate/tiny',
+  'test:gate[part=tiny]')?.length, 24, '小于最小匹配数的变体按全元素精确匹配放行');
+assert.equal(sandbox.assemblyFaces(gateFiles, 'test:gate', 'test:block/gate/alien',
+  'test:gate[part=alien]'), null, '对不上的变体自己返回 null,不组装也不报错');
+
 const uncertainFiles = new Map([
   ['assets/test/blockstates/uncertain.json', encoder.encode('{"variants":{"":{"model":"test:block/uncertain/block"}}}')],
   ['assets/test/models/block/uncertain/block.json', encoder.encode(JSON.stringify({

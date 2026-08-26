@@ -1044,20 +1044,6 @@ function inferNovelTextureReference(files, item, modelIds) {
     itemRotation:IDENTITY_CUBE_ROTATION, faces, components:[]} : null;
 }
 
-function assemblyReferenceCoversModels(files, reference, modelIds) {
-  for (const modelId of modelIds) {
-    if (modelId === reference.modelId) continue;
-    const json = modelJson(files, modelId), model = json && !loaderId(json.loader)
-      ? mergeModel(files, modelId, 0, new Set()) : null;
-    let alignment = model && model.transform == null
-      ? bestAssemblyAlignment(reference.model.elements, model.elements) : null;
-    alignment = preferVisualAssemblyAlignment(reference.model, model,
-      reference.model.elements, model && model.elements || [], alignment);
-    if (!alignment || !unambiguousRotatedFaces(reference.faces, alignment, {allowUvPhase:true})) return false;
-  }
-  return true;
-}
-
 function inferAssemblyReference(files, id) {
   const itemId = blockItemModelId(id), itemJson = modelJson(files, itemId);
   if (!itemJson || loaderId(itemJson.loader)) return null;
@@ -1092,9 +1078,11 @@ function inferAssemblyReference(files, id) {
   if (!extras.length || extras.length > MAX_ASSEMBLY_ELEMENTS - MIN_ASSEMBLY_MATCHES) return null;
   const components = inferAssemblyComponents({files, itemJson, item, targetElements:extras,
     excluded:new Set(modelIds), minimum:MIN_ASSEMBLY_MATCHES, allowFull:true});
-  const reference = faces && faces.length ? {modelId:best.modelId, model:best.model, item, extras,
+  /* 不做"参考面必须映射到全部变体模型"的前置全覆盖检查:它会让一个对不上的小变体
+     (如链式传动箱 middle 只有 3 元素)连坐掉所有本可修补的状态。assemblyFaces 里
+     本来就逐模型对齐并做歧义守卫,对不上的状态自然只渲染壳。 */
+  return faces && faces.length ? {modelId:best.modelId, model:best.model, item, extras,
     itemRotation:alignment.rotation, faces, components} : null;
-  return reference && assemblyReferenceCoversModels(files, reference, modelIds) ? reference : null;
 }
 
 function referenceAssemblyFaces(files, reference, selected) {
@@ -1129,9 +1117,14 @@ function assemblyFaces(files, id, modelId, state) {
   else {
     const json = modelJson(files, modelId), model = json && !loaderId(json.loader)
       ? mergeModel(files, modelId, 0, new Set()) : null;
+    /* 变体模型比最小匹配数还小(传动箱 middle=3 元素)时按"全元素精确匹配"放行,
+       否则 target.length < minimum 直接判 null,小变体永远得不到内部件。 */
+    const modelMinimum = reference.alignmentMinimum || MIN_ASSEMBLY_MATCHES;
+    const relaxed = model && Array.isArray(model.elements) && model.elements.length < modelMinimum;
     let alignment = model && model.transform == null
       ? bestAssemblyAlignment(reference.model.elements, model.elements,
-        reference.alignmentMinimum || MIN_ASSEMBLY_MATCHES, reference.alignmentRatio || MIN_ASSEMBLY_RATIO) : null;
+        relaxed ? model.elements.length : modelMinimum,
+        relaxed ? 1 : (reference.alignmentRatio || MIN_ASSEMBLY_RATIO)) : null;
     alignment = preferVisualAssemblyAlignment(reference.model, model,
       reference.model.elements, model && model.elements || [], alignment);
     if (model && modelContainsAssemblyFaces(model, referenceFaces)) result = [];
