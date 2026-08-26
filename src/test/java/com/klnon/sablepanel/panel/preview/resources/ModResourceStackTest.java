@@ -171,6 +171,7 @@ class ModResourceStackTest {
                 "assets/test/models/block/propeller/rotor_reversed.json",
                 "{\"textures\":{\"all\":\"test:block/propeller\"},\"elements\":[]}",
                 "assets/test/models/block/propeller/nested/hidden.json", "{\"elements\":[]}",
+                "assets/test/models/block/propeller/nested/deep/buried.json", "{\"elements\":[]}",
                 "assets/test/textures/block/propeller.png", "texture"));
 
         try (ModResourceStack stack = new ModResourceStack(archive, List.of())) {
@@ -183,8 +184,10 @@ class ModResourceStackTest {
                     "完整物品模型所在目录的静态部件必须进入资源闭包");
             assertTrue(paths.contains("assets/test/models/block/propeller/rotor_reversed.json"),
                     "同拓扑状态变体必须与物品模型一起可供保守推导");
-            assertFalse(paths.contains("assets/test/models/block/propeller/nested/hidden.json"),
-                    "只允许同目录静态候选，不能递归吞入任意模型树");
+            assertTrue(paths.contains("assets/test/models/block/propeller/nested/hidden.json"),
+                    "一层子目录的部件模型(管道 connection/rim 形态)必须进入闭包");
+            assertFalse(paths.contains("assets/test/models/block/propeller/nested/deep/buried.json"),
+                    "只放宽一层子目录，不能递归吞入任意模型树");
         }
     }
 
@@ -192,11 +195,11 @@ class ModResourceStackTest {
     void itemAssemblySiblingScanHasADeterministicCountLimit() throws Exception {
         Map<String, String> entries = new java.util.LinkedHashMap<>();
         entries.put("assets/test/blockstates/machine.json",
-                "{\"variants\":{\"\":{\"model\":\"test:block/machine/part39\"}}}");
+                "{\"variants\":{\"\":{\"model\":\"test:block/machine/part69\"}}}");
         entries.put("assets/test/models/item/machine.json",
                 "{\"parent\":\"test:block/machine/item\"}");
         entries.put("assets/test/models/block/machine/item.json", "{\"elements\":[]}");
-        for (int index = 0; index < 40; index++) {
+        for (int index = 0; index < 70; index++) {
             entries.put("assets/test/models/block/machine/part%02d.json".formatted(index),
                     "{\"elements\":[]}");
         }
@@ -206,10 +209,10 @@ class ModResourceStackTest {
                     .entries().stream().map(ModResourceStack.Entry::path)
                     .collect(java.util.stream.Collectors.toSet());
 
-            assertTrue(paths.contains("assets/test/models/block/machine/part31.json"));
-            assertFalse(paths.contains("assets/test/models/block/machine/part32.json"),
+            assertTrue(paths.contains("assets/test/models/block/machine/part63.json"));
+            assertFalse(paths.contains("assets/test/models/block/machine/part64.json"),
                     "静态组装 sibling 扫描必须有固定上限");
-            assertTrue(paths.contains("assets/test/models/block/machine/part39.json"),
+            assertTrue(paths.contains("assets/test/models/block/machine/part69.json"),
                     "blockstate 正式引用不能被可选 sibling 上限截掉");
         }
     }

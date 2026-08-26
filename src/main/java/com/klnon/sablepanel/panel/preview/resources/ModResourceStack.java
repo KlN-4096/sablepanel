@@ -50,7 +50,7 @@ public final class ModResourceStack implements AutoCloseable {
     private static final int MAX_OBJ_FACES = 50_000;
     private static final int MAX_OBJ_MATERIALS = 128;
     private static final int MAX_OBJ_LINE = 64 * 1024;
-    private static final int MAX_ASSEMBLY_SIBLINGS = 32;
+    private static final int MAX_ASSEMBLY_SIBLINGS = 64;
     private static final long MAX_ASSEMBLY_SIBLING_BYTES = 2L * 1024 * 1024;
 
     public record Layer(String id, Path archive) {
@@ -443,17 +443,29 @@ public final class ModResourceStack implements AutoCloseable {
         }
         if (!pending.path().endsWith("/item.json") || !pending.path().contains("/models/block/")) return;
         String directory = pending.path().substring(0, pending.path().lastIndexOf('/') + 1);
+        // 兄弟含一层子目录:管道的 connection/rim 部件模型放在子目录里、无任何 JSON 引用,
+        // 前端定制拼装表要用它们。排序保证同层先于子目录、结果确定。
+        List<String> directories = new ArrayList<>();
+        for (String key : this.modelDirectories.keySet()) {
+            if (key.equals(directory) || (key.startsWith(directory)
+                    && key.indexOf('/', directory.length()) == key.length() - 1)) {
+                directories.add(key);
+            }
+        }
+        directories.sort(String::compareTo);
         long bytes = 0;
         int count = 0;
-        for (String sibling : this.modelDirectories.getOrDefault(directory, List.of())) {
-            if (count >= MAX_ASSEMBLY_SIBLINGS) break;
-            if (sibling.equals(pending.path())) continue;
-            ResourceRef ref = this.resources.get(sibling);
-            long size = ref == null ? 0 : Math.max(0, ref.size());
-            if (bytes + size > MAX_ASSEMBLY_SIBLING_BYTES) continue;
-            queue.add(new Pending(sibling, 0, 0, 0, true));
-            bytes += size;
-            count++;
+        for (String value : directories) {
+            for (String sibling : this.modelDirectories.getOrDefault(value, List.of())) {
+                if (count >= MAX_ASSEMBLY_SIBLINGS) return;
+                if (sibling.equals(pending.path())) continue;
+                ResourceRef ref = this.resources.get(sibling);
+                long size = ref == null ? 0 : Math.max(0, ref.size());
+                if (bytes + size > MAX_ASSEMBLY_SIBLING_BYTES) continue;
+                queue.add(new Pending(sibling, 0, 0, 0, true));
+                bytes += size;
+                count++;
+            }
         }
     }
 
