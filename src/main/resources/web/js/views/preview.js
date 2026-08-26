@@ -30,6 +30,7 @@ function initGL() {
     onHover: (index, pointer, reason) => showPreviewHover(index, pointer, reason),
     onPointerMove: pointer => moveHoverTip(pointer)
   }).init();
+  if (previewRuntime && previewRuntime.renderer) previewRuntime.renderer.domElement.title = T.pvControlsTip;
   updateRotateUi();
   const speed = document.getElementById('rotSpeed');
   if (speed) speed.value = Math.round(parseFloat(localStorage.getItem('spRotSpeed') || '0.18') / 1.5 * 100);

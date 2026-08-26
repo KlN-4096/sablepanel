@@ -20,7 +20,7 @@
       this.simplifiedReasons = new Map();
       this.pickGeometries = new Map();
       this.center = [0, 0, 0]; this.distance = 50;
-      this.dragging = false; this.pointer = {x:0, y:0, cx:0, cy:0};
+      this.dragging = false; this.panning = false; this.pointer = {x:0, y:0, cx:0, cy:0};
       this.rotX = .5; this.rotY = .7; this.autoRotate = localStorage.getItem('spRot') !== '0';
       this.rotSpeed = parseFloat(localStorage.getItem('spRotSpeed') || '.18');
       this.needPick = false; this.lastPick = 0; this.fullscreen = false;
@@ -406,12 +406,30 @@
     }
 
     bindEvents(canvas) {
-      canvas.addEventListener('mousedown', event => { this.dragging = true; this.pointer.px = event.clientX; this.pointer.py = event.clientY; });
-      global.addEventListener('mouseup', () => { this.dragging = false; });
+      canvas.addEventListener('mousedown', event => {
+        if (event.button === 1) event.preventDefault();   // 中键默认行为是自动滚屏
+        this.dragging = true; this.panning = event.button === 1 || event.shiftKey;
+        this.pointer.px = event.clientX; this.pointer.py = event.clientY;
+      });
+      global.addEventListener('mouseup', () => { this.dragging = false; this.panning = false; });
       global.addEventListener('mousemove', event => {
         if (this.dragging) {
-          this.rotY += (event.clientX - this.pointer.px) * .008; this.rotX += (event.clientY - this.pointer.py) * .008;
-          this.rotX = Math.max(-1.5, Math.min(1.5, this.rotX)); this.pointer.px = event.clientX; this.pointer.py = event.clientY; this.hideHover();
+          const dx = event.clientX - this.pointer.px, dy = event.clientY - this.pointer.py;
+          if (this.panning) {
+            /* Shift/中键拖拽 = 平移观察中心(高结构只旋转+缩放看不到顶):沿相机平面挪,
+               步长随距离缩放。center 只存实例,buildFallback 每次装载重置,不进 localStorage
+               ——持久化会让缩略图实例继承详情页的平移,所有卡片集体跑偏(autoRotate 前车之鉴)。 */
+            const scale = this.distance * .0015;
+            const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 0);
+            const up = new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 1);
+            this.center[0] += (up.x * dy - right.x * dx) * scale;
+            this.center[1] += (up.y * dy - right.y * dx) * scale;
+            this.center[2] += (up.z * dy - right.z * dx) * scale;
+          } else {
+            this.rotY += dx * .008; this.rotX += dy * .008;
+            this.rotX = Math.max(-1.5, Math.min(1.5, this.rotX));
+          }
+          this.pointer.px = event.clientX; this.pointer.py = event.clientY; this.hideHover();
         } else if (event.target === this.renderer.domElement) {
           const rect = this.renderer.domElement.getBoundingClientRect();
           this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1; this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
