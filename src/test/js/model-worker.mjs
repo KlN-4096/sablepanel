@@ -828,4 +828,31 @@ assertFacesFront(slopedFluid.faces, '液面');
 assert.equal(new Set(slopedFluid.faces.filter(face => Math.abs(face.normal[1]) < .5)
   .map(face => face.normal.join(','))).size, 4, '该样例四个侧向都应可见,绕序检查才覆盖得全');
 
+/* 定制拼装表:管道按方向布尔接管臂(multipart、blockstate 无旋转),部件缺失只标 partial。 */
+const pipeElement = (from, to) => ({from, to, faces:{up:{texture:'#0'}, down:{texture:'#0'}}});
+const pipeFiles = new Map([
+  ['assets/create/blockstates/fluid_pipe.json', encoder.encode(JSON.stringify({multipart:[
+    {when:{east:'true', west:'true'}, apply:{model:'create:block/fluid_pipe/lr_x'}}
+  ]}))],
+  ['assets/create/models/block/fluid_pipe/lr_x.json', encoder.encode(JSON.stringify({
+    textures:{0:'create:block/pipes'}, elements:[pipeElement([4,4,4],[12,12,12])]
+  }))],
+  ['assets/create/models/block/fluid_pipe/connection/east.json', encoder.encode(JSON.stringify({
+    textures:{0:'create:block/pipes'}, elements:[pipeElement([12,4,4],[16,12,12])]
+  }))]
+  // 故意不给 connection/west.json:缺部件必须只跳过自己并标 partial
+]);
+const pipeState = sandbox.bakeState([{x:0,y:0,z:0,g:-1}], 0,
+  [{id:'create:fluid_pipe', state:'create:fluid_pipe[east=true,west=true,up=false]'}], {files:pipeFiles},
+  id => sandbox.bakeModel(pipeFiles, id), new Map(), new Map(), {}, 0, 0, 0, 0, 10_000);
+const pipeAssembly = [...pipeState.batches.values()].filter(batch => batch.assembly);
+assert.equal(pipeAssembly.length, 1, '管道拼装:east=true 必须接出东向管臂,west 部件缺失只跳过');
+assert.ok(Math.max(...pipeAssembly[0].positions) > .49, '管臂几何应伸到东侧块缘(核心止于 .25)');
+assert.ok(pipeState.partial, '缺 west 部件必须把状态标为 partial');
+const pipeIdle = sandbox.bakeState([{x:0,y:0,z:0,g:-1}], 0,
+  [{id:'create:fluid_pipe', state:'create:fluid_pipe[east=true,west=true,up=true]'}], {files:pipeFiles},
+  id => sandbox.bakeModel(pipeFiles, id), new Map(), new Map(), {}, 0, 0, 0, 0, 10_000);
+assert.equal([...pipeIdle.batches.values()].filter(batch => batch.assembly).length, 1,
+  'false 方向不得接臂(up=true 但 connection/up 不存在,东臂仍在)');
+
 console.log('model worker checks passed');

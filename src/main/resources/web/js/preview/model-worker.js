@@ -1135,6 +1135,28 @@ function assemblyFaces(files, id, modelId, state) {
   return result;
 }
 
+/*
+ * 定制拼装表:部件在资产里、装配在模组代码里的惯犯名单。
+ * 这些方块的内部件既不在 blockstate 模型里,也偷不到(物品模型为空或 blockstate 是 multipart),
+ * 但部件模型文件真实存在 —— 按属性把它们直接摆上去,等价于模组运行时干的事:
+ * 管道按六个方向布尔接管臂(connection/<dir> 以世界朝向建模,不吃 blockstate 旋转,
+ * 而这些 multipart 条目本来就不带 x/y);传动轮/水车的轮子随 blockstate 的 x/y 转。
+ * 部件缺失或烘焙失败时静默跳过、标 partial(半成品守则)。
+ */
+const PIPE_DIRECTIONS = ['down', 'up', 'north', 'south', 'east', 'west'];
+const CURATED_ASSEMBLY = {
+  'create:fluid_pipe': properties => PIPE_DIRECTIONS.filter(direction => properties[direction] === 'true')
+    .map(direction => 'create:block/fluid_pipe/connection/' + direction),
+  'create:chain_conveyor': () => ['create:block/chain_conveyor/wheel',
+    'create:block/chain_conveyor/shaft', 'create:block/chain_conveyor/guard'],
+  'create:water_wheel': () => ['create:block/water_wheel/wheel']
+};
+
+function curatedAssemblyModelIds(id, state) {
+  const recipe = CURATED_ASSEMBLY[id];
+  return recipe ? recipe(parseProperties(state || '')) : null;
+}
+
 function cacheAssembly(key, value) {
   if (assets.assemblies.has(key)) assets.assemblies.delete(key);
   assets.assemblies.set(key, value);
@@ -1834,6 +1856,18 @@ function bakeState(values, stateIndex, palette, loaded, cachedModel, fluidCache,
         if (assembled.partial) partial = true;
         appendModelFaces({local, faces:assembled, kind:'assembly', modelKey:state.id,
           choice, value, state, stateIndex, biome, texturePaths});
+      }
+    }
+    if (voxelReady && !assemblyBudgetExceeded) {
+      const curated = curatedAssemblyModelIds(state.id, state.state || state.id);
+      if (curated) {
+        const choice = choices[0] || {};
+        for (const curatedId of curated) {
+          const faces = cachedModel(curatedId);
+          if (!faces || faces.length > MAX_MODEL_FACES) { partial = true; continue; }
+          appendModelFaces({local, faces, kind:'assembly', modelKey:'curated|' + curatedId,
+            choice, value, state, stateIndex, biome, texturePaths});
+        }
       }
     }
     if (fluid && fluid.length) {
