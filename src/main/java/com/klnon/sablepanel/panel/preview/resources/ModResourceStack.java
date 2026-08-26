@@ -52,6 +52,20 @@ public final class ModResourceStack implements AutoCloseable {
     private static final int MAX_OBJ_LINE = 64 * 1024;
     private static final int MAX_ASSEMBLY_SIBLINGS = 64;
     private static final long MAX_ASSEMBLY_SIBLING_BYTES = 2L * 1024 * 1024;
+    /**
+     * 闭包遍历逻辑的修订指纹 = 本类字节码哈希:逻辑一变自动变,无需人工记得升版。
+     * 闭包内容依赖 (资源指纹, roots, 遍历逻辑) 三者;缓存校验此前只覆盖前两者,
+     * 旧实例建的闭包(如缺 connection/ 子目录兄弟)会在升级后永续服务。
+     */
+    public static final String BUILDER_REVISION = builderRevision();
+
+    private static String builderRevision() {
+        try (InputStream input = ModResourceStack.class.getResourceAsStream("ModResourceStack.class")) {
+            return Digests.sha256Hex(input.readAllBytes()).substring(0, 16);
+        } catch (Exception error) {
+            return "protocol-" + RESOURCE_PROTOCOL_VERSION;
+        }
+    }
 
     public record Layer(String id, Path archive) {
         public Layer {

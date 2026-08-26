@@ -52,6 +52,7 @@ public final class ResourceBundleCache {
             }
             JsonObject manifest = JsonParser.parseString(bundle.manifestJson()).getAsJsonObject();
             manifest.addProperty("id", id);
+            manifest.addProperty("builder", ModResourceStack.BUILDER_REVISION);
             byte[] manifestBytes = manifest.toString().getBytes(StandardCharsets.UTF_8);
             if (manifestBytes.length > MAX_MANIFEST_BYTES) throw new IOException("resource manifest exceeds limit");
             Files.write(temporary.resolve(MANIFEST), manifestBytes);
@@ -132,6 +133,9 @@ public final class ResourceBundleCache {
             JsonObject manifest = JsonParser.parseString(
                     new String(manifestBytes, StandardCharsets.UTF_8)).getAsJsonObject();
             if (!manifest.has("version") || manifest.get("version").getAsInt() != ModResourceStack.RESOURCE_PROTOCOL_VERSION) return null;
+            // 闭包内容依赖构建器逻辑:其它修订(或没有 builder 字段的历史缓存)一律作废重建
+            if (!manifest.has("builder")
+                    || !ModResourceStack.BUILDER_REVISION.equals(manifest.get("builder").getAsString())) return null;
             if (!id.equals(manifest.get("id").getAsString())) return null;
             String fingerprint = manifest.get("fingerprint").getAsString();
             validateHash(fingerprint);
