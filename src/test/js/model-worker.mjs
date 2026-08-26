@@ -138,6 +138,19 @@ const enclosed = await sandbox.bake({manifestUrl:'/api/preview/resources/' + 'b'
 assert.equal(enclosed.batches[0].instances.length, 6 * 3,
   '只有被六个已确认不透明完整立方体包围的实例可从场景中剔除');
 assert.equal(fetchCount, fetchesAfterFirstBake, '同一资源指纹的第二次 bake 不得重新下载分片');
+
+/* 多方块哑方块(CURATED_INVISIBLE):游戏里不渲染,预览既不画降级方块也不进简化清单。 */
+const invisibleRecords = new Uint16Array([0,0,0,0]);
+const invisibleBake = await sandbox.bake({manifestUrl:'/api/preview/resources/' + 'b'.repeat(64) + '/manifest',
+  token:'',server:'',resourceFingerprint:manifest.fingerprint,recordBytes:8,records:invisibleRecords.buffer,
+  palette:[{id:'create:water_wheel_structure',state:'create:water_wheel_structure[facing=up]'}],
+  metadata:{states:[{id:'create:water_wheel_structure',state:'create:water_wheel_structure[facing=up]'}],
+    width:1,height:1,depth:1,biome_colors:{}},
+  budget:{gpuBytes:256*1024*1024,mainMemoryBytes:512*1024*1024,atlasSize:2048}});
+assert.equal(invisibleBake.batches.length + invisibleBake.fallback.length, 0, '哑方块不得产生任何几何或降级方块');
+assert.equal(invisibleBake.simplified.length, 0, '哑方块不进简化清单');
+assert.deepEqual([...invisibleBake.upgraded], [0],
+  '哑方块必须算"升级成空"——runtime 只对 upgraded 名单撤半透明外壳占位盒,漏掉它外壳会永远留着');
 assert.equal(decodeCount, decodesAfterFirstBake, '同一资源指纹的第二次 bake 不得重新解码纹理');
 const lowBudgetUrl = '/api/preview/resources/' + 'd'.repeat(64) + '/manifest';
 const lowBudgetCache = sandbox.sharedFor(lowBudgetUrl, '', manifest.fingerprint, 2);

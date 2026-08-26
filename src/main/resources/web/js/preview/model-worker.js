@@ -1157,6 +1157,10 @@ function curatedAssemblyModelIds(id, state) {
   return recipe ? recipe(parseProperties(state || '')) : null;
 }
 
+/* 多方块结构的哑方块:游戏里不渲染(本体由控制器整体画,如大水车的 OBJ 轮),
+   模型无元素走降级会变成贴图完整方块、罩在本体上。这类直接不画、也不进简化清单。 */
+const CURATED_INVISIBLE = new Set(['create:water_wheel_structure']);
+
 function cacheAssembly(key, value) {
   if (assets.assemblies.has(key)) assets.assemblies.delete(key);
   assets.assemblies.set(key, value);
@@ -1980,6 +1984,7 @@ async function bake(request) {
   const records = request.recordBytes === 8 ? new Uint16Array(request.records) : new Uint32Array(request.records);
   const palette = request.palette || (request.metadata && request.metadata.states) || [];
   const batches = new Map(), upgraded = new Set(), fallback = new Map(), reasons = new Map();
+  const invisibleStates = [];
   const fluidCache = new Map();
   const cachedModel = id => {
     if (assets.models.has(id)) return assets.models.get(id);
@@ -2053,6 +2058,9 @@ async function bake(request) {
     }
     const state = palette[stateIndex];
     if (!state || !state.id) continue;
+    /* 隐形哑方块要算"升级成空":runtime 只对 upgraded 名单撤半透明外壳占位盒,
+       单纯跳过会让哑方块的外壳永远留着——大水车周围八格被"填充"的真凶。 */
+    if (CURATED_INVISIBLE.has(state.id)) { invisibleStates.push(stateIndex); continue; }
     const choices = blockstateModels(loaded.files, state.id, state.state || state.id,
       minecraftModelSeed(originX, originY, originZ));
     const hasFluid = !!fluidCell(state);
@@ -2206,7 +2214,8 @@ async function bake(request) {
   packed.batches = packed.batches.filter(batch => packedUpgraded.has(batch.stateIndex));
   upgradedVoxels = [...packedUpgraded].reduce((sum, stateIndex) =>
     sum + (groups.get(stateIndex) || []).length, 0);
-  const simplified = [...groups.entries()].filter(([stateIndex]) => !packedUpgraded.has(stateIndex))
+  const simplified = [...groups.entries()].filter(([stateIndex]) => !packedUpgraded.has(stateIndex)
+      && !CURATED_INVISIBLE.has((palette[stateIndex] || {}).id))
     .map(([stateIndex, values]) => ({stateIndex, instances:values.length,
       reason:reasons.get(stateIndex) || 'model_invalid'}));
   for (const stateIndex of partialStates) if (packedUpgraded.has(stateIndex)) {
@@ -2214,7 +2223,7 @@ async function bake(request) {
   }
   lap('atlas');
   return {batches:packed.batches, textures:packed.textures,
-    fallback:packed.fallback, upgraded:[...packedUpgraded],
+    fallback:packed.fallback, upgraded:[...packedUpgraded, ...invisibleStates],
     simplified, stats:{highStates:packedUpgraded.size, simplifiedStates:simplified.length,
       highInstances:upgradedVoxels, simplifiedInstances:simplified.reduce((sum, item) => sum + item.instances, 0),
       timings}};
