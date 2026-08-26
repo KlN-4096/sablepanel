@@ -881,6 +881,16 @@ assert.ok(sizedFaces && sizedFaces.length === 1, 'texture_size 模型必须正�
 assert.ok(sizedFaces[0].corners.every(corner => corner.uv[0] >= .25 - 1e-6 && corner.uv[0] <= .5 + 1e-6),
   'texture_size=32 时 uv[8..16] 应归一到 0.25..0.5,而非 /16 得到 0.5..1.0');
 
+/* face.rotation 必须在 uv 子矩形内旋转(BlockFaceUV.getShiftedIndex 语义),不是绕整张贴图转:
+   子矩形不居中时后者会采到贴图另一块区域。 */
+const rotatedModel = {textures:{0:'ns:block/t'}, elements:[{from:[0,0,0], to:[16,16,16],
+  faces:{up:{uv:[8, 8, 16, 16], rotation:180, texture:'#0'}}}]};
+const rotatedFaces = sandbox.facesFromElements(rotatedModel, rotatedModel.elements);
+assert.ok(rotatedFaces[0].corners.every(corner =>
+  corner.uv[0] >= .5 - 1e-6 && corner.uv[0] <= 1 + 1e-6
+  && corner.uv[1] >= 0 - 1e-6 && corner.uv[1] <= .5 + 1e-6),
+  'uv[8..16]+rotation:180 必须仍在该子矩形内采样(u∈[.5,1],翻转后 v∈[0,.5])');
+
 /* loader 挂在 parent 上(辉光管:顶层模型只有 parent,composite 在 nixie_tube/block.json)。 */
 const parentLoaderFiles = new Map([
   ['assets/ns/models/block/tube.json', encoder.encode(JSON.stringify({parent:'ns:block/tube/block'}))],

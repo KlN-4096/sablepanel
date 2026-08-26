@@ -498,8 +498,13 @@ function faceGeometry(element, faceName, face, textureSize) {
   const sizeV = Array.isArray(textureSize) && textureSize[1] > 0 ? textureSize[1] : 16;
   for (const point of axis[3]) {
     // 只影响纹理坐标;下面的位置插值一律直接用 point[...]，不走这两个变量
-    const u = axis[4] ? 1 - point[0] / 16 : point[0] / 16;
-    const v = axis[5] ? 1 - point[1] / 16 : point[1] / 16;
+    let fu = axis[4] ? 1 - point[0] / 16 : point[0] / 16;
+    let fv = axis[5] ? 1 - point[1] / 16 : point[1] / 16;
+    /* face.rotation 的原版语义(BlockFaceUV.getShiftedIndex)是在 uv 子矩形内轮换角点对应,
+       不是绕整张贴图中心转:先旋转插值因子、再缩放进矩形。全幅 uv 下两种算法数学等价
+       (既有校准不受影响);子矩形此前会被转到贴图另一块区域,甚至越出图集页采到邻居
+       ——螺旋桨(几乎每面都是子矩形+rotation)的黑块/杂色即由此而来。 */
+    for (let turn = ((Number(face.rotation) || 0) % 360 + 360) % 360; turn > 0; turn -= 90) [fu, fv] = [fv, 1 - fu];
     let x = from[0] + (to[0] - from[0]) * (point[0] / 16);
     let y = from[1] + (to[1] - from[1]) * (point[1] / 16);
     let z = from[2] + (to[2] - from[2]) * (point[0] / 16);
@@ -507,8 +512,7 @@ function faceGeometry(element, faceName, face, textureSize) {
     else if (faceName === 'north' || faceName === 'south') { x = from[0] + (to[0] - from[0]) * (point[0] / 16); y = from[1] + (to[1] - from[1]) * (point[1] / 16); z = faceName === 'south' ? to[2] : from[2]; }
     else { x = faceName === 'east' ? to[0] : from[0]; y = from[1] + (to[1] - from[1]) * (point[1] / 16); z = from[2] + (to[2] - from[2]) * (point[0] / 16); }
     const rotated = rotateElement([x, y, z], element.rotation);
-    let tu = uv[0] / sizeU + u * ((uv[2]-uv[0]) / sizeU), tv = uv[1] / sizeV + v * ((uv[3]-uv[1]) / sizeV);
-    for (let turn = ((Number(face.rotation) || 0) % 360 + 360) % 360; turn > 0; turn -= 90) [tu, tv] = [tv, 1 - tu];
+    const tu = uv[0] / sizeU + fu * ((uv[2]-uv[0]) / sizeU), tv = uv[1] / sizeV + fv * ((uv[3]-uv[1]) / sizeV);
     corners.push({position:[rotated[0] / 16 - .5, rotated[1] / 16 - .5, rotated[2] / 16 - .5], uv:[tu, 1 - tv]});
   }
   // FaceBakery 按最终角点绕序重算烘焙方向；模型可故意用 from > to 生成内向配对面。
