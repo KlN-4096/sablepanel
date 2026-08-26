@@ -868,4 +868,17 @@ const pipeIdle = sandbox.bakeState([{x:0,y:0,z:0,g:-1}], 0,
 assert.equal([...pipeIdle.batches.values()].filter(batch => batch.assembly).length, 1,
   'false 方向不得接臂(up=true 但 connection/up 不存在,东臂仍在)');
 
+/* Forge texture_size 扩展:UV 按声明的网格归一(安山螺旋桨 32×32),不能一律 /16;且要沿 parent 链继承。 */
+const sizedFiles = new Map([
+  ['assets/ns/models/block/sized.json', encoder.encode(JSON.stringify({parent:'ns:block/sized_base'}))],
+  ['assets/ns/models/block/sized_base.json', encoder.encode(JSON.stringify({
+    texture_size:[32, 32], textures:{0:'ns:block/t'},
+    elements:[{from:[0,0,0], to:[16,16,16], faces:{up:{uv:[8,8,16,16], texture:'#0'}}}]
+  }))]
+]);
+const sizedFaces = sandbox.bakeModel(sizedFiles, 'ns:block/sized');
+assert.ok(sizedFaces && sizedFaces.length === 1, 'texture_size 模型必须正常烘焙');
+assert.ok(sizedFaces[0].corners.every(corner => corner.uv[0] >= .25 - 1e-6 && corner.uv[0] <= .5 + 1e-6),
+  'texture_size=32 时 uv[8..16] 应归一到 0.25..0.5,而非 /16 得到 0.5..1.0');
+
 console.log('model worker checks passed');

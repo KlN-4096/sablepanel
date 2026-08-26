@@ -470,6 +470,7 @@ function mergeModel(files, modelId, depth, seen) {
   const textures = Object.assign({}, parent ? parent.textures : {}, json.textures || {});
   const elements = Array.isArray(json.elements) ? json.elements : (parent ? parent.elements : []);
   return {textures, elements, renderType:json.render_type || (parent && parent.renderType) || null,
+    textureSize:Array.isArray(json.texture_size) ? json.texture_size : (parent && parent.textureSize),
     transform:json.transform !== undefined ? json.transform : (parent && parent.transform),
     visibility:Object.assign({}, parent ? parent.visibility : {}, json.visibility || {}),
     ambientOcclusion:json.ambientocclusion !== undefined ? json.ambientocclusion
@@ -486,12 +487,15 @@ function resolveTexture(model, token) {
   return resourcePath(value, 'textures', '.png');
 }
 
-function faceGeometry(element, faceName, face) {
+function faceGeometry(element, faceName, face, textureSize) {
   const axis = FACE_AXES[faceName];
   if (!axis || !face || !face.texture) return null;
   const from = element.from || [0,0,0], to = element.to || [16,16,16];
   const corners = [];
   const uv = face.uv || defaultFaceUv(from, to, faceName);
+  /* Forge texture_size 扩展:模型 UV 按声明的网格归一(安山螺旋桨是 32×32),一律 /16 会采到错误象限 */
+  const sizeU = Array.isArray(textureSize) && textureSize[0] > 0 ? textureSize[0] : 16;
+  const sizeV = Array.isArray(textureSize) && textureSize[1] > 0 ? textureSize[1] : 16;
   for (const point of axis[3]) {
     // 只影响纹理坐标;下面的位置插值一律直接用 point[...]，不走这两个变量
     const u = axis[4] ? 1 - point[0] / 16 : point[0] / 16;
@@ -503,7 +507,7 @@ function faceGeometry(element, faceName, face) {
     else if (faceName === 'north' || faceName === 'south') { x = from[0] + (to[0] - from[0]) * (point[0] / 16); y = from[1] + (to[1] - from[1]) * (point[1] / 16); z = faceName === 'south' ? to[2] : from[2]; }
     else { x = faceName === 'east' ? to[0] : from[0]; y = from[1] + (to[1] - from[1]) * (point[1] / 16); z = from[2] + (to[2] - from[2]) * (point[0] / 16); }
     const rotated = rotateElement([x, y, z], element.rotation);
-    let tu = uv[0] / 16 + u * ((uv[2]-uv[0]) / 16), tv = uv[1] / 16 + v * ((uv[3]-uv[1]) / 16);
+    let tu = uv[0] / sizeU + u * ((uv[2]-uv[0]) / sizeU), tv = uv[1] / sizeV + v * ((uv[3]-uv[1]) / sizeV);
     for (let turn = ((Number(face.rotation) || 0) % 360 + 360) % 360; turn > 0; turn -= 90) [tu, tv] = [tv, 1 - tu];
     corners.push({position:[rotated[0] / 16 - .5, rotated[1] / 16 - .5, rotated[2] / 16 - .5], uv:[tu, 1 - tv]});
   }
@@ -675,7 +679,7 @@ function facesFromElements(model, elements) {
   const faces = [];
   for (const element of elements) {
     for (const name of Object.keys(FACE_AXES)) {
-      const face = faceGeometry(element, name, element.faces && element.faces[name]);
+      const face = faceGeometry(element, name, element.faces && element.faces[name], model.textureSize);
       if (face) faces.push({...face, texturePath:resolveTexture(model, face.texture), renderType:model.renderType || null,
         shade:element.shade !== false && face.shade !== false,
         ambientOcclusion:model.ambientOcclusion !== false});
@@ -1194,6 +1198,8 @@ function bakeComposite(files, json, options) {
       const model = {textures:Object.assign({}, childParent ? childParent.textures : {}, ownTextures, child.textures || {}),
         elements:Array.isArray(child.elements) ? child.elements : (childParent ? childParent.elements : []),
         renderType:child.render_type || (childParent && childParent.renderType) || json.render_type || null,
+        textureSize:Array.isArray(child.texture_size) ? child.texture_size
+          : Array.isArray(json.texture_size) ? json.texture_size : (childParent && childParent.textureSize),
         transform:child.transform !== undefined ? child.transform : childParent && childParent.transform,
         ambientOcclusion:child.ambientocclusion !== undefined ? child.ambientocclusion
           : childParent ? childParent.ambientOcclusion : true};
