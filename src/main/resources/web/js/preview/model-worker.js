@@ -1164,17 +1164,42 @@ function assemblyFaces(files, id, modelId, state) {
  * 部件缺失或烘焙失败时静默跳过、标 partial(半成品守则)。
  */
 const PIPE_DIRECTIONS = ['down', 'up', 'north', 'south', 'east', 'west'];
+/* 链窗背板:encased_chain_cogwheel 侧贴图中段整条全透明(游戏里透过窗口看 BER 画的链条),
+   静态渲染窗口后是空的,能一路看穿到相邻段和背景。往壳内放一个涂了 Create 预绘链条贴图
+   (encased_chain_drive_middle/end 本身画着链)的内衬盒,窗口后看到的就是链——等价于游戏观感。
+   尺寸 0.55..15.45:几乎齐边把窗口整个封住(缩到 2.2 会从边缘和相邻段的缝漏风),
+   同时避开壳件所有内平面(0/0.95/2/10/14/15.05/16),不与任何面共面 z-fighting。 */
+const chainBackplate = texture => ({key:'chain_backplate|' + texture, model:{
+  textures:{plate:texture},
+  elements:[{from:[.55, .55, .55], to:[15.45, 15.45, 15.45], faces:{
+    north:{uv:[0,0,16,16], texture:'#plate'}, south:{uv:[0,0,16,16], texture:'#plate'},
+    east:{uv:[0,0,16,16], texture:'#plate'}, west:{uv:[0,0,16,16], texture:'#plate'},
+    up:{uv:[0,0,16,16], texture:'#plate'}, down:{uv:[0,0,16,16], texture:'#plate'}
+  }}]
+}});
 const CURATED_ASSEMBLY = {
   'create:fluid_pipe': properties => PIPE_DIRECTIONS.filter(direction => properties[direction] === 'true')
     .map(direction => 'create:block/fluid_pipe/connection/' + direction),
   'create:chain_conveyor': () => ['create:block/chain_conveyor/wheel',
     'create:block/chain_conveyor/shaft', 'create:block/chain_conveyor/guard'],
-  'create:water_wheel': () => ['create:block/water_wheel/wheel']
+  'create:water_wheel': () => ['create:block/water_wheel/wheel'],
+  /* 贴图按段选:middle 段闭包必带 _middle,start/end 段必带 _end(各自壳模型引用它们)。
+     part=none(单体)返回 null,保留通用推导偷来的齿轮。 */
+  'create_connected:encased_chain_cogwheel': properties =>
+    properties.part === 'middle' ? [chainBackplate('create:block/encased_chain_drive_middle')]
+      : properties.part === 'start' || properties.part === 'end'
+        ? [chainBackplate('create:block/encased_chain_drive_end')] : null
 };
 
 function curatedAssemblyModelIds(id, state) {
   const recipe = CURATED_ASSEMBLY[id];
   return recipe ? recipe(parseProperties(state || '')) : null;
+}
+
+const INLINE_CURATED_FACES = new Map();
+function inlineCuratedFaces(entry) {
+  if (!INLINE_CURATED_FACES.has(entry.key)) INLINE_CURATED_FACES.set(entry.key, facesFromModel(entry.model));
+  return INLINE_CURATED_FACES.get(entry.key);
 }
 
 /* 多方块结构的哑方块:游戏里不渲染(本体由控制器整体画,如大水车的 OBJ 轮),
@@ -1875,7 +1900,10 @@ function bakeState(values, stateIndex, palette, loaded, cachedModel, fluidCache,
         state, stateIndex, biome, texturePaths});
       if (appended.ready) voxelReady = true;
     }
-    if (voxelReady && choices.length === 1 && !assemblyBudgetExceeded) {
+    const curated = voxelReady && !assemblyBudgetExceeded
+      ? curatedAssemblyModelIds(state.id, state.state || state.id) : null;
+    // 定制表命中即独占:推导偷来的内部件会与背板/壳件共面打架(齿轮齿尖 vs 框条平面),二选一
+    if (voxelReady && choices.length === 1 && !assemblyBudgetExceeded && !curated) {
       const choice = choices[0], assembled = assemblyFaces(loaded.files, state.id, choice.model,
         state.state || state.id);
       if (assembled && assembled.length <= MAX_MODEL_FACES) {
@@ -1884,16 +1912,14 @@ function bakeState(values, stateIndex, palette, loaded, cachedModel, fluidCache,
           choice, value, state, stateIndex, biome, texturePaths});
       }
     }
-    if (voxelReady && !assemblyBudgetExceeded) {
-      const curated = curatedAssemblyModelIds(state.id, state.state || state.id);
-      if (curated) {
-        const choice = choices[0] || {};
-        for (const curatedId of curated) {
-          const faces = cachedModel(curatedId);
-          if (!faces || faces.length > MAX_MODEL_FACES) { partial = true; continue; }
-          appendModelFaces({local, faces, kind:'assembly', modelKey:'curated|' + curatedId,
-            choice, value, state, stateIndex, biome, texturePaths});
-        }
+    if (curated) {
+      const choice = choices[0] || {};
+      for (const entry of curated) {
+        const faces = typeof entry === 'string' ? cachedModel(entry) : inlineCuratedFaces(entry);
+        if (!faces || faces.length > MAX_MODEL_FACES) { partial = true; continue; }
+        appendModelFaces({local, faces, kind:'assembly',
+          modelKey:'curated|' + (typeof entry === 'string' ? entry : entry.key),
+          choice, value, state, stateIndex, biome, texturePaths});
       }
     }
     if (fluid && fluid.length) {

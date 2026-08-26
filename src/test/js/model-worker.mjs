@@ -895,4 +895,35 @@ assert.ok(tubed && tubed.length === 2, 'composite loader 挂在 parent 上也必
 assert.equal(tubed[0].texturePath, 'assets/ns/textures/block/tube.png',
   '父级 composite 的纹理表必须传导到子元素');
 
+/* 链窗背板:part=start/middle/end 得到涂链内衬盒且独占(替代推导),part=none 不触发。
+   背板缩进 2.2/13.8,不得与壳件的 2/14 平面共面(z-fighting)。 */
+const cogFiles = new Map([
+  ['assets/create_connected/blockstates/encased_chain_cogwheel.json', encoder.encode(JSON.stringify({variants:{
+    'part=middle':{model:'create_connected:block/ecc/shell'},
+    'part=none':{model:'create_connected:block/ecc/shell'}
+  }}))],
+  ['assets/create_connected/models/block/ecc/shell.json', encoder.encode(JSON.stringify({
+    textures:{0:'create_connected:block/shell'},
+    elements:[{from:[0,0,0], to:[16,2,16], faces:{up:{texture:'#0'}}}]
+  }))]
+]);
+const cogMiddle = sandbox.bakeState([{x:0,y:0,z:0,g:-1}], 0,
+  [{id:'create_connected:encased_chain_cogwheel',
+    state:'create_connected:encased_chain_cogwheel[axis=x,part=middle]'}], {files:cogFiles},
+  id => sandbox.bakeModel(cogFiles, id), new Map(), new Map(), {}, 0, 0, 0, 0, 10_000);
+const cogAssembly = [...cogMiddle.batches.values()].filter(batch => batch.assembly);
+assert.equal(cogAssembly.length, 1, 'part=middle 必须得到链窗背板');
+assert.ok(cogAssembly[0].texture.endsWith('encased_chain_drive_middle.png'),
+  'middle 段背板必须用 _middle 贴图(该段闭包必带)');
+assert.ok(cogAssembly[0].positions.every(value => Math.abs(value) < .5 - 1e-3),
+  '背板不得与 0/16 边界面共面(z-fighting)');
+assert.ok(Math.max(...cogAssembly[0].positions.map(Math.abs)) > .46,
+  '背板必须几乎齐边封住窗口(缩进太深会从边缘和相邻段的缝漏风)');
+const cogNone = sandbox.bakeState([{x:0,y:0,z:0,g:-1}], 0,
+  [{id:'create_connected:encased_chain_cogwheel',
+    state:'create_connected:encased_chain_cogwheel[axis=x,part=none]'}], {files:cogFiles},
+  id => sandbox.bakeModel(cogFiles, id), new Map(), new Map(), {}, 0, 0, 0, 0, 10_000);
+assert.equal([...cogNone.batches.values()].filter(batch => batch.assembly).length, 0,
+  'part=none 不触发背板(保留通用推导的齿轮路径)');
+
 console.log('model worker checks passed');
