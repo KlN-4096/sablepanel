@@ -197,9 +197,7 @@ function legacyMeshData(parsed) {
     voxels: parsed.records,
     shell,
     total: Number(parsed.metadata.voxel_count || parsed.voxelCount),
-    truncated: false,
-    metadata: parsed.metadata,
-    spm2: parsed
+    metadata: parsed.metadata
   };
 }
 

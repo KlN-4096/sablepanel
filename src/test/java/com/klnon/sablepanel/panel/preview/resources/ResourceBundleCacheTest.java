@@ -16,27 +16,31 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ResourceBundleCacheTest {
     @Test
     void storesValidatedManifestAndContentAddressedShard() throws Exception {
         byte[] bytes = "resource-bytes".getBytes(StandardCharsets.UTF_8);
         String shardHash = sha256(bytes);
-        String fileHash = sha256(bytes);
         String fingerprint = "a".repeat(64);
         String id = "b".repeat(64);
         var bundle = new ModResourceStack.Bundle(fingerprint,
-                List.of(new ModResourceStack.Entry("assets/test/models/block/a.json", fileHash,
+                List.of(new ModResourceStack.Entry("assets/test/models/block/a.json",
                         bytes.length, shardHash, 0, bytes.length, "mod-0")),
                 List.of(new ModResourceStack.Shard(shardHash, bytes)), List.of(), List.of());
         ResourceBundleCache cache = new ResourceBundleCache(Files.createTempDirectory("preview-bundles"));
 
         assertNotNull(cache.store(id, bundle));
-        assertTrue(new String(cache.manifest(id), StandardCharsets.UTF_8).contains("\"id\":\"" + id + "\""));
+        JsonObject manifest = JsonParser.parseString(
+                new String(cache.manifest(id), StandardCharsets.UTF_8)).getAsJsonObject();
+        assertEquals(id, manifest.get("id").getAsString());
+        assertEquals(ModResourceStack.CLOSURE_CACHE_VERSION, manifest.get("closure_cache_version").getAsInt());
+        assertFalse(manifest.getAsJsonArray("entries").get(0).getAsJsonObject().has("sha256"));
         assertArrayEquals(bytes, cache.shard(id, shardHash));
         assertNull(cache.shard("c".repeat(64), shardHash));
         assertThrows(IllegalArgumentException.class, () -> cache.shard(id, "../bad"));
@@ -49,7 +53,7 @@ class ResourceBundleCacheTest {
         Path root = Files.createTempDirectory("preview-corrupt-bundle");
         ResourceBundleCache cache = new ResourceBundleCache(root);
         cache.store(id, new ModResourceStack.Bundle("e".repeat(64),
-                List.of(new ModResourceStack.Entry("assets/test/a.json", hash, bytes.length,
+                List.of(new ModResourceStack.Entry("assets/test/a.json", bytes.length,
                         hash, 0, bytes.length, "test")),
                 List.of(new ModResourceStack.Shard(hash, bytes)), List.of(), List.of()));
         Files.write(root.resolve("closures").resolve(id).resolve("shards").resolve(hash),
@@ -65,7 +69,7 @@ class ResourceBundleCacheTest {
         Path root = Files.createTempDirectory("preview-replaced-manifest");
         ResourceBundleCache cache = new ResourceBundleCache(root);
         cache.store(id, new ModResourceStack.Bundle("a".repeat(64),
-                List.of(new ModResourceStack.Entry("assets/test/a.json", hash, bytes.length,
+                List.of(new ModResourceStack.Entry("assets/test/a.json", bytes.length,
                         hash, 0, bytes.length, "test")),
                 List.of(new ModResourceStack.Shard(hash, bytes)), List.of(), List.of()));
         Files.writeString(root.resolve("closures").resolve(id).resolve("manifest.json"), "{}");
@@ -77,10 +81,10 @@ class ResourceBundleCacheTest {
      * 陈旧闭包事故(2026-08-26,发射多拉贡):旧实例建的闭包缺 connection/ 子目录兄弟,
      * 缓存校验只看协议版本 + 哈希完整性,新代码重启后继续永续服务旧闭包 ——
      * 管道臂永远缺失且 missing/failures 全空,无从发现。闭包内容依赖构建器逻辑,
-     * 校验必须绑定构建器修订:builder 字段不匹配或缺失(历史缓存)都要作废重建。
+     * 校验必须绑定显式闭包缓存版本:字段不匹配或缺失(历史缓存)都要作废重建。
      */
     @Test
-    void closureFromADifferentBuilderRevisionIsInvalidated() throws Exception {
+    void closureFromADifferentCacheVersionIsInvalidated() throws Exception {
         Path root = Files.createTempDirectory("preview-bundle-cache");
         String id = "ab".repeat(32);
         try (ModResourceStack stack = new ModResourceStack(archive(Map.of(
@@ -93,13 +97,13 @@ class ResourceBundleCacheTest {
         Path manifestFile = root.resolve("closures").resolve(id).resolve("manifest.json");
         JsonObject manifest = JsonParser.parseString(Files.readString(manifestFile, StandardCharsets.UTF_8))
                 .getAsJsonObject();
-        manifest.addProperty("builder", "stale-builder");
+        manifest.addProperty("closure_cache_version", ModResourceStack.CLOSURE_CACHE_VERSION + 1);
         Files.writeString(manifestFile, manifest.toString(), StandardCharsets.UTF_8);
-        assertNull(new ResourceBundleCache(root).get(id), "其它构建器修订产出的闭包必须作废重建");
+        assertNull(new ResourceBundleCache(root).get(id), "其它缓存版本产出的闭包必须作废重建");
 
-        manifest.remove("builder");
+        manifest.remove("closure_cache_version");
         Files.writeString(manifestFile, manifest.toString(), StandardCharsets.UTF_8);
-        assertNull(new ResourceBundleCache(root).get(id), "没有 builder 字段的历史闭包同样必须作废");
+        assertNull(new ResourceBundleCache(root).get(id), "没有缓存版本字段的历史闭包同样必须作废");
     }
 
     private static Path archive(Map<String, String> entries) throws Exception {

@@ -931,7 +931,7 @@ function renderComposition(){
       </div>`;
     const rest = pal.slice(COMP_PAGE);
     box.innerHTML = (box.id==='compList'||box.id==='rCompList'||box.id==='copyComp'
-      ? `<h4>${T.composition}${MESH_DATA.truncated?T.pvTrunc:''}</h4>` : '') +
+      ? `<h4>${T.composition}</h4>` : '') +
       pal.slice(0, COMP_PAGE).map(row).join('') +
       (rest.length ? `<details class="compRest"><summary class="compRow compMore"><span
         class="ifClosed">▾ ${T.compMore(rest.length)}</span><span class="ifOpen">▴ ${T.compLess}</span></summary>${

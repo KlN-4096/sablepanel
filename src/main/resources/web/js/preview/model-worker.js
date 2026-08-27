@@ -15,7 +15,7 @@ const MAX_SOURCE_TEXTURE_EDGE = 4096;
 const MAX_OBJ_FACES = 50_000;
 const MAX_OBJ_MATERIALS = 128;
 const MAX_OBJ_LINE = 64 * 1024;
-const RESOURCE_PROTOCOL_VERSION = 2;
+const RESOURCE_PROTOCOL_VERSION = 3;
 const MAX_ASSEMBLY_ELEMENTS = 256;
 const MAX_ASSEMBLY_MODELS = 64;
 const MAX_ASSEMBLY_COMPONENT_ELEMENTS = 64;
@@ -111,13 +111,6 @@ async function fetchShard(entry, baseUrl, token, server) {
   return fetchResource({url, token, server, label:'资源分片', progress:false, arrayBuffer:true});
 }
 
-async function sha256Hex(bytes) {
-  const subtle = self.crypto && self.crypto.subtle;
-  if (!subtle) throw new Error('浏览器不支持资源哈希校验');
-  const digest = new Uint8Array(await subtle.digest('SHA-256', bytes));
-  return [...digest].map(value => value.toString(16).padStart(2, '0')).join('');
-}
-
 async function loadResources(manifestUrl, token, server, maxBytes = Infinity, suppliedManifest = null,
                              expectedFingerprint = '') {
   const manifest = suppliedManifest || await fetchJson(manifestUrl, token, server);
@@ -128,7 +121,6 @@ async function loadResources(manifestUrl, token, server, maxBytes = Infinity, su
   const groups = new Map();
   for (const entry of manifest.entries) {
     if (!/^[0-9a-f]{64}$/.test(String(entry.shard || ''))) throw new Error('资源分片哈希无效');
-    if (!/^[0-9a-f]{64}$/.test(String(entry.sha256 || ''))) throw new Error('资源文件哈希无效');
     let group = groups.get(entry.shard);
     if (!group) { group = []; groups.set(entry.shard, group); }
     group.push(entry);
@@ -147,15 +139,13 @@ async function loadResources(manifestUrl, token, server, maxBytes = Infinity, su
     const current = grouped.slice(i, i + 2);
     const parts = await Promise.all(current.map(([, entries]) => fetchShard(entries[0], manifestUrl, token, server)));
     for (let groupIndex = 0; groupIndex < current.length; groupIndex++) {
-      const [shardHash, entries] = current[groupIndex], shard = new Uint8Array(parts[groupIndex]);
-      if (await sha256Hex(shard) !== shardHash) throw new Error('资源分片哈希不一致');
+      const [, entries] = current[groupIndex], shard = new Uint8Array(parts[groupIndex]);
       if (byteLength + shard.byteLength > maxBytes) throw new Error('资源闭包超过浏览器内存预算');
       byteLength += shard.byteLength;
       for (const entry of entries) {
         if (entry.offset < 0 || entry.length < 0
             || entry.offset + entry.length > shard.byteLength) throw new Error('资源清单偏移无效');
         const bytes = shard.subarray(entry.offset, entry.offset + entry.length);
-        if (await sha256Hex(bytes) !== entry.sha256) throw new Error('资源文件哈希不一致');
         files.set(entry.path, bytes);
       }
     }

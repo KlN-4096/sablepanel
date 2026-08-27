@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
@@ -11,15 +10,15 @@ const files = new Map([
   ['assets/minecraft/textures/block/stone.png', encoder.encode('not-a-png')]
 ]);
 const shard = Buffer.concat([...files.values()].map(value => Buffer.from(value)));
+const shardHash = 'b'.repeat(64);
 const entries = [];
 let offset = 0;
 for (const [path, value] of files) {
   const bytes = Buffer.from(value);
-  entries.push({path, sha256:crypto.createHash('sha256').update(bytes).digest('hex'), size:bytes.length,
-    shard:crypto.createHash('sha256').update(shard).digest('hex'), offset, length:bytes.length, layer:'minecraft'});
+  entries.push({path, size:bytes.length, shard:shardHash, offset, length:bytes.length, layer:'minecraft'});
   offset += bytes.length;
 }
-const manifest = {version:2, fingerprint:'a'.repeat(64), entries};
+const manifest = {version:3, fingerprint:'a'.repeat(64), entries};
 const responses = {
   manifest: {ok:true,status:200,json:async()=>manifest},
   shard: {ok:true,status:200,arrayBuffer:async()=>shard.buffer.slice(shard.byteOffset, shard.byteOffset + shard.byteLength)}
@@ -44,7 +43,7 @@ class FakeOffscreenCanvas {
 }
 let fetchCount = 0, decodeCount = 0;
 const sandbox = {
-  self: {crypto:crypto.webcrypto, postMessage:value=>posted.push(value)},
+  self: {postMessage:value=>posted.push(value)},
   fetch: async url => { fetchCount++; return String(url).includes('/shard/') ? responses.shard : responses.manifest; },
   TextDecoder, TextEncoder, Uint8Array, Uint8ClampedArray, Uint16Array, Uint32Array, Float32Array, DataView,
   ArrayBuffer, Blob, Promise, Map, Set, Math, BigInt, Number, JSON, Object, String, Error,
@@ -58,20 +57,12 @@ vm.runInContext(source, sandbox, {filename:'model-worker.js'});
 const identityAssemblyRotation = vm.runInContext('IDENTITY_CUBE_ROTATION', sandbox);
 const loaded = await sandbox.loadResources('/api/preview/resources/' + 'b'.repeat(64) + '/manifest', '', '');
 assert.equal(loaded.byteLength, shard.length);
-const corruptedShard = Buffer.from(shard);
-corruptedShard[0] ^= 1;
-responses.shard.arrayBuffer = async() => corruptedShard.buffer.slice(
-  corruptedShard.byteOffset, corruptedShard.byteOffset + corruptedShard.byteLength);
-await assert.rejects(
-  () => sandbox.loadResources('/api/preview/resources/' + 'b'.repeat(64) + '/manifest', '', ''),
-  /分片哈希/, 'Worker 必须拒绝与内容地址不一致的资源分片');
-responses.shard.arrayBuffer = async() => shard.buffer.slice(shard.byteOffset, shard.byteOffset + shard.byteLength);
 const badEntryManifest = {...manifest, entries:manifest.entries.map((entry, index) =>
-  index ? entry : {...entry, sha256:'0'.repeat(64)})};
+  index ? entry : {...entry, offset:-1})};
 await assert.rejects(
   () => sandbox.loadResources('/api/preview/resources/' + 'b'.repeat(64) + '/manifest', '', '',
     Infinity, badEntryManifest),
-  /文件哈希/, 'Worker 必须拒绝清单中文件摘要与切片内容不一致的资源');
+  /偏移/, 'Worker 必须拒绝清单中越界的文件切片');
 await assert.rejects(() => sandbox.loadResources('/manifest', '', '', Infinity,
   {...manifest, version:1}), /协议版本/, 'Worker 必须拒绝不兼容的资源协议');
 await assert.rejects(() => sandbox.loadResources('/manifest', '', '', Infinity,
@@ -153,7 +144,7 @@ assert.deepEqual([...invisibleBake.upgraded], [0],
   '哑方块必须算"升级成空"——runtime 只对 upgraded 名单撤半透明外壳占位盒,漏掉它外壳会永远留着');
 assert.equal(decodeCount, decodesAfterFirstBake, '同一资源指纹的第二次 bake 不得重新解码纹理');
 const lowBudgetUrl = '/api/preview/resources/' + 'd'.repeat(64) + '/manifest';
-const lowBudgetCache = sandbox.sharedFor(lowBudgetUrl, '', manifest.fingerprint, 2);
+const lowBudgetCache = sandbox.sharedFor(lowBudgetUrl, '', manifest.fingerprint, 3);
 lowBudgetCache.loaded = {files, byteLength:49 * 1024 * 1024, manifest};
 await assert.rejects(() => sandbox.bake({manifestUrl:lowBudgetUrl, token:'', server:'',
   resourceFingerprint:manifest.fingerprint,recordBytes:8,records:new Uint16Array([0,0,0,0]).buffer,

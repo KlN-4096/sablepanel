@@ -36,7 +36,8 @@ import java.util.zip.ZipFile;
  * The class owns no Minecraft world state and can therefore run on the preview executor.
  */
 public final class ModResourceStack implements AutoCloseable {
-    public static final int RESOURCE_PROTOCOL_VERSION = 2;
+    public static final int RESOURCE_PROTOCOL_VERSION = 3;
+    public static final int CLOSURE_CACHE_VERSION = 1;
     public static final long MAX_CLOSURE_BYTES = 256L * 1024 * 1024;
     public static final long MAX_JSON_BYTES = 4L * 1024 * 1024;
     public static final long MAX_OBJ_BYTES = 2L * 1024 * 1024;
@@ -52,21 +53,6 @@ public final class ModResourceStack implements AutoCloseable {
     private static final int MAX_OBJ_LINE = 64 * 1024;
     private static final int MAX_ASSEMBLY_SIBLINGS = 64;
     private static final long MAX_ASSEMBLY_SIBLING_BYTES = 2L * 1024 * 1024;
-    /**
-     * 闭包遍历逻辑的修订指纹 = 本类字节码哈希:逻辑一变自动变,无需人工记得升版。
-     * 闭包内容依赖 (资源指纹, roots, 遍历逻辑) 三者;缓存校验此前只覆盖前两者,
-     * 旧实例建的闭包(如缺 connection/ 子目录兄弟)会在升级后永续服务。
-     */
-    public static final String BUILDER_REVISION = builderRevision();
-
-    private static String builderRevision() {
-        try (InputStream input = ModResourceStack.class.getResourceAsStream("ModResourceStack.class")) {
-            return Digests.sha256Hex(input.readAllBytes()).substring(0, 16);
-        } catch (Exception error) {
-            return "protocol-" + RESOURCE_PROTOCOL_VERSION;
-        }
-    }
-
     public record Layer(String id, Path archive) {
         public Layer {
             if (id == null || id.isBlank()) throw new IllegalArgumentException("layer id is blank");
@@ -74,7 +60,7 @@ public final class ModResourceStack implements AutoCloseable {
         }
     }
 
-    public record Entry(String path, String sha256, long size, String shard,
+    public record Entry(String path, long size, String shard,
                         int offset, int length, String layer) {
     }
 
@@ -107,7 +93,6 @@ public final class ModResourceStack implements AutoCloseable {
                 JsonObject value = new JsonObject();
                 value.addProperty("path", entry.path());
                 value.addProperty("type", typeOf(entry.path()));
-                value.addProperty("sha256", entry.sha256());
                 value.addProperty("size", entry.size());
                 value.addProperty("shard", entry.shard());
                 value.addProperty("offset", entry.offset());
@@ -283,7 +268,7 @@ public final class ModResourceStack implements AutoCloseable {
 
     private Bundle bundleOf(Set<String> required, Set<String> optional,
                             List<String> missing, List<String> failures) throws IOException {
-        record Packed(String path, String sha256, int length, int shardIndex, int offset, String layer) {}
+        record Packed(String path, int length, int shardIndex, int offset, String layer) {}
         List<String> ordered = java.util.stream.Stream.concat(required.stream().sorted(),
                 optional.stream().filter(path -> !required.contains(path)).sorted()).toList();
         List<Packed> packed = new ArrayList<>();
@@ -318,13 +303,13 @@ public final class ModResourceStack implements AutoCloseable {
             }
             int offset = current.size();
             current.writeBytes(bytes);
-            packed.add(new Packed(path, Digests.sha256Hex(bytes), bytes.length, shards.size(), offset, ref.layer().id()));
+            packed.add(new Packed(path, bytes.length, shards.size(), offset, ref.layer().id()));
         }
         if (current.size() > 0) appendShard(shards, current);
         List<Entry> entries = new ArrayList<>(packed.size());
         for (Packed entry : packed) {
             Shard shard = shards.get(entry.shardIndex());
-            entries.add(new Entry(entry.path(), entry.sha256(), entry.length(), shard.sha256(),
+            entries.add(new Entry(entry.path(), entry.length(), shard.sha256(),
                     entry.offset(), entry.length(), entry.layer()));
         }
         return new Bundle(this.fingerprint, entries, shards, missing, failures);

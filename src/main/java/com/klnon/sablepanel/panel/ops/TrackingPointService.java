@@ -1,5 +1,6 @@
 package com.klnon.sablepanel.panel.ops;
 
+import com.klnon.sablepanel.panel.storage.Digests;
 import com.klnon.sablepanel.panel.storage.DiskScanner;
 import dev.ryanhcode.sable.sublevel.storage.holding.GlobalSavedSubLevelPointer;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelData;
@@ -15,11 +16,9 @@ import org.joml.Vector3d;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -149,13 +148,7 @@ public final class TrackingPointService {
     }
 
     private static String issueId(UUID id, DiskScanner.EntryKey key) {
-        try {
-            byte[] hash = MessageDigest.getInstance("SHA-256")
-                    .digest((id + "@" + key.id()).getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash, 0, 8);
-        } catch (Exception error) {
-            throw new IllegalStateException(error);
-        }
+        return Digests.sha256Hex((id + "@" + key.id()).getBytes(StandardCharsets.UTF_8)).substring(0, 16);
     }
 
     private record Update(SubLevelTrackingPointSavedData data, UUID id, TrackingPoint point) {

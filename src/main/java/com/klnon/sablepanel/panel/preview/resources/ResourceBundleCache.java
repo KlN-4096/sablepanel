@@ -4,16 +4,16 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.klnon.sablepanel.panel.storage.AtomicIo;
 import com.klnon.sablepanel.panel.storage.Digests;
-import com.klnon.sablepanel.panel.storage.DiskBudget;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.UUID;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /** Disk-backed, content-addressed closure cache under the preview cache version directory. */
@@ -52,7 +52,7 @@ public final class ResourceBundleCache {
             }
             JsonObject manifest = JsonParser.parseString(bundle.manifestJson()).getAsJsonObject();
             manifest.addProperty("id", id);
-            manifest.addProperty("builder", ModResourceStack.BUILDER_REVISION);
+            manifest.addProperty("closure_cache_version", ModResourceStack.CLOSURE_CACHE_VERSION);
             byte[] manifestBytes = manifest.toString().getBytes(StandardCharsets.UTF_8);
             if (manifestBytes.length > MAX_MANIFEST_BYTES) throw new IOException("resource manifest exceeds limit");
             Files.write(temporary.resolve(MANIFEST), manifestBytes);
@@ -133,9 +133,8 @@ public final class ResourceBundleCache {
             JsonObject manifest = JsonParser.parseString(
                     new String(manifestBytes, StandardCharsets.UTF_8)).getAsJsonObject();
             if (!manifest.has("version") || manifest.get("version").getAsInt() != ModResourceStack.RESOURCE_PROTOCOL_VERSION) return null;
-            // 闭包内容依赖构建器逻辑:其它修订(或没有 builder 字段的历史缓存)一律作废重建
-            if (!manifest.has("builder")
-                    || !ModResourceStack.BUILDER_REVISION.equals(manifest.get("builder").getAsString())) return null;
+            if (!manifest.has("closure_cache_version")
+                    || manifest.get("closure_cache_version").getAsInt() != ModResourceStack.CLOSURE_CACHE_VERSION) return null;
             if (!id.equals(manifest.get("id").getAsString())) return null;
             String fingerprint = manifest.get("fingerprint").getAsString();
             validateHash(fingerprint);
@@ -165,18 +164,28 @@ public final class ResourceBundleCache {
 
     private void trim() throws IOException {
         if (!Files.isDirectory(this.root)) return;
-        var items = new java.util.ArrayList<DiskBudget.Sized>();
+        var items = new java.util.ArrayList<Map.Entry<Path, Long>>();
+        long total = 0;
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(this.root, path -> Files.isDirectory(path)
                 && !path.getFileName().toString().startsWith("."))) {
-            for (Path directory : stream) items.add(new DiskBudget.Sized(directory, treeSize(directory)));
+            for (Path directory : stream) {
+                long bytes = treeSize(directory);
+                total = Math.addExact(total, bytes);
+                items.add(Map.entry(directory, bytes));
+            }
         }
-        DiskBudget.evictByMtime(items, MAX_CACHE_BYTES,
-                directory -> leased(directory.getFileName().toString()),
-                directory -> {
-                    deleteTree(directory);
-                    this.validated.remove(directory.getFileName().toString());
-                    this.manifestHashes.remove(directory.getFileName().toString());
-                });
+        if (total <= MAX_CACHE_BYTES) return;
+        items.sort(Comparator.comparingLong(item -> mtime(item.getKey())));
+        for (Map.Entry<Path, Long> item : items) {
+            if (total <= MAX_CACHE_BYTES) break;
+            Path directory = item.getKey();
+            String id = directory.getFileName().toString();
+            if (leased(id)) continue;
+            deleteTree(directory);
+            this.validated.remove(id);
+            this.manifestHashes.remove(id);
+            total -= item.getValue();
+        }
     }
 
     private static byte[] readBounded(Path file, long limit) throws IOException {
@@ -196,6 +205,11 @@ public final class ResourceBundleCache {
                 catch (IOException ignored) { return 0; }
             }).sum();
         }
+    }
+
+    private static long mtime(Path path) {
+        try { return Files.getLastModifiedTime(path).toMillis(); }
+        catch (IOException ignored) { return 0L; }
     }
 
     private static void deleteTree(Path root) throws IOException {
