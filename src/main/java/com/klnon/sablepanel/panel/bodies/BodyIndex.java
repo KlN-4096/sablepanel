@@ -25,6 +25,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import com.klnon.sablepanel.panel.metrics.StatsCollector;
+import com.klnon.sablepanel.panel.recommendation.DeletionRecommendation;
 import com.klnon.sablepanel.panel.storage.BlockNames;
 import com.klnon.sablepanel.panel.storage.ByteBudget;
 import com.klnon.sablepanel.panel.storage.DiskScanner;
@@ -765,7 +766,8 @@ public final class BodyIndex {
             if (memberArr.size() < members.size()) go.addProperty("members_omitted", members.size() - memberArr.size());
             if (!detached.isEmpty()) go.addProperty("detached", detached.size());
             if (detachUnsure) go.addProperty("detach_unsure", true);
-            JsonObject verdict = recommend(new RecInput(totalBlocks, maxBlocks, groupBlockIds.size(), groupBe,
+            JsonObject verdict = DeletionRecommendation.evaluate(this.config, new DeletionRecommendation.Input(
+                    totalBlocks, maxBlocks, groupBlockIds.size(), groupBe,
                     groupContents, anyNamed, anyTracked, anyUserData, orphanCount, nonOrphan, groupDup, groupClone));
             if (verdict.has("reasons")) go.add("rec", verdict);
             else go.add("prot", verdict.getAsJsonArray("protected_by"));
@@ -845,59 +847,6 @@ public final class BodyIndex {
 
     public void setConfig(PanelConfig config) {
         if (config != null) this.config = config;
-    }
-
-    /** 推荐删除判定的一组输入信号(全部按组聚合) */
-    record RecInput(long totalBlocks, int maxBlocks, int blockTypes, int blockEntities, int contents,
-                    boolean anyNamed, boolean anyTracked, boolean anyUserData,
-                    int orphanCount, int nonOrphan, boolean dup, boolean cloneSuspect) {
-    }
-
-    /**
-     * 推荐删除判定,**以组为单位**:依赖组内任一成员值得保留,整组都不推荐
-     * (删掉依赖成员会让剩下的体加载失败,这正是 sable 的已知缺陷)。
-     * 仅为建议,永不自动执行;删除仍走回收站备份。
-     *
-     * <p>只看块数会误伤:实测一架 99 块的玩家飞行器(24 种方块、63 个方块实体、含帆/轴承/
-     * 油门杆/座椅)恰好卡在旧的 100 块保护线下被推荐。故改为四类保护信号并行:
-     * <ul>
-     *   <li>体量:组总块数 ≥ protectBlocks</li>
-     *   <li>多样性:方块种类数 ≥ protectBlockTypes —— 残骸几乎都是单一种类,建造物种类多</li>
-     *   <li>机械/家具密度:方块实体数 ≥ protectBlockEntities —— 残骸最多带 1 个</li>
-     *   <li>内容物:任一方块实体里有物品或告示牌文字 —— 玩家资产铁证,一票保护</li>
-     * </ul>
-     * 外加原有的:带名称(玩家会给 1~3 块的传送点/门牌命名)、有玩家追踪、带第三方 user_data。
-     */
-    private JsonObject recommend(RecInput in) {
-        PanelConfig cfg = this.config;
-        List<String> protectedBy = new ArrayList<>();
-        if (in.anyNamed()) protectedBy.add("named");
-        if (in.anyTracked()) protectedBy.add("tracked");
-        if (in.anyUserData()) protectedBy.add("userdata");
-        if (in.contents() > 0) protectedBy.add("contents");
-        if (in.totalBlocks() >= cfg.protectBlocks) protectedBy.add("size");
-        if (in.blockTypes() >= cfg.protectBlockTypes) protectedBy.add("variety");
-        if (in.blockEntities() >= cfg.protectBlockEntities) protectedBy.add("machinery");
-        if (!protectedBy.isEmpty()) {
-            // 不推荐,但把"为什么保护"回给面板 —— 判定过程对服主可见,才敢用
-            JsonObject p = new JsonObject();
-            JsonArray pr = new JsonArray();
-            for (String s : protectedBy) pr.add(s);
-            p.add("protected_by", pr);
-            return p;
-        }
-        List<String> reasons = new ArrayList<>();
-        if (in.totalBlocks() == 0) reasons.add("empty");
-        else if (in.maxBlocks() < 10) reasons.add("fragment");
-        else reasons.add("debris");
-        if (in.nonOrphan() == 0 && in.orphanCount() > 0) reasons.add("orphan");
-        if (in.dup()) reasons.add("dup");
-        if (in.cloneSuspect()) reasons.add("clone");
-        JsonObject o = new JsonObject();
-        JsonArray r = new JsonArray();
-        for (String s : reasons) r.add(s);
-        o.add("reasons", r);
-        return o;
     }
 
     private static String cloneKey(DiskScanner.DiskEntry e) {
