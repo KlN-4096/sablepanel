@@ -1,4 +1,4 @@
-package com.klnon.sablepanel.panel.consistency;
+package com.klnon.sablepanel.panel.compat.sable203;
 
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;

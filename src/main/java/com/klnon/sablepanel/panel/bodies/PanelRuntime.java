@@ -3,6 +3,7 @@ package com.klnon.sablepanel.panel.bodies;
 import com.klnon.sablepanel.panel.audit.PanelObserver;
 import com.klnon.sablepanel.SablePanel;
 import com.klnon.sablepanel.panel.api.PanelApiService;
+import com.klnon.sablepanel.panel.compat.sable203.LegacyPauseMigration;
 import com.klnon.sablepanel.panel.storage.DiskScanner;
 import com.klnon.sablepanel.panel.metrics.StatsCollector;
 import com.klnon.sablepanel.panel.ops.JobService;
@@ -42,7 +43,6 @@ public final class PanelRuntime implements AutoCloseable {
     private static final int RUNTIME_REFRESH_TICKS = 100;
     private static final int RUNTIME_REFRESH_IDLE_TICKS = 1200;
     private static final int EVENT_REFRESH_TICKS = 20;
-    private static final int LEGACY_MIGRATION_ATTEMPTS = 3;
     private static final int EXECUTOR_SHUTDOWN_SECONDS = 3;
     private static final int SCAN_IDLE = 0;
     private static final int SCAN_RUNNING = 1;
@@ -185,7 +185,8 @@ public final class PanelRuntime implements AutoCloseable {
                 this.heartbeatTask = createdHeartbeat;
                 PanelObserver.ENABLED = true;
             }
-            scheduleLegacyPauseMigration(ops, control, scans, generation, 1);
+            LegacyPauseMigration.schedule(new LegacyPauseMigration.Context(
+                    ops.teleport(), control, scans, () -> isLifecycleCurrent(generation)));
             if (panel.isHost()) startServerWeb(config, panel, generation);
             return true;
         } catch (Exception error) {
@@ -196,31 +197,6 @@ public final class PanelRuntime implements AutoCloseable {
             rollbackStartup(generation, createdControlExecutor, createdScanExecutor,
                     createdNode, createdHeartbeat);
             throw error;
-        }
-    }
-
-    private void scheduleLegacyPauseMigration(PanelOps ops, ScheduledExecutorService control,
-                                              ExecutorService scans, long generation, int attempt) {
-        try {
-            scans.execute(() -> {
-                if (!isLifecycleCurrent(generation)) return;
-                try {
-                    int normalized = ops.teleport().normalizePersistedPausedGroups();
-                    if (normalized > 0) {
-                        SablePanel.LOGGER.info("sablepanel: normalized {} legacy paused members to full groups",
-                                normalized);
-                    }
-                } catch (Exception error) {
-                    if (attempt >= LEGACY_MIGRATION_ATTEMPTS) {
-                        SablePanel.LOGGER.error("sablepanel: legacy paused-state group migration failed after {} attempts",
-                                attempt, error);
-                        return;
-                    }
-                    control.schedule(() -> scheduleLegacyPauseMigration(
-                            ops, control, scans, generation, attempt + 1), 1, TimeUnit.SECONDS);
-                }
-            });
-        } catch (RejectedExecutionException ignored) {
         }
     }
 

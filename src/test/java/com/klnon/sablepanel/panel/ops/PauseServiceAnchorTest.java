@@ -394,9 +394,11 @@ class PauseServiceAnchorTest {
     void legacyPauseMigrationSkipsAStaleSnapshot() {
         AtomicInteger applied = new AtomicInteger();
 
-        assertFalse(TeleportOps.applyMigrationIfUnchanged(4, () -> 5, applied::incrementAndGet));
+        assertFalse(com.klnon.sablepanel.panel.compat.sable203.LegacyPauseMigration
+                .applyIfUnchanged(4, () -> 5, applied::incrementAndGet));
         assertEquals(0, applied.get(), "用户恢复物理后不能用旧快照重新暂停整组");
-        assertTrue(TeleportOps.applyMigrationIfUnchanged(5, () -> 5, applied::incrementAndGet));
+        assertTrue(com.klnon.sablepanel.panel.compat.sable203.LegacyPauseMigration
+                .applyIfUnchanged(5, () -> 5, applied::incrementAndGet));
         assertEquals(1, applied.get());
     }
 

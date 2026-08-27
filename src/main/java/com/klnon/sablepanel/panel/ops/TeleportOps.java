@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.panel.storage.DiskScanner;
 import com.klnon.sablepanel.panel.storage.ScanSession;
+import com.klnon.sablepanel.panel.compat.sable203.LegacyPauseMigration;
 import dev.ryanhcode.sable.api.SubLevelHelper;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
@@ -34,7 +35,6 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
@@ -750,7 +750,7 @@ public final class TeleportOps {
             if (added.isEmpty()) return 0;
             try {
                 JsonObject migration = this.kit.onMainUntilComplete(() -> {
-                    boolean applied = applyMigrationIfUnchanged(
+                    boolean applied = LegacyPauseMigration.applyIfUnchanged(
                             current.revision(), PauseService::revision, () -> {
                             this.kit.requirePreparedDependencyGroupsOnMain(selection);
                             PauseService.applyOnMain(this.kit.server, expanded, true);
@@ -1091,13 +1091,6 @@ public final class TeleportOps {
         Set<UUID> expectedDependencies = new LinkedHashSet<>(chain);
         expectedDependencies.remove(uuid);
         return expectedDependencies.equals(new LinkedHashSet<>(DiskScanner.dependencies(actual)));
-    }
-
-    static boolean applyMigrationIfUnchanged(long expectedRevision, LongSupplier currentRevision,
-                                             Runnable apply) {
-        if (currentRevision.getAsLong() != expectedRevision) return false;
-        apply.run();
-        return true;
     }
 
     static void pauseAndStop(Runnable lock, Runnable resetVelocity, Runnable rollback) {

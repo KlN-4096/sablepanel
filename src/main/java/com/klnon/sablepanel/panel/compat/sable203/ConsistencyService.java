@@ -1,10 +1,11 @@
-package com.klnon.sablepanel.panel.consistency;
+package com.klnon.sablepanel.panel.compat.sable203;
 
 import static com.klnon.sablepanel.panel.api.PanelResponse.messageOf;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.klnon.sablepanel.SablePanel;
+import com.klnon.sablepanel.panel.storage.Digests;
 import com.klnon.sablepanel.panel.storage.DiskScanner;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
@@ -26,12 +27,10 @@ import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -505,14 +504,8 @@ public final class ConsistencyService {
     }
 
     private static String issueId(DiskScanner.PointerReference reference) {
-        try {
-            String value = reference.key().id() + "@" + reference.chunkX() + "," + reference.chunkZ();
-            byte[] hash = MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash, 0, 8);
-        } catch (Exception error) {
-            throw new IllegalStateException(error);
-        }
+        String value = reference.key().id() + "@" + reference.chunkX() + "," + reference.chunkZ();
+        return Digests.sha256Hex(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)).substring(0, 16);
     }
 
     private record RuntimeState(Set<UUID> loaded, Set<UUID> forced,
