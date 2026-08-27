@@ -2,21 +2,28 @@
 /* 性能图表:窗口预设 + canvas 绘制 + 悬停交互。数据始终是 /api/stats 的内存 15 分钟窗口,
    预设只决定本地裁剪多长的尾部,切预设不重新请求 */
 onServerReset(() => { CHART.span = 300; CHART.hoverTime = null; });
+function statsEnabled(){ return !!STATS && STATS.enabled !== false; }
 function renderChartPresets(){
   const box = document.getElementById('chartPresets');
   if (!box) return;
   box.innerHTML = CHART_PRESETS.map(([seconds, label])=>
-    `<button class="${CHART.span===seconds?'on':''}" onclick="setChartPreset(${seconds})">${label}</button>`).join('');
+    `<button class="${CHART.span===seconds?'on':''}" onclick="setChartPreset(${seconds})" ${statsEnabled()?'':'disabled'}>${label}</button>`).join('');
 }
 function statsErrorLabel(){
   return staleLabel(STATS_ERROR, !!STATS);
 }
 function updateChartControls(){
   renderChartPresets();
-  const meta = T.chartMeta(chartData().times.length);
+  const enabled = statsEnabled();
+  const meta = STATS && !enabled ? T.statsDisabled : T.chartMeta(chartData().times.length);
   const status = statsErrorLabel();
   document.getElementById('chartMeta').textContent = status ? `${status} · ${meta}` : meta;
+  const toggle = document.getElementById('statsToggle');
+  toggle.textContent = enabled ? T.statsDisable : T.statsEnable;
+  toggle.disabled = !STATS;
+  toggle.classList.toggle('on', enabled);
 }
+function toggleStats(){ return STATS ? setStatsEnabled(!statsEnabled()) : undefined; }
 function setChartPreset(seconds){
   CHART.span = seconds; CHART.hoverTime = null;
   document.getElementById('chartTip').style.display='none';
@@ -33,7 +40,7 @@ function chartInk(){
 }
 /* 按 CHART.span 裁剪出要画的尾部窗口;悬停时间与绘制共用同一份裁剪结果 */
 function chartData(){
-  if (!STATS) return {times:[],series:[]};
+  if (!statsEnabled()) return {times:[],series:[]};
   const all = (STATS.t||[]).map(Number);
   let start = 0;
   if (all.length) {

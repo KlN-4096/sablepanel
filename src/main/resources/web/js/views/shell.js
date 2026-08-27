@@ -47,17 +47,18 @@ function setView(v, opts){
    顶栏和弹层在所有视图共享,所以这里不看 VIEW。 */
 function renderStats(){
   const status = statsErrorLabel();
+  const enabled = statsEnabled();
   staleMark(document.getElementById('loadPill'), status);
   document.getElementById('pillCost').textContent =
-    STATS ? (STATS.body_cost_total ?? 0).toFixed(2) : '--';
+    enabled ? (STATS.body_cost_total ?? 0).toFixed(2) : '--';
   document.getElementById('pillLoaded').textContent =
-    STATS ? Object.values(STATS.loaded || {}).reduce((a, b) => a + b, 0) : '--';
+    enabled ? Object.values(STATS.loaded || {}).reduce((a, b) => a + b, 0) : '--';
   updateChartControls();
   drawPhysChart(document.getElementById('pillSpark'), false);
   renderStatPop();
   // 悬浮提示只在鼠标移出时隐藏。切服清空 STATS 之后图是空的,上一个服的 tooltip
   // 还能挂在上面 —— 没数据就没有可提示的东西
-  if (!STATS) {
+  if (!enabled) {
     const tip = document.getElementById('chartTip');
     tip.style.display = 'none';
     tip.innerHTML = '';

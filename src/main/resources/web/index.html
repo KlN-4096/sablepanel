@@ -84,9 +84,10 @@ document.documentElement.dataset.theme=ok[t]?t
         <h4 data-i18n="chartTitle">Sable 物理求解历史</h4>
         <div class="chartTools">
           <div class="chartPresets" id="chartPresets"></div>
+          <button id="statsToggle" onclick="toggleStats()"></button>
           <span class="chartMeta" id="chartMeta"></span>
         </div>
-        <div id="physChartWrap"><canvas id="physChart"></canvas></div>
+        <div id="physChartWrap"><canvas id="physChart"></canvas><div id="statsDisabled"></div></div>
         <div class="legend" style="margin-top:10px" id="physLegend"></div>
         <div class="hint" data-i18n="chartHint">维度曲线为 Sable 物理求解耗时,不是维度总 MSPT;空维度仍有少量管线基础开销。粉色曲线为已加载物理体的 Java 逻辑合计。</div>
       </div>

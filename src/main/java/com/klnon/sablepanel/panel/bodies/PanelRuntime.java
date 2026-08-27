@@ -1,7 +1,5 @@
 package com.klnon.sablepanel.panel.bodies;
 
-import com.klnon.sablepanel.panel.metrics.BodyCostTracker;
-import com.klnon.sablepanel.panel.metrics.PhysicsTimer;
 import com.klnon.sablepanel.panel.audit.PanelObserver;
 import com.klnon.sablepanel.SablePanel;
 import com.klnon.sablepanel.panel.api.PanelApiService;
@@ -95,8 +93,7 @@ public final class PanelRuntime implements AutoCloseable {
             this.stopping = false;
             this.refreshRequested.set(true);
             this.failedForceRestore = null;
-            BodyCostTracker.ENABLED = false;
-            PhysicsTimer.ENABLED = false;
+            StatsCollector.INSTANCE.start();
             PanelObserver.ENABLED = false;
         }
         ScheduledExecutorService createdControlExecutor = null;
@@ -134,7 +131,6 @@ public final class PanelRuntime implements AutoCloseable {
             Runnable requestScan = mergedRunner(scanState, scans,
                     () -> isLifecycleCurrent(generation) && !scans.isShutdown(), scanOnce);
             PanelOps ops = PanelOps.create(server, this.bodyIndex, requestScan, config);
-            StatsCollector.INSTANCE.start();
             JobService jobs = new JobService(this::requestRuntimeRefresh);
             this.jobService = jobs;
             SablePanel.LOGGER.info("sablepanel: operation workers <= {} ({} cores)",
@@ -187,8 +183,6 @@ public final class PanelRuntime implements AutoCloseable {
                 this.scanExecutor = scans;
                 this.panelNode = panel;
                 this.heartbeatTask = createdHeartbeat;
-                BodyCostTracker.ENABLED = true;
-                PhysicsTimer.ENABLED = true;
                 PanelObserver.ENABLED = true;
             }
             scheduleLegacyPauseMigration(ops, control, scans, generation, 1);
@@ -313,8 +307,7 @@ public final class PanelRuntime implements AutoCloseable {
         synchronized (this.lifecycleLock) {
             this.stopping = true;
             this.lifecycleGeneration.incrementAndGet();
-            BodyCostTracker.ENABLED = false;
-            PhysicsTimer.ENABLED = false;
+            StatsCollector.INSTANCE.setEnabled(false);
             PanelObserver.ENABLED = false;
             heartbeat = this.heartbeatTask;
             control = this.controlExecutor;
@@ -510,8 +503,7 @@ public final class PanelRuntime implements AutoCloseable {
             boolean ownsLifecycle = this.lifecycleGeneration.compareAndSet(generation, generation + 1);
             if (ownsLifecycle) {
                 this.stopping = true;
-                BodyCostTracker.ENABLED = false;
-                PhysicsTimer.ENABLED = false;
+                StatsCollector.INSTANCE.setEnabled(false);
                 PanelObserver.ENABLED = false;
             }
             if (this.panelNode == node) this.panelNode = null;

@@ -166,8 +166,17 @@ public final class PanelApiService {
         });
         this.routes.put("/api/players", request ->
                 PanelResponse.json(200, this.ops.teleport().listPlayers(), false));
-        this.routes.put("/api/stats", request ->
-                PanelResponse.json(200, StatsCollector.INSTANCE.toJson(), true));
+        this.routes.put("/api/stats", request -> {
+            if ("POST".equals(request.method())) {
+                JsonObject body = request.jsonBody();
+                if (!body.has("enabled") || !body.get("enabled").isJsonPrimitive()
+                        || !body.getAsJsonPrimitive("enabled").isBoolean()) {
+                    throw new IllegalArgumentException("enabled 必须是布尔值");
+                }
+                StatsCollector.INSTANCE.setEnabled(body.get("enabled").getAsBoolean());
+            }
+            return PanelResponse.json(200, StatsCollector.INSTANCE.toJson(), true);
+        });
         this.routes.put("/api/rescan", request -> {
             requirePost(request);
             return enqueue("重扫磁盘", List.of(), "", () -> {

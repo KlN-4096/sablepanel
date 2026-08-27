@@ -39,6 +39,7 @@ public final class BodyCostTracker {
      * @return uuid -> ms/tick(EMA)
      */
     public static Map<UUID, Double> drain(int ticks, Set<UUID> alive) {
+        if (!ENABLED) return Map.of();
         for (var it = ACC.entrySet().iterator(); it.hasNext(); ) {
             var e = it.next();
             long ns = e.getValue().sumThenReset();
@@ -48,5 +49,10 @@ public final class BodyCostTracker {
         }
         EMA.keySet().retainAll(alive);
         return new HashMap<>(EMA);
+    }
+
+    static void reset() {
+        ACC.clear();
+        EMA.clear();
     }
 }

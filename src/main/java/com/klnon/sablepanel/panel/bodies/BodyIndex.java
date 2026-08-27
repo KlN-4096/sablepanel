@@ -238,37 +238,39 @@ public final class BodyIndex {
             }
         }
 
-        // 逐体耗时(mixin 采样):附到 runtime,并产出 Top 列表给 /api/stats
-        try {
-            Map<UUID, Double> cost = com.klnon.sablepanel.panel.metrics.BodyCostTracker.drain(ticksSinceLast, map.keySet());
-            PriorityQueue<Map.Entry<UUID, Double>> top = new PriorityQueue<>(
-                    Comparator.comparingDouble(Map.Entry::getValue));
-            JsonArray topArr = new JsonArray();
-            double totalCost = 0;
-            for (Map.Entry<UUID, Double> entry : cost.entrySet()) {
-                totalCost += entry.getValue();
-                if (top.size() < 10) top.offer(entry);
-                else if (entry.getValue() > top.element().getValue()) {
-                    top.remove();
-                    top.offer(entry);
+        // 逐体耗时(mixin 采样):关闭时不 drain、不排序,只保留结构快照刷新。
+        if (StatsCollector.INSTANCE.enabled()) {
+            try {
+                Map<UUID, Double> cost = com.klnon.sablepanel.panel.metrics.BodyCostTracker.drain(ticksSinceLast, map.keySet());
+                PriorityQueue<Map.Entry<UUID, Double>> top = new PriorityQueue<>(
+                        Comparator.comparingDouble(Map.Entry::getValue));
+                JsonArray topArr = new JsonArray();
+                double totalCost = 0;
+                for (Map.Entry<UUID, Double> entry : cost.entrySet()) {
+                    totalCost += entry.getValue();
+                    if (top.size() < 10) top.offer(entry);
+                    else if (entry.getValue() > top.element().getValue()) {
+                        top.remove();
+                        top.offer(entry);
+                    }
                 }
+                List<Map.Entry<UUID, Double>> orderedTop = new ArrayList<>(top);
+                orderedTop.sort((a, b) -> Double.compare(b.getValue(), a.getValue()));
+                for (Map.Entry<UUID, Double> en : orderedTop) {
+                    JsonObject t = new JsonObject();
+                    t.addProperty("uuid", en.getKey().toString());
+                    DiskScanner.DiskEntry de = findEntry(en.getKey());
+                    if (de != null && de.name() != null) t.addProperty("name", de.name());
+                    t.addProperty("cost", r3(en.getValue()));
+                    topArr.add(t);
+                }
+                for (Map.Entry<UUID, Double> en : cost.entrySet()) {
+                    RuntimeBody runtimeBody = map.get(en.getKey());
+                    if (runtimeBody != null) map.put(en.getKey(), runtimeBody.withCost(r3(en.getValue())));
+                }
+                StatsCollector.INSTANCE.setBodyCost(topArr, r3(totalCost));
+            } catch (Throwable ignored) {
             }
-            List<Map.Entry<UUID, Double>> orderedTop = new ArrayList<>(top);
-            orderedTop.sort((a, b) -> Double.compare(b.getValue(), a.getValue()));
-            for (Map.Entry<UUID, Double> en : orderedTop) {
-                JsonObject t = new JsonObject();
-                t.addProperty("uuid", en.getKey().toString());
-                DiskScanner.DiskEntry de = findEntry(en.getKey());
-                if (de != null && de.name() != null) t.addProperty("name", de.name());
-                t.addProperty("cost", r3(en.getValue()));
-                topArr.add(t);
-            }
-            for (Map.Entry<UUID, Double> en : cost.entrySet()) {
-                RuntimeBody runtimeBody = map.get(en.getKey());
-                if (runtimeBody != null) map.put(en.getKey(), runtimeBody.withCost(r3(en.getValue())));
-            }
-            StatsCollector.INSTANCE.setBodyCost(topArr, r3(totalCost));
-        } catch (Throwable ignored) {
         }
 
         this.runtime = Map.copyOf(map);

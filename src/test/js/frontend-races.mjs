@@ -675,6 +675,31 @@ test('LOAD-01 统计刷新失败保留旧值但必须显式标为过期', async 
     '统计弹层打开时也必须说明数据已过期');
 });
 
+test('性能分析关闭态明确显示并通过原 stats 请求代次开启', async () => {
+  let posted = null;
+  const { sandbox, state } = setup();
+  state.fetch = async (url, opts = {}) => {
+    if (!url.startsWith('/api/stats')) return jsonResponse({});
+    if (opts.method === 'POST') {
+      posted = JSON.parse(opts.body);
+      return jsonResponse({ enabled:true, t:[], phys:{}, phys_1m:{}, loaded:{},
+        body_cost_total:0, top_cost:[] });
+    }
+    return jsonResponse({ enabled:false });
+  };
+  evalIn(sandbox, 'authenticated = true; VIEW = "dash"');
+
+  await evalIn(sandbox, 'loadStats')();
+  assert.match(evalIn(sandbox, "document.getElementById('chartMeta').textContent"), /性能分析未开启/);
+  assert.match(evalIn(sandbox, "document.getElementById('dashTopCost').innerHTML"), /性能分析未开启/);
+  assert.equal(evalIn(sandbox, "document.getElementById('statsToggle').textContent"), '开启性能分析');
+
+  await evalIn(sandbox, 'toggleStats')();
+  assert.deepEqual(posted, { enabled:true });
+  assert.equal(evalIn(sandbox, 'STATS.enabled'), true);
+  assert.equal(evalIn(sandbox, "document.getElementById('statsToggle').textContent"), '关闭性能分析');
+});
+
 test('本机首次连接自动接受证书,证书变化仍要求确认', async () => {
   const { sandbox, state } = setup();
   const requests = [];

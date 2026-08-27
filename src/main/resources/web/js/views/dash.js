@@ -92,7 +92,7 @@ function renderDash(){
     return;
   }
   const s = summarize();
-  const loadedCost = STATS ? (STATS.body_cost_total ?? 0) : null;
+  const loadedCost = statsEnabled() ? (STATS.body_cost_total ?? 0) : null;
   const loadFrac = s.bodies ? s.state.loaded / s.bodies : 0;
   document.getElementById('dashTop').innerHTML = `
     <div class="stat"><div class="statLabel">${T.dashBodies}</div>
@@ -152,8 +152,11 @@ function renderDashTools(){
    点一下旧服的体,focusBody 就撞上 DATA===null */
 function renderDashStats(){
   drawPhysChart(document.getElementById('physChart'), true);   // STATS 为空时它自己 clearRect
-  const dims = STATS ? Object.keys(STATS.phys||{}) : [];
-  document.getElementById('physLegend').innerHTML = STATS
+  const enabled = statsEnabled();
+  const dims = enabled ? Object.keys(STATS.phys||{}) : [];
+  document.getElementById('statsDisabled').style.display = STATS && !enabled ? 'flex' : 'none';
+  document.getElementById('statsDisabled').textContent = T.statsDisabled;
+  document.getElementById('physLegend').innerHTML = enabled
     ? dims.map((d,i)=>`<span><i style="background:${DIM_COLORS[i%DIM_COLORS.length]}"></i>${esc(d.replace('minecraft:',''))}
         <b>${(STATS.phys_1m?.[d]??0).toFixed(2)} ms/t</b></span>`).join('')
       + `<span><i style="background:${BODY_COLOR}"></i>${T.physBodies} <b>${(STATS.body_cost_total??0).toFixed(2)} ms/t</b></span>`
@@ -161,6 +164,7 @@ function renderDashStats(){
   document.getElementById('dashTopCost').innerHTML = topCostTable(8);   // STATS 为空时是"暂无数据"
 }
 function topCostTable(n){
+  if (STATS?.enabled === false) return `<div class="empty">${T.statsDisabled}</div>`;
   const tc = (STATS && STATS.top_cost) || [];
   if (!tc.length) return `<div class="empty">${T.statNone}</div>`;
   return `<table>${tc.slice(0,n).map(x=>`<tr class="clickable" onclick="focusBody('${x.uuid}')">
@@ -172,6 +176,7 @@ function renderStatPop(){
   const status = statsErrorLabel();
   const notice = status ? `<div class="staleHint">${esc(status)}</div>` : '';
   if (!STATS) { pop.innerHTML = notice + `<div class="empty">${T.statNone}</div>`; return; }
+  if (STATS.enabled === false) { pop.innerHTML = notice + `<div class="empty">${T.statsDisabled}</div>`; return; }
   const dims = new Set([...Object.keys(STATS.phys_1m||{}), ...Object.keys(STATS.loaded||{})]);
   const stopped = new Set(STATS.phys_paused || []);
   const rows = [...dims].map(d => {

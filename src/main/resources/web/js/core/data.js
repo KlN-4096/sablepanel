@@ -296,16 +296,22 @@ function reselect(uuid){
 }
 /* 统计失败不影响主体操作,保留上一次的数值但记录错误,由 renderStats() 常驻标记过期状态。
    不能只弹 toast:轮询失败时 toast 会消失,用户会把旧服/旧时间段的数字当成实时值。 */
+function applyStats(result){
+  STATS = result;
+  STATS_ERROR = '';
+  renderStats();   // 写完状态就交给它,顶栏那几块归它管
+  if (VIEW === 'dash') renderDash();
+}
+function statsLoadFailed(message){
+  STATS_ERROR = message;
+  renderStats();
+}
 function loadStats(){
-  return load('stats', () => api('/api/stats'), result => {
-    STATS = result;
-    STATS_ERROR = '';
-    renderStats();   // 写完状态就交给它,顶栏那几块归它管
-    if (VIEW === 'dash') renderDash();
-  }, message => {
-    STATS_ERROR = message;
-    renderStats();
-  });
+  return load('stats', () => api('/api/stats'), applyStats, statsLoadFailed);
+}
+function setStatsEnabled(enabled){
+  return load('stats', () => api('/api/stats', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled})}), applyStats, statsLoadFailed);
 }
 /* 在线玩家列表:15s 节流,失败保留旧列表并显式标记,不能把网络错误伪装成"没有在线玩家" */
 function loadPlayers(force){

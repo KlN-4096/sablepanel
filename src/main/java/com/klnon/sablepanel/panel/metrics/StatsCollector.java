@@ -43,6 +43,7 @@ public final class StatsCollector {
     }
 
     private volatile Slot current = new Slot(0);
+    private volatile boolean enabled;
     /** 只由主线程追加、start() 清空;读取方短锁拷贝 */
     private final ArrayDeque<Sec> ring = new ArrayDeque<>();
     /** 主线程周期采样:dim -> 加载体数 */
@@ -52,29 +53,53 @@ public final class StatsCollector {
     private volatile double bodyCostTotal;
 
     public void start() {
+        setEnabled(false);
+    }
+
+    public boolean enabled() {
+        return this.enabled;
+    }
+
+    public synchronized void setEnabled(boolean enabled) {
+        this.enabled = false;
+        BodyCostTracker.ENABLED = false;
+        PhysicsTimer.ENABLED = false;
+        BodyCostTracker.reset();
+        PhysicsTimer.reset();
         synchronized (this.ring) {
             this.ring.clear();
         }
-        this.current = new Slot(System.currentTimeMillis() / 1000);
+        this.current = new Slot(enabled ? System.currentTimeMillis() / 1000 : 0);
+        this.loadedPerDim = Map.of();
+        this.topCost = new JsonArray();
+        this.bodyCostTotal = 0;
+        if (!enabled) return;
+        this.enabled = true;
+        BodyCostTracker.ENABLED = true;
+        PhysicsTimer.ENABLED = true;
     }
 
     /** 仅主线程调用;跨秒换槽也只发生在这里 */
     public void tick() {
+        if (!this.enabled) return;
         rollIfNeeded().ticks.increment();
     }
 
     /** 物理线程调用:只写当前槽,不参与换槽 */
     public void physics(String dim, long durationNs) {
+        if (!this.enabled) return;
         DimAdder acc = this.current.phys.computeIfAbsent(dim, ignored -> new DimAdder());
         acc.sumNs.add(durationNs);
         acc.steps.increment();
     }
 
     public void setLoadedPerDim(Map<String, Integer> counts) {
+        if (!this.enabled) return;
         this.loadedPerDim = counts;
     }
 
     public void setBodyCost(JsonArray top, double total) {
+        if (!this.enabled) return;
         this.topCost = top;
         this.bodyCostTotal = total;
     }
@@ -100,6 +125,11 @@ public final class StatsCollector {
 
     /** 完整内存窗口的序列 + 汇总(phys_1m 为 60s 均值);展示区间由前端裁剪 */
     public JsonObject toJson() {
+        if (!this.enabled) {
+            JsonObject out = new JsonObject();
+            out.addProperty("enabled", false);
+            return out;
+        }
         List<Sec> secs;
         synchronized (this.ring) {
             secs = List.copyOf(this.ring);
@@ -132,6 +162,7 @@ public final class StatsCollector {
             }
         }
         JsonObject out = new JsonObject();
+        out.addProperty("enabled", true);
         out.add("t", t);
         out.add("body_logic", bodyLogic);
         JsonObject physObj = new JsonObject();
