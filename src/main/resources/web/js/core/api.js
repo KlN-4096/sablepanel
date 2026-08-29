@@ -20,14 +20,14 @@ async function api(path, opts) {
   const r = await fetch(path + srv, options);
   if (!r.ok) {
     // 响应体不是带 error 的 JSON(网关层 5xx、代理故障)时,别让 toast 退化成一个裸数字
-    const e = (await r.json().catch(()=>({}))).error || (path.split('?')[0] + ' 请求失败 (' + r.status + ')');
+    const e = (await r.json().catch(()=>({}))).error || T.requestFailed(path.split('?')[0], r.status);
     // 重新登录、改口令、切服之后,旧请求晚到的 401 说的是上一套凭据。拿它注销会把刚登录成功的
     // 人直接踢回登录页,而且顺手清掉 token 和 JOB_WATCH —— 后台作业还在跑,用户却以为没执行。
     // fresh() 还挡住并发的第二个 401:第一个已经 showLogin(authSeq++),第二个不再重复踢
     if (r.status === 401 && sent === token && ctx.fresh()) {
       showLogin(T.loginChanged);
     }
-    throw new Error(e);
+    throw new Error(serverText(e));
   }
   return r.json();
 }
@@ -138,7 +138,7 @@ async function connectGateway(){
     });
     result = await response.json().catch(()=>({}));
   }
-  if (!response.ok) throw new Error(result.error || response.status);
+  if (!response.ok) throw new Error(serverText(result.error || response.status));
   gatewayConnected = true;
   localStorage.setItem('spAddress', address);
   document.getElementById('gatewayDisconnect').style.display = 'inline-flex';

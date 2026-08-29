@@ -134,11 +134,14 @@ DICT.zh = {
   tabVoid:'虚空中', tabSky:'极高空',
   voidTag:y=>`整个包围盒低于 y=${y},玩家无法到达(阈值可在配置文件调)`, voidBadge:'虚空',
   skyTag:y=>`整个包围盒高于 y=${y},玩家无法到达(阈值可在配置文件调)`, skyBadge:'极高空',
-  /* 作业:后端返回的 op 名是服务端写的中文,日志是服务端记录,不随界面语言切换 */
+  /* 作业与服务端文本的显示翻译见 i18n/server-text.js */
   jobQueued:'排队中', jobDone:'完成', jobFailed:'失败', jobPartial:'部分成功',
   jobsRunning:'进行中', jobsEmpty:'暂无记录', jobsCurrent:'本次运行',
   jobsWorkers:n=>`并发上限 ${n}`,
   jobTrail:'过程', jobWarn:'告警',
+  chart5m:'5 分钟', chart15m:'15 分钟',
+  requestFailed:(path,status)=>`${path} 请求失败 (${status})`, invalidSnapshot:'响应不是一份完整的快照',
+  serverTextUnknown:'服务端返回了无法识别的消息',
   recTag:'推荐删除',
   rEmpty:'空体(0 块)', rFragment:'微型碎片(<10 块)', rDebris:'小型残渣',
   rOrphan:'全组无加载指针', rDup:'存在多余副本条目', rClone:'疑似克隆重复',
@@ -373,11 +376,14 @@ DICT.en = {
   tabVoid:'In void', tabSky:'Sky-high',
   voidTag:y=>`Whole bounding box below y=${y}, unreachable by players (threshold configurable)`, voidBadge:'Void',
   skyTag:y=>`Whole bounding box above y=${y}, unreachable by players (threshold configurable)`, skyBadge:'Sky',
-  /* Job op names and logs are recorded server-side in Chinese and do not switch with the UI language */
+  /* Job and server-text display translation lives in i18n/server-text.js */
   jobQueued:'Queued', jobDone:'Done', jobFailed:'Failed', jobPartial:'Partial',
   jobsRunning:'Running', jobsEmpty:'No records', jobsCurrent:'This run',
   jobsWorkers:n=>`Concurrency limit ${n}`,
   jobTrail:'Trail', jobWarn:'Warnings',
+  chart5m:'5 min', chart15m:'15 min',
+  requestFailed:(path,status)=>`${path} request failed (${status})`, invalidSnapshot:'Response is not a complete snapshot',
+  serverTextUnknown:'The server returned an unrecognized message',
   recTag:'Cleanup candidate',
   rEmpty:'Empty body (0 blocks)', rFragment:'Tiny fragment (<10 blocks)', rDebris:'Small scrap',
   rOrphan:'Whole group has no loading pointer', rDup:'Redundant copy entries', rClone:'Suspected clone duplicate',
@@ -514,7 +520,8 @@ const MANUAL = {
     ]},
     {k:'maintenance',label:'面板维护',sections:[
       {h:'口令与监听',body:'<p>访问口令作为页面密码保存在浏览器当前设备中;维护卡片修改后会同步到当前集群。网页默认使用 <code>webPort=25580</code>,TLS 数据接口默认使用 <code>apiPort=25581</code>;配置位于 <code>config/sablepanel/sablepanel-server.json</code>。</p>'},
-      {h:'集群',body:'<p>同机且使用同一 <code>apiPort</code> 的实例组成面板集群。先占用数据端口的实例成为 HOST 并按 <code>webPort</code> 托管页面,其它实例通过回环地址注册为 PEER 并采纳 HOST 口令;顶部服务器选择器只切换查看目标,不迁移物理体数据。</p>'}
+      {h:'集群',body:'<p>同机且使用同一 <code>apiPort</code> 的实例组成面板集群。先占用数据端口的实例成为 HOST 并按 <code>webPort</code> 托管页面,其它实例通过回环地址注册为 PEER 并采纳 HOST 口令;顶部服务器选择器只切换查看目标,不迁移物理体数据。</p>'},
+      {h:'语言',body:'<p>界面语言切换会重载页面。方块名、作业操作、进度、说明、告警和历史日志会按当前语言显示;服务端保存的原始日志不会被改写。</p>'}
     ]}
   ],
   en: [
@@ -543,7 +550,7 @@ const MANUAL = {
     {k:'maintenance',label:'Panel maintenance',sections:[
       {h:'Token and ports',body:'<p>The access token is stored in this browser as the page password; changing it in the Maintenance card syncs the current cluster. The web page defaults to <code>webPort=25580</code>, the TLS data API to <code>apiPort=25581</code>; config lives in <code>config/sablepanel/sablepanel-server.json</code>.</p>'},
       {h:'Cluster',body:'<p>Instances on the same machine sharing one <code>apiPort</code> form a panel cluster. The first to claim the data port becomes HOST and serves the page on <code>webPort</code>; the rest register via loopback as PEER and adopt the HOST token. The server picker at the top only switches the viewing target — no body data migrates.</p>'},
-      {h:'Language',body:'<p>The UI language toggle reloads the page. Job operation names, job logs and warnings are recorded server-side in Chinese at execution time and do not switch with the UI language.</p>'}
+      {h:'Language',body:'<p>The UI language toggle reloads the page. Block names, job operations, progress, messages, warnings and historical logs are translated for display; stored server logs remain unchanged.</p>'}
     ]}
   ]
 };

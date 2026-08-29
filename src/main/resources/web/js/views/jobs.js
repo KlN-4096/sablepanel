@@ -52,7 +52,7 @@ function jobFailed(job){
   return job.state !== 'running' && job.state !== 'queued' && jobOutcome(job) !== 'ok';
 }
 function jobStateTag(job){
-  if (job.state === 'running') return `<span class="tag busy"><i class="spin"></i>${esc(job.phase || T.jobsRunning)}</span>`;
+  if (job.state === 'running') return `<span class="tag busy"><i class="spin"></i>${esc(job.phase ? serverText(job.phase) : T.jobsRunning)}</span>`;
   if (job.state === 'queued') return `<span class="tag">${T.jobQueued}</span>`;
   const outcome = jobOutcome(job);
   if (outcome === 'fail') return `<span class="tag bad">${T.jobFailed}</span>`;
@@ -63,7 +63,7 @@ function jobCost(job){
   if (job.ms === undefined) return '';
   return job.ms < 1000 ? job.ms + ' ms' : (job.ms / 1000).toFixed(1) + ' s';
 }
-/* 服务端 op 本就是面向用户的中文(含历史日志文件),直出即可 */
+/* 服务端保留原始日志；显示时由 i18n/server-text.js 翻译，不改业务判断使用的原值。 */
 
 function renderJobs(){
   if (VIEW !== 'jobs') return;
@@ -101,19 +101,19 @@ function renderJobs(){
     const open = jobsExpanded.has(job.seq);
     const detail = !open ? '' : `<div class="jobDetail">
         ${(job.trail || []).length ? `<div><span class="muted">${T.jobTrail}</span> ${
-          job.trail.map(step => esc(step)).join(' → ')}</div>` : ''}
+          job.trail.map(step => esc(serverText(step))).join(' → ')}</div>` : ''}
         ${(job.targets || []).length ? `<div class="mono muted">${
           job.targets.map(u => esc(u)).join('<br>')}</div>` : ''}
         ${(job.warnings || []).length ? `<div class="jobWarn"><span class="muted">${T.jobWarn}</span> ${
-          job.warnings.map(w => esc(String(w))).join('; ')}</div>` : ''}
+          job.warnings.map(w => esc(serverText(w))).join('; ')}</div>` : ''}
       </div>`;
     return `<div class="jobRow ${jobFailed(job) ? 'is-bad' : ''}" onclick="toggleJobRow(${job.seq})">
         <span class="jobTime mono">${when}</span>
-        <span class="jobOp">${esc(job.op||'')}</span>
-        <span class="jobTarget" title="${esc(job.name || '')}">${esc(job.name || '')}</span>
+        <span class="jobOp">${esc(serverText(job.op))}</span>
+        <span class="jobTarget" title="${esc(jobTargetLabel(job.name, (job.targets || []).length))}">${esc(jobTargetLabel(job.name, (job.targets || []).length))}</span>
         ${jobStateTag(job)}
         <span class="jobMs mono muted">${jobCost(job)}</span>
-        <span class="jobMsg muted" title="${esc(job.message || '')}">${esc(job.message || '')}</span>
+        <span class="jobMsg muted" title="${esc(serverText(job.message))}">${esc(serverText(job.message))}</span>
       </div>${detail}`;
   }).join('');
 }

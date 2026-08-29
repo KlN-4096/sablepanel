@@ -9,7 +9,7 @@ import java.util.List;
 
 /** Complete, immutable structure data shared by protocol and model stages. */
 public final class PreviewStructure {
-    public record PaletteEntry(String id, String state, String zh,
+    public record PaletteEntry(String id, String state, String en, String zh,
                                 int color, int lightEmission, long count) {
     }
 
@@ -141,6 +141,7 @@ public final class PreviewStructure {
             JsonObject state = new JsonObject();
             state.addProperty("id", entry.id());
             state.addProperty("state", entry.state());
+            state.addProperty("en", entry.en());
             state.addProperty("zh", entry.zh());
             state.addProperty("color", entry.color());
             state.addProperty("light_emission", entry.lightEmission());

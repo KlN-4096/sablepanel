@@ -2580,6 +2580,58 @@ test('英文词典与中文完全奇偶:键集、类型、函数元数、MANUAL 
   assert.equal(report.sample, 'Force-load', '英文用 MC 原生 force-load 词汇');
 });
 
+test('英文方块列表、作业日志和图表预设不泄漏中文', () => {
+  const { sandbox } = setup('en');
+  evalIn(sandbox, `
+    DATA = {groups:[], block_palette:[{id:'minecraft:stone',zh:'石头',en:'Stone'}]};
+    refreshBlockList();
+    STATS = {enabled:true,t:[],phys:{},body_logic:[]};
+    renderChartPresets();
+    VIEW = 'jobs';
+    JOBS = {files:[],workers:2,running:[{seq:7,state:'running',op:'常驻加载',phase:'定位磁盘条目',
+      name:'3 个物理组',started_at:1,message:'依赖成员存在多份副本，无法选择常驻版本: abc',
+      trail:['确认当前运行组'],warnings:['依赖组根成员不存在: deadbeef']}],log:[]};
+    jobsExpanded = new Set([7]);
+    renderJobs();
+    placeTip = () => {};
+    MESH_DATA = {voxels:new Uint16Array([0,0,0,0]),metadata:{},
+      palette:[{id:'minecraft:stone',state:'minecraft:stone',zh:'石头',en:'Stone'}]};
+    showPreviewHover(0, null, '');
+    updatePreviewStatus('failed', 'SPM2: 头部截断');
+    __multiTarget = jobTargetLabel('Stone Ship 等 3 个', 3);
+    __customTarget = jobTargetLabel('测试船 等 3 个', 1);
+    __conflict = serverText('该物理体正在处理中(常驻加载),请等它结束');
+    __knownErrors = [
+      serverText('回滚前残留清理失败: abc'),
+      serverText('依赖不完整的隔离副本不能直接恢复'),
+      serverText('旧暂停状态迁移期间持续发生变化')
+    ].join(' ');
+    __i18nVisible = [
+      document.getElementById('blockList').innerHTML,
+      document.getElementById('chartPresets').innerHTML,
+      document.getElementById('jobsList').innerHTML,
+      document.getElementById('hoverTip').innerHTML,
+      document.getElementById('pvInfo').textContent,
+      __multiTarget, __conflict, __knownErrors,
+      serverText('全新的未知故障: 123e4567-e89b-12d3-a456-426614174000')
+    ].join(' ');
+  `);
+  const visible = evalIn(sandbox, '__i18nVisible');
+  assert.ok(visible.includes('Stone (minecraft:stone)'));
+  assert.ok(visible.includes('5 min') && visible.includes('15 min'));
+  assert.ok(visible.includes('Force-load') && visible.includes('Locate disk entries'));
+  assert.ok(visible.includes('3 physics groups') && visible.includes('Verify current runtime group'));
+  assert.ok(visible.includes('multiple copies') && visible.includes('root members do not exist'));
+  assert.ok(visible.includes('Stone Ship and 3 total'));
+  assert.ok(visible.includes('already being processed (Force-load)'));
+  assert.ok(visible.includes('Failed to clean remaining data before rollback'));
+  assert.ok(visible.includes('cannot be restored directly') && visible.includes('kept changing during migration'));
+  assert.ok(visible.includes('Stone') && visible.includes('SPM2: header is truncated'));
+  assert.equal(evalIn(sandbox, '__customTarget'), '测试船 等 3 个', '单体自定义名称即使形似生成后缀也必须原样保留');
+  assert.ok(visible.includes('123e4567-e89b-12d3-a456-426614174000'), '未知消息仍保留诊断标识');
+  assert.ok(!/[\u3400-\u9fff]/u.test(visible), '英文显示路径不能残留中文');
+});
+
 test('英文预览状态与主题弹层不泄漏中文', () => {
   const { sandbox } = setup('en');
   evalIn(sandbox, `
@@ -2591,7 +2643,7 @@ test('英文预览状态与主题弹层不泄漏中文', () => {
       ? [langButton, themeButton, previewProgress] : [];
     applyStaticI18n();
     MESH_DATA = {shell:12,total:20};
-    updatePreviewStatus('unsupported', '需要 WebGL2');
+    updatePreviewStatus('unsupported', 'webgl2_required');
     __unsupported = document.getElementById('pvInfo').textContent;
     updatePreviewStatus('lod', {count:3});
     __lod = document.getElementById('pvInfo').textContent;

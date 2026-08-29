@@ -53,7 +53,7 @@
         ? context instanceof WebGL2RenderingContext : context && context.constructor && context.constructor.name === 'WebGL2RenderingContext';
       if (!webgl2) {
         this.renderer.dispose(); this.renderer.domElement.remove(); this.renderer = null; this.unsupported = true;
-        this.options.onStatus && this.options.onStatus('unsupported', '需要 WebGL2');
+        this.options.onStatus && this.options.onStatus('unsupported', 'webgl2_required');
         return this;
       }
       const maxTextureSize = Number(context.getParameter(context.MAX_TEXTURE_SIZE)) || 0;
@@ -84,7 +84,7 @@
     load(structure, resource) {
       this.init();
       if (this.unsupported || !this.renderer) {
-        this.options.onStatus && this.options.onStatus('unsupported', '需要 WebGL2');
+        this.options.onStatus && this.options.onStatus('unsupported', 'webgl2_required');
         return;
       }
       this.disposeObjects();

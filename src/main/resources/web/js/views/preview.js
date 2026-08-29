@@ -81,9 +81,12 @@ function updatePreviewStatus(status, detail) {
   else if (status === 'lod') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ` · ${T.pvLod((detail && detail.count) || 0)}`;
   else if (status === 'resource_failed') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ` · ${T.pvResourceFallback}`;
   else if (status === 'resource_unavailable') info.textContent = (MESH_DATA ? T.pvStat(MESH_DATA.shell, MESH_DATA.total) : '') + ` · ${T.pvBasicOnly}`;
-  else if (status === 'unsupported') info.textContent = T.pvUnsupported(detail === '需要 WebGL2' ? T.pvNeedWebgl2 : detail);
+  else if (status === 'unsupported') info.textContent = T.pvUnsupported(detail === 'webgl2_required' ? T.pvNeedWebgl2 : serverText(detail));
   else if (status === 'too_large') info.textContent = T.pvTooLargeStats;
-  else if (status === 'failed') info.textContent = T.pvFail + T.pvError(detail);
+  else if (status === 'failed') {
+    const known = T.pvError(detail);
+    info.textContent = T.pvFail + (known === detail ? serverText(detail) : known);
+  }
 }
 
 function showPreviewHover(index, pointer, reason) {
@@ -97,12 +100,12 @@ function showPreviewHover(index, pointer, reason) {
   const pz = (origin.plot_z || 0) + (origin.origin_z || 0) + z;
   const state = palette.state || palette.id || '?';
   const simplified = reason ? T.pvSimplified(reason) : '';
-  tip.innerHTML = `<b>${esc((LANG === 'zh' && palette.zh) || palette.id || '?')}</b><div class="bid">${esc(state)} · (${x}, ${y}, ${z}) · plot (${px}, ${py}, ${pz})${simplified}</div>`;
+  tip.innerHTML = `<b>${esc(blockLabel(palette))}</b><div class="bid">${esc(state)} · (${x}, ${y}, ${z}) · plot (${px}, ${py}, ${pz})${simplified}</div>`;
   tip.style.display = 'block';
   placeTip(tip, pointer && pointer.cx || 0, pointer && pointer.cy || 0);
   if (fsMode) {
     const hover = document.getElementById('fsHover');
-    if (hover) hover.innerHTML = `<b style="color:var(--fg)">${esc((LANG === 'zh' && palette.zh) || palette.id || '?')}</b> <span class="mono" style="font-size:10.5px">${esc(state)}</span> · (${x}, ${y}, ${z}) · plot (${px}, ${py}, ${pz})${simplified}`;
+    if (hover) hover.innerHTML = `<b style="color:var(--fg)">${esc(blockLabel(palette))}</b> <span class="mono" style="font-size:10.5px">${esc(state)}</span> · (${x}, ${y}, ${z}) · plot (${px}, ${py}, ${pz})${simplified}`;
   }
 }
 
@@ -181,7 +184,7 @@ async function loadMeshAt(endpoint, uuid, source, isCurrent) {
       ? {manifestUrl: resourceMeta.manifest, token: typeof token !== 'undefined' ? token : '',
           server: typeof CURSRV !== 'undefined' ? CURSRV : '', fingerprint:resourceMeta.fingerprint || ''} : null;
     if (previewRuntime) previewRuntime.load(parsed, resourceRequest);
-    if (resourceMeta && resourceMeta.status === 'failed') updatePreviewStatus('resource_failed', '资源准备失败');
+    if (resourceMeta && resourceMeta.status === 'failed') updatePreviewStatus('resource_failed', 'resource_failed');
     if (typeof renderComposition === 'function') renderComposition();
   } catch (error) {
     if (error && error.name === 'AbortError') return;

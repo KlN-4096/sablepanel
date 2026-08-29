@@ -313,6 +313,7 @@ public final class StateStructureExtractor {
     private static final class MutablePalette {
         private final String id;
         private final String stateKey;
+        private final String en;
         private final String zh;
         private final int color;
         private final int lightEmission;
@@ -321,14 +322,16 @@ public final class StateStructureExtractor {
         private MutablePalette(BlockState state) {
             this.id = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
             this.stateKey = stateKey(state, this.id);
-            this.zh = BlockNames.of(this.id)[1];
+            String[] names = BlockNames.of(this.id);
+            this.en = names[0];
+            this.zh = names[1];
             int mapColor = state.getBlock().defaultMapColor().col;
             this.color = mapColor == 0 ? 0x7F7F7F : mapColor;
             this.lightEmission = state.getLightEmission();
         }
 
         private PreviewStructure.PaletteEntry freeze() {
-            return new PreviewStructure.PaletteEntry(id, stateKey, zh, color, lightEmission, count);
+            return new PreviewStructure.PaletteEntry(id, stateKey, en, zh, color, lightEmission, count);
         }
     }
 

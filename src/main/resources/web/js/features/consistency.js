@@ -57,12 +57,12 @@ function renderConsistency(){
   if (repaired) {
     const failed=repaired.failed||[];
     content+=`<div class="copyWarning"><b>${T.consistencyRepairResult(repaired.ok||0,repaired.total||0)}</b>`
-      +(repaired.warning?`<br>${esc(repaired.warning)}`:'')
+      +(repaired.warning?`<br>${esc(serverText(repaired.warning))}`:'')
       +(repaired.backup?`<br>${T.consistencyBackup}: <span class="mono">${esc(repaired.backup)}</span>`:'')
-      +(failed.length?`<br>${T.consistencyRepairFailed(repaired.failed_count??failed.length)}<div class="mono">${failed.slice(0,100).map(esc).join('<br>')}</div>`:'')
+      +(failed.length?`<br>${T.consistencyRepairFailed(repaired.failed_count??failed.length)}<div class="mono">${failed.slice(0,100).map(serverText).map(esc).join('<br>')}</div>`:'')
       +`</div>`;
   }
-  if (report.error) content+=`<div class="copyWarning">${esc(report.error)}</div>`;
+  if (report.error) content+=`<div class="copyWarning">${esc(serverText(report.error))}</div>`;
   else if (!(report.issue_count||0)) content+=`<div class="empty">${T.consistencyHealthy}</div>`;
   else content+=section(T.consistencyPointers,'cPointer',pointers,item=>
       `<span class="mono">${esc(item.target)}<br><small>${esc(item.dim)} · chunk ${item.chunk_x}, ${item.chunk_z}</small></span><small>×${item.count||1}</small>`,pointerCount)

@@ -11,7 +11,7 @@ let VIEW = localStorage.getItem('spView') || 'dash';
 let TAB = 'all';
 let R_TAB = 'latest';
 let refreshTimer = 60;
-const CHART_PRESETS = [[300,'5 分钟'],[900,'15 分钟']];
+const CHART_PRESETS = [[300,T.chart5m],[900,T.chart15m]];
 let CHART = {span:300,hoverTime:null};
 let COPY_SCAN = null, COPY_UUID = null, COPY_VERSION = null, MANUAL_TAB = 'states';
 

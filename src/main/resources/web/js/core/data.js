@@ -89,7 +89,7 @@ async function loadBodies() {
       // "DATA 非空 = groups 和 block_palette 都在";从前是先赋值后使用,网关或版本不匹配
       // 返回一个 200 的别的东西时,DATA 会留下半份,连"加载失败"那块提示自己都会再崩一次
       if (!Array.isArray(result.groups) || !Array.isArray(result.block_palette)) {
-        throw new Error('响应不是一份完整的快照');
+        throw new Error(T.invalidSnapshot);
       }
       DATA = result;
       BODIES_ERROR = '';
@@ -231,9 +231,9 @@ function renderJobPill(){
   if (!ACTIVE_JOBS.length) { host.style.display = 'none'; return; }
   const job = ACTIVE_JOBS[0];
   const secs = Math.max(0, Math.round((Date.now() - job.since) / 1000));
-  const label = job.state === 'queued' ? T.jobQueued : (job.phase || '');
+  const label = job.state === 'queued' ? T.jobQueued : serverText(job.phase || '');
   host.style.display = 'flex';
-  host.innerHTML = `<i class="spin"></i><b>${esc(job.op)}</b>${job.name ? ' · ' + esc(job.name) : ''}`
+  host.innerHTML = `<i class="spin"></i><b>${esc(serverText(job.op))}</b>${job.name ? ' · ' + esc(jobTargetLabel(job.name, (job.targets || []).length)) : ''}`
     + `<span class="muted">${esc(label)} ${secs}s</span>`
     + (ACTIVE_JOBS.length > 1 ? `<span class="tag">+${ACTIVE_JOBS.length - 1}</span>` : '');
 }
@@ -271,8 +271,8 @@ function reapFinishedJobs(log){
       if (JOB_RESULTS.size > 64) JOB_RESULTS.delete(JOB_RESULTS.keys().next().value);
     }
     const label = outcome === 'fail' ? T.jobFailed : outcome === 'partial' ? T.jobPartial : T.jobDone;
-    const parts = [job.op, job.name, label, job.message];
-    if (job.op === '回收站彻底删除' && (job.warnings || []).length) parts.push(job.warnings[0]);
+    const parts = [serverText(job.op), jobTargetLabel(job.name, (job.targets || []).length), label, serverText(job.message)];
+    if (job.op === '回收站彻底删除' && (job.warnings || []).length) parts.push(serverText(job.warnings[0]));
     toast(parts.filter(Boolean).join(' · '), outcome === 'ok' ? 'ok' : 'bad');
     // 副本弹层已开着时不重开:openDedupe 会重置扫描与用户已手选的版本
     const dedupeClosed = () => { const el=document.getElementById('copyBack'); return !el || !el.open; };

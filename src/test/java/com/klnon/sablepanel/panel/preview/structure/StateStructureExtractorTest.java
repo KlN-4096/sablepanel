@@ -1,13 +1,32 @@
 package com.klnon.sablepanel.panel.preview.structure;
 
+import com.google.gson.JsonParser;
+import com.klnon.sablepanel.panel.preview.protocol.Spm2Record;
 import net.minecraft.nbt.CompoundTag;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 class StateStructureExtractorTest {
+    @Test
+    void previewMetadataCarriesBothBlockNames() {
+        PreviewStructure structure = new PreviewStructure(
+                List.of(new PreviewStructure.PaletteEntry(
+                        "minecraft:stone", "minecraft:stone", "Stone", "石头", 0x777777, 0, 1)),
+                List.of(new Spm2Record(0, 0, 0, 0)), new byte[]{1},
+                0, 0, 0, 0, 0, "minecraft:plains", List.of());
+
+        var state = JsonParser.parseString(structure.toSpm2(null).metadata())
+                .getAsJsonObject().getAsJsonArray("states").get(0).getAsJsonObject();
+
+        assertEquals("Stone", state.get("en").getAsString());
+        assertEquals("石头", state.get("zh").getAsString());
+    }
+
     @Test
     void emptyPlotProducesEmptyCompleteStructure() throws Exception {
         CompoundTag entry = new CompoundTag();

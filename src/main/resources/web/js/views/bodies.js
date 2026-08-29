@@ -6,7 +6,7 @@ let blockFilterIdx = -1;
 function refreshBlockList(){
   if (!DATA) return;
   document.getElementById('blockList').innerHTML = DATA.block_palette.map(p =>
-    `<option value="${esc(p.zh)} (${esc(p.id)})"></option>`).join('');
+    `<option value="${esc(blockLabel(p))} (${esc(p.id)})"></option>`).join('');
   onBlockFilter(true);
 }
 function onBlockFilter(skipRender){
@@ -21,7 +21,7 @@ function onBlockFilter(skipRender){
       p.id.includes(needle) || p.zh.toLowerCase().includes(needle) || p.en.toLowerCase().includes(needle));
     blockFilterIdx = hit;
     const p = hit >= 0 ? DATA.block_palette[hit] : null;
-    chip.innerHTML = p ? `<span class="tag acc">${esc(p.zh)} · ${esc(p.id)}</span>` : '<span class="tag bad">?</span>';
+    chip.innerHTML = p ? `<span class="tag acc">${esc(blockLabel(p))} · ${esc(p.id)}</span>` : '<span class="tag bad">?</span>';
     chip.style.display = 'block';
   } else chip.style.display = 'none';
   if (!skipRender) render();
@@ -242,16 +242,16 @@ function busyTag(uuid){
   const job = BUSY.get(uuid);
   if (!job) return '';
   const secs = Math.max(0, Math.round((Date.now() - job.since) / 1000));
-  const label = job.state === 'queued' ? T.jobQueued : (job.phase || job.op);
-  return `<span class="tag busy" data-busy="${uuid}" title="${esc(job.op)}"><i class="spin"></i>${esc(label)} ${secs}s</span>`;
+  const label = job.state === 'queued' ? T.jobQueued : serverText(job.phase || job.op);
+  return `<span class="tag busy" data-busy="${uuid}" title="${esc(serverText(job.op))}"><i class="spin"></i>${esc(label)} ${secs}s</span>`;
 }
 function refreshBusyLabels(){
   for (const tag of document.querySelectorAll('[data-busy]')) {
     const job = BUSY.get(tag.dataset.busy);
     if (!job) continue;
     const secs = Math.max(0, Math.round((Date.now() - job.since) / 1000));
-    const label = job.state === 'queued' ? T.jobQueued : (job.phase || job.op);
-    tag.title = job.op;
+    const label = job.state === 'queued' ? T.jobQueued : serverText(job.phase || job.op);
+    tag.title = serverText(job.op);
     tag.innerHTML = `<i class="spin"></i>${esc(label)} ${secs}s`;
   }
 }
@@ -926,7 +926,7 @@ function renderComposition(){
     const total = pal.reduce((s,p)=>s+p.count,0) || 1;
     const row = p => `<div class="compRow">
         <span class="chip" style="background:#${(p.color>>>0).toString(16).padStart(6,'0')}"></span>
-        <span class="cname" title="${esc(p.id)}">${esc(p.zh)}</span>
+        <span class="cname" title="${esc(p.id)}">${esc(blockLabel(p))}</span>
         <span class="cnum">${fmt(p.count)} · ${(p.count/total*100).toFixed(1)}%</span>
       </div>`;
     const rest = pal.slice(COMP_PAGE);
