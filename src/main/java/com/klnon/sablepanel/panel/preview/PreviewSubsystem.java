@@ -87,7 +87,7 @@ public final class PreviewSubsystem implements AutoCloseable {
      * 十倍量级且一次性全部驻留,一个几万方块的体就能在提取线程上顶出几十 MB 的临时字符串 ——
      * 后台线程的 young-gen GC 一样是 stop-the-world,游戏 tick 跟着停。
      */
-    private static String tagHash(CompoundTag tag) {
+    static String tagHash(CompoundTag tag) {
         try {
             MessageDigest digest = Digests.sha256();
             NbtIo.write(tag, new DataOutputStream(

@@ -15,7 +15,7 @@ import com.klnon.sablepanel.panel.storage.DiskScanner;
 class BodyIndexRuntimePositionTest {
 
     @Test
-    void runtimePositionUpdateIsImmediatelyVisibleInCache() {
+    void runtimeOnlyBodyIsImmediatelyVisibleAndCanRequestAThumbnail() {
         BodyIndex index = new BodyIndex();
         UUID uuid = UUID.randomUUID();
 
@@ -28,6 +28,7 @@ class BodyIndexRuntimePositionTest {
         assertEquals(12.25, runtime.get("x").getAsDouble());
         assertEquals(64.0, runtime.get("y").getAsDouble());
         assertEquals(-7.5, runtime.get("z").getAsDouble());
+        assertEquals("f2-runtime|0x0x0", index.thumbnailSignature(uuid));
     }
 
     @Test

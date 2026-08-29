@@ -477,7 +477,7 @@ public final class PanelApiService {
      * <ul>
      *   <li>GET 命中给 PNG;内容已过期时附 {@code X-Thumb-Stale: <新签名>},前端照常显示旧图
      *       并就地重渲替换 —— 不 404,飞船天天动,失配即闪占位太难看;</li>
-     *   <li>GET 未命中 404 thumb_pending,体在盘上就附当前签名作为「请你渲」的邀请函;</li>
+     *   <li>GET 未命中 404 thumb_pending,体在盘上或运行时就附当前签名作为「请你渲」的邀请函;</li>
      *   <li>POST 收前端渲好的图,签名对得上才入库(渲染期间体已变化的陈旧图直接拒)。</li>
      * </ul>
      * 旧版本集群节点没有这条路由,同样落在 404,前端占位兜底,协议不破。PNG 自带压缩,不再走 gzip。

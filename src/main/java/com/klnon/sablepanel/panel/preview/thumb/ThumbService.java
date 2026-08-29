@@ -44,7 +44,7 @@ public final class ThumbService {
         return this.store.sig(uuid);
     }
 
-    /** 该体此刻应有的内容签名;体不在盘上返回 null(回收站里的死体渲不了也不用渲) */
+    /** 该体此刻应有的内容签名;既不在盘上也不在运行时返回 null */
     public String currentSig(UUID uuid) {
         return this.signatures.apply(uuid);
     }

@@ -96,20 +96,24 @@ public final class BodyIndex {
     /** 推荐删除的保护阈值,来自面板配置(服主可调) */
     private volatile PanelConfig config = new PanelConfig();
 
+    record RuntimeMetadata(String name, double sizeX, double sizeY, double sizeZ) {
+    }
+
     record RuntimeBody(String dim, double x, double y, double z, double linearVelocity,
-                       double mass, int players, boolean paused, double costMs) {
+                       double mass, int players, boolean paused, double costMs, RuntimeMetadata metadata) {
         static RuntimeBody positionOnly(String dim, double x, double y, double z) {
-            return new RuntimeBody(dim, x, y, z, Double.NaN, Double.NaN, -1, false, Double.NaN);
+            return new RuntimeBody(dim, x, y, z, Double.NaN, Double.NaN, -1, false, Double.NaN,
+                    new RuntimeMetadata(null, 0, 0, 0));
         }
 
         RuntimeBody withPosition(String nextDim, double nextX, double nextY, double nextZ) {
             return new RuntimeBody(nextDim, nextX, nextY, nextZ, this.linearVelocity, this.mass,
-                    this.players, this.paused, this.costMs);
+                    this.players, this.paused, this.costMs, this.metadata);
         }
 
         RuntimeBody withCost(double nextCostMs) {
             return new RuntimeBody(this.dim, this.x, this.y, this.z, this.linearVelocity, this.mass,
-                    this.players, this.paused, nextCostMs);
+                    this.players, this.paused, nextCostMs, this.metadata);
         }
 
         JsonObject toJson() {
@@ -208,6 +212,7 @@ public final class BodyIndex {
                     // 面板坐标统一为包围盒底面中心(与传送目标语义一致);包围盒异常时退回 pose 原点
                     var p = sl.logicalPose().position();
                     double ax = p.x(), ay = p.y(), az = p.z();
+                    double sizeX = 0, sizeY = 0, sizeZ = 0;
                     try {
                         var bb = sl.boundingBox();
                         double cx = (bb.minX() + bb.maxX()) / 2, cy = bb.minY(), cz = (bb.minZ() + bb.maxZ()) / 2;
@@ -216,6 +221,9 @@ public final class BodyIndex {
                             ax = cx;
                             ay = cy;
                             az = cz;
+                            sizeX = bb.maxX() - bb.minX();
+                            sizeY = bb.maxY() - bb.minY();
+                            sizeZ = bb.maxZ() - bb.minZ();
                         }
                     } catch (Throwable ignored) {
                     }
@@ -231,7 +239,8 @@ public final class BodyIndex {
                     }
                     boolean paused = com.klnon.sablepanel.panel.ops.PauseService.isPaused(sl.getUniqueId());
                     map.put(sl.getUniqueId(), new RuntimeBody(dim, r1(ax), r1(ay), r1(az),
-                            r1(sl.latestLinearVelocity.length()), mass, players, paused, Double.NaN));
+                            r1(sl.latestLinearVelocity.length()), mass, players, paused, Double.NaN,
+                            new RuntimeMetadata(sl.getName(), r1(sizeX), r1(sizeY), r1(sizeZ))));
                     n++;
                 }
                 if (n > 0) loadedPerDim.put(dim, n);
@@ -332,7 +341,13 @@ public final class BodyIndex {
     }
 
     public String thumbnailSignature(UUID uuid) {
-        return this.disk.lookup.thumbnailSignatures.get(uuid);
+        String diskSignature = this.disk.lookup.thumbnailSignatures.get(uuid);
+        if (diskSignature != null) return diskSignature;
+        RuntimeBody body = this.runtime.get(uuid);
+        if (body == null) return null;
+        RuntimeMetadata metadata = body.metadata();
+        return "f2-runtime|" + Math.round(metadata.sizeX()) + "x"
+                + Math.round(metadata.sizeY()) + "x" + Math.round(metadata.sizeZ());
     }
 
     public record PreviewSelection(DiskScanner.DiskEntry entry, boolean ambiguous) {
@@ -548,7 +563,7 @@ public final class BodyIndex {
     }
 
     private static FreshGroups freshGroups(Map<UUID, RuntimeBody> rt, Map<UUID, DiskScanner.DiskEntry> byUuid) {
-        // 运行时存在但磁盘还没有条目的体(刚生成/未保存):单独成组显示,可传送不可预览
+        // 运行时存在但磁盘还没有条目的体(刚生成/未保存):单独成组显示
         JsonArray freshArr = new JsonArray();
         List<UUID> freshUuids = new ArrayList<>();
         // fresh 组先走一份自己的账本,最后并进总账
@@ -559,10 +574,12 @@ public final class BodyIndex {
             freshTotal++;
             if (freshArr.size() >= MAX_VIEW_GROUPS || freshBudget.exhausted()) continue;
             RuntimeBody runtime = en.getValue();
+            RuntimeMetadata metadata = runtime.metadata();
             JsonObject rto = runtime.toJson();
             JsonObject m = new JsonObject();
             m.addProperty("uuid", en.getKey().toString());
             m.addProperty("entry", "");
+            if (metadata.name() != null) m.addProperty("name", metadata.name());
             m.addProperty("dim", runtime.dim());
             m.addProperty("blocks", 0);
             JsonArray pos = new JsonArray();
@@ -571,7 +588,9 @@ public final class BodyIndex {
             pos.add(runtime.z());
             m.add("pos", pos);
             JsonArray sz = new JsonArray();
-            sz.add(0); sz.add(0); sz.add(0);
+            sz.add(metadata.sizeX());
+            sz.add(metadata.sizeY());
+            sz.add(metadata.sizeZ());
             m.add("size", sz);
             m.addProperty("state", "loaded");
             m.addProperty("fresh", true);
@@ -579,7 +598,7 @@ public final class BodyIndex {
             m.add("runtime", rto);
             JsonObject go = new JsonObject();
             go.addProperty("gid", en.getKey().toString());
-            go.addProperty("name", "");
+            go.addProperty("name", metadata.name() != null ? metadata.name() : "");
             go.addProperty("members", 1);
             go.addProperty("blocks", 0);
             go.addProperty("dims", runtime.dim());
