@@ -1,6 +1,8 @@
 # SablePanel
 
-![SablePanel icon](src/main/resources/icon.png)
+<p align="center">
+  <img src="src/main/resources/icon.png" alt="SablePanel icon" width="128" height="128">
+</p>
 
 ## 中文
 
