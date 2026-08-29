@@ -84,6 +84,11 @@ test {
     useJUnitPlatform()
 }
 
+tasks.named('jar', Jar) {
+    from('LICENSE')
+    from('THIRD_PARTY_NOTICES.md')
+}
+
 var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
     var replaceProperties = [
             minecraft_version      : minecraft_version,

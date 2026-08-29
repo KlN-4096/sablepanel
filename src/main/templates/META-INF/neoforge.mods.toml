@@ -7,11 +7,15 @@ modId="${mod_id}"
 version="${mod_version}"
 displayName="${mod_name}"
 authors="KlNon"
-# 服务端提供数据；客户端安装后可在 localhost:25580 打开本地管理页
+logoFile="icon.png"
+logoBlur=false
+# 服务端提供数据;客户端安装后可在localhost:25580打开本地管理页
 displayTest="IGNORE_ALL_VERSION"
 description='''
-Web admin panel for Sable sub-levels with a TLS data endpoint and an optional localhost client gateway.
-Sable 物理体网页管理面板:全量存档索引 / 清理建议 / 传送・删除・孤儿收养(带回收站)/ 3D 体素预览 / 逐体耗时分析 / 同机多服集群。服务端提供 TLS 数据接口,客户端可在 localhost 打开管理页。
+Web management panel for Sable physical structures. It analyzes the consistency of existing structures and handles duplicate copies, distant detached remnants, dangling holding pointers, and stale tracking points; it also provides structure indexing, thumbnails, 3D previews, teleporting, force-loading, pausing, recycle-bin restoration, a TLS data endpoint, and an optional localhost client gateway.
+针对Sable物理结构的网页管理面板.它可以对已有物理结构进行一致性分析,同时可以处理重复副本,远距离断链残骸,悬空holding指针和失效追踪点;此外,面板还提供结构索引,缩略图,3D预览,传送,常驻,暂停,回收站恢复,TLS数据接口和可选的localhost客户端网关.
+Tested with Sable 2.0.3 and 2.0.4. Other Sable versions are unverified and unsupported.
+已验证Sable 2.0.3和2.0.4;其他Sable版本尚未验证,不提供兼容性保证.
 '''
 
 [[mixins]]
